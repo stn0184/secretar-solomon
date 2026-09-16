@@ -28,10 +28,25 @@ import path from "node:path";
 const ROOT = process.cwd();
 
 /**
- * Стековые проверки проекта. Дописываются на этапе 001 и далее.
- * Пример: { name: "typecheck", cmd: "pnpm typecheck" }
+ * Стековые проверки проекта: линт, типы, тесты и сборка каждой части.
+ * Имя проверки — её адрес для `--only`, поэтому короткое и латиницей.
+ *
+ * Бот идёт через `uv run --directory bot`: окружение Python 3.12 ставится
+ * из `bot/uv.lock`, отдельная активация venv не нужна. Части на Node
+ * запускаются из корня через `npm --prefix`.
  */
-const CHECKS = [];
+const CHECKS = [
+  { name: "bot:lint", cmd: "uv run --directory bot ruff check ." },
+  { name: "bot:format", cmd: "uv run --directory bot ruff format --check ." },
+  { name: "bot:types", cmd: "uv run --directory bot mypy" },
+  { name: "bot:tests", cmd: "uv run --directory bot pytest -q" },
+  { name: "miniapp:lint", cmd: "npm --prefix miniapp run lint" },
+  { name: "miniapp:types", cmd: "npm --prefix miniapp run typecheck" },
+  // Сборка Mini App — это и есть её тест: падает на ошибке типов или импорта.
+  { name: "miniapp:build", cmd: "npm --prefix miniapp run build" },
+  { name: "supabase:types", cmd: "npm --prefix supabase run typecheck" },
+  { name: "supabase:tests", cmd: "npm --prefix supabase test" },
+];
 
 /* ------------------------------------------------------------------ разбор */
 
