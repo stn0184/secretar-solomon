@@ -1,0 +1,15 @@
+{
+  "name": "solomon-supabase",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Edge Functions Соломона: проверка initData Telegram и выдача токена для правил доступа",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"functions/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "24.13.5",
+    "typescript": "6.0.3"
+  }
+}

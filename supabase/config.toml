@@ -1,0 +1,6 @@
+project_id = "solomon"
+
+# Функция выдаёт токен тому, у кого его ещё нет, поэтому встроенную проверку
+# JWT на входе выключаем: подпись Telegram она проверяет сама.
+[functions.telegram-auth]
+verify_jwt = false
