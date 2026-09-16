@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 · Карточка задачи — Соломон</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="tokens.css">
+</head>
+<body class="dc">
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 06 · Mini App</div>
+    <h1 class="board__title">Карточка задачи — с источником</h1>
+    <p class="board__note">Срок, статус и следующий шаг сверху, <b>источник — отдельным блоком</b>: то самое сообщение, из которого задача возникла. Разбор оказался неверным — видно, что именно помощник читал.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__back">‹ Задачи</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <h2 class="page-title">Отправить расчёт по складу</h2>
+            <div class="chips">
+              <span class="chip chip--urgent">Срочно</span>
+              <span class="chip chip--mine">Я обещал: Кузнецову</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="kv">
+              <div class="kv__row">
+                <span class="kv__k">Срок</span>
+                <span class="kv__v">
+                  пятница, 18 сентября
+                  <small>до конца дня</small>
+                </span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Напоминания</span>
+                <span class="kv__v">
+                  вчера 18:00 · сегодня 9:00
+                  <small>следующее — сегодня в 16:00</small>
+                </span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Следующий шаг</span>
+                <span class="kv__v">
+                  Собрать цифры за август
+                  <small>отдельная задача, до 17:00</small>
+                </span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Статус</span>
+                <span class="kv__v">
+                  Активна
+                  <small>создана 16 сентября</small>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Откуда взялась</span></div>
+            <div class="card">
+              <div class="source">
+                <div class="source__top">
+                  <span class="chip">Голосовое, 0:11</span>
+                  <span>16 сентября, 10:02</span>
+                </div>
+                <div class="source__box">
+                  <div class="source__text">«Слушай, в пятницу надо отправить Кузнецову расчёт по складу. Не дай забыть, там ещё цифры за август собрать.»</div>
+                  <span class="link">Открыть в переписке</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Что происходило</span></div>
+            <div class="card">
+              <div class="log">
+                <div class="log__item"><span class="log__time">16 сент, 10:02</span><span class="log__what">Понял поручение, записал задачу и напоминание</span></div>
+                <div class="log__item"><span class="log__time">17 сент, 18:00</span><span class="log__what">Напомнил за день до срока</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mainbtn">
+          <div class="actions">
+            <span class="btn">Готово</span>
+            <span class="btn btn--ghost">Перенести</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+</body>
+</html>

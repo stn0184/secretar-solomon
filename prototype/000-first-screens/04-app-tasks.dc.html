@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04 · Активные задачи — Соломон</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="tokens.css">
+</head>
+<body class="dc">
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 04 · Mini App</div>
+    <h1 class="board__title">Список активных задач — штатное состояние</h1>
+    <p class="board__note">Сгруппировано по сроку, а не по проектам. Приоритет — полоской слева и меткой, и только там, где он выше обычного. <b>Чьё обещание</b> — отдельной меткой: своё синим, чужое — обводкой.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <h2 class="page-title">Задачи</h2>
+            <p class="page-sub">6 активных · две на сегодня</p>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Сегодня</span><em>пт, 18 сентября</em></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark row__mark--urgent"></span>
+                <span class="row__body">
+                  <span class="row__title">Отправить расчёт по складу</span>
+                  <span class="row__meta">
+                    <span class="row__when--now">до конца дня</span>
+                    <span class="chip chip--urgent">Срочно</span>
+                    <span class="chip chip--mine">Я обещал: Кузнецову</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+              <div class="row">
+                <span class="row__mark row__mark--important"></span>
+                <span class="row__body">
+                  <span class="row__title">Собрать цифры по складу за август</span>
+                  <span class="row__meta">
+                    <span>до 17:00</span>
+                    <span class="chip chip--important">Важно</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Дальше</span></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark row__mark--important"></span>
+                <span class="row__body">
+                  <span class="row__title">Перезвонить Сергею</span>
+                  <span class="row__meta">
+                    <span>вт, 22 сентября, 10:00</span>
+                    <span class="chip chip--mine">Я обещал: Сергею</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Марина пришлёт договор на подпись</span>
+                  <span class="row__meta">
+                    <span>ср, 23 сентября</span>
+                    <span class="chip chip--theirs">Обещали мне: Марина</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Продлить ОСАГО</span>
+                  <span class="row__meta">
+                    <span>до 3 октября</span>
+                    <span class="chip">Каждый год</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Без срока</span></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Купить лампочку в коридор</span>
+                  <span class="row__meta"><span>записано 14 сентября</span></span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <span class="tab tab--on">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 5.5h11M8.5 11h11M8.5 16.5h7.5"/><path d="M2.5 5.2 3.9 6.6 6.4 4"/><path d="M2.5 10.7 3.9 12.1 6.4 9.5"/></svg>
+            <span>Задачи</span>
+          </span>
+          <span class="tab">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="3.4" width="15.6" height="15.2" rx="3.2"/><path d="M7 8.4h8M7 12.4h5"/></svg>
+            <span>Память</span>
+          </span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+</body>
+</html>

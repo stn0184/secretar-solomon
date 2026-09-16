@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>07 · Память о пользователе — Соломон</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="tokens.css">
+</head>
+<body class="dc">
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 07 · Mini App</div>
+    <h1 class="board__title">Память: что подтверждено, а что помощник предположил</h1>
+    <p class="board__note">Факты лежат в карточке и подписаны «с ваших слов». <b>Предположение вынесено из карточки</b> — пунктирная рамка, другой цвет, сказано, откуда взялось, и рядом «верно / не так». Фактом оно не станет, пока человек не ответит.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <h2 class="page-title">Память</h2>
+            <p class="page-sub">Что он знает о вас и что предположил сам</p>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Семья</span></div>
+            <div class="card">
+              <div class="fact">
+                <span class="fact__body">
+                  <span class="fact__v">Жена Марина, дочь Аня — 7 лет</span>
+                  <span class="fact__src">С ваших слов · 12 сентября</span>
+                </span>
+                <span class="fact__dots">⋯</span>
+              </div>
+            </div>
+            <div class="guess">
+              <span class="guess__v">Аню по утрам в школу возите вы</span>
+              <span class="guess__why">Три поручения про школу до 8:30 за две недели.</span>
+              <span class="guess__act">
+                <span class="chip chip--guess">Предположение</span>
+                <span>
+                  <span class="btn btn--sm">Верно</span>
+                  <span class="btn btn--sm btn--quiet">Не так</span>
+                </span>
+              </span>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Дом и машина</span></div>
+            <div class="card">
+              <div class="fact">
+                <span class="fact__body">
+                  <span class="fact__v">Казань, улица Дубравная, 47</span>
+                  <span class="fact__src">С ваших слов · 2 сентября</span>
+                </span>
+                <span class="fact__dots">⋯</span>
+              </div>
+              <div class="fact">
+                <span class="fact__body">
+                  <span class="fact__v">Toyota Camry, 2019 год</span>
+                  <span class="fact__src">С ваших слов · 2 сентября</span>
+                </span>
+                <span class="fact__dots">⋯</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Работа и время</span></div>
+            <div class="card">
+              <div class="fact">
+                <span class="fact__body">
+                  <span class="fact__v">Работа до 18:00, пятница — до 17:00</span>
+                  <span class="fact__src">С ваших слов · 5 сентября</span>
+                </span>
+                <span class="fact__dots">⋯</span>
+              </div>
+            </div>
+            <div class="guess">
+              <span class="guess__v">«Вечером» у вас — это около 19:00</span>
+              <span class="guess__why">По времени, когда вы отвечаете на напоминания.</span>
+              <span class="guess__act">
+                <span class="chip chip--guess">Предположение</span>
+                <span>
+                  <span class="btn btn--sm">Верно</span>
+                  <span class="btn btn--sm btn--quiet">Не так</span>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <span class="tab">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 5.5h11M8.5 11h11M8.5 16.5h7.5"/><path d="M2.5 5.2 3.9 6.6 6.4 4"/><path d="M2.5 10.7 3.9 12.1 6.4 9.5"/></svg>
+            <span>Задачи</span>
+          </span>
+          <span class="tab tab--on">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="3.4" width="15.6" height="15.2" rx="3.2"/><path d="M7 8.4h8M7 12.4h5"/></svg>
+            <span>Память</span>
+          </span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+</body>
+</html>

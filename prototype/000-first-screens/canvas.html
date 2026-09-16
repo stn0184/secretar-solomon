@@ -1,0 +1,1463 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Соломон — первые экраны</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Соломон — визуальный язык прототипа.
+   Один источник токенов для всех артбордов: цвет только через переменные.
+   Продукт живёт внутри Telegram, поэтому токены названы по ролям —
+   на реализации они подставляются из темы Telegram (--tg-theme-*). */
+
+/* ─── 1. Токены: светлая тема ─────────────────────────────────────── */
+:root {
+  color-scheme: light dark;
+
+  /* полотно прототипа — это не продукт, это бумага под ним */
+  --ground: #e6eaf0;
+  --ground-line: #d5dbe4;
+  --chrome-ink: #3d4553;
+  --chrome-ink-2: #79828f;
+  --chrome-line: #c9d1dc;
+  --chrome-card: #fbfcfe;
+
+  /* поверхности приложения (=> --tg-theme-bg / secondary-bg) */
+  --app-bg: #eff0f4;
+  --surface: #ffffff;
+  --surface-2: #f5f6f9;
+  --line: #e3e5ea;
+  --line-strong: #d3d6dd;
+
+  /* текст */
+  --ink: #0f1116;
+  --ink-2: #6b7280;
+  --ink-3: #a0a6b0;
+
+  /* действие (=> --tg-theme-button-color / link-color) */
+  --accent: #3390ec;
+  --accent-ink: #ffffff;
+  --accent-weak: #e7f1fc;
+
+  /* смысловые цвета: состояние задачи, а не украшение */
+  --urgent: #ce4238;
+  --urgent-weak: #fceceb;
+  --important: #b1741a;
+  --important-weak: #faf0dd;
+  --ok: #2f9a58;
+  --ok-weak: #e7f4ec;
+
+  /* предположение помощника — отдельный смысл, не статус и не ошибка */
+  --guess: #6f57ac;
+  --guess-weak: #f1edfa;
+  --guess-line: #c3b5e3;
+
+  /* переписка в Telegram: контейнер, который мы не проектируем */
+  --chat-bg: linear-gradient(180deg, #e6edf4 0%, #dde6ef 100%);
+  --chat-day: rgba(15, 23, 42, .14);
+  --bubble-in: #ffffff;
+  --bubble-out: #e4fbd0;
+  --bubble-ink: #0f1116;
+  --bubble-meta: #8b9099;
+  --bubble-meta-out: #5aa14e;
+  --bubble-shadow: 0 1px 1px rgba(16, 24, 40, .12);
+  --transcript-out: rgba(255, 255, 255, .6);
+
+  /* типографика: продукт — системным шрифтом Telegram, подписи — моно */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-chrome: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --t-title: 600 22px/28px var(--font-ui);
+  --t-body: 400 16px/21px var(--font-ui);
+  --t-chat: 400 15px/20px var(--font-ui);
+  --t-sub: 400 13px/17px var(--font-ui);
+  --t-cap: 500 11px/14px var(--font-ui);
+
+  /* шаг сетки: 4 */
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px;
+  --r-sheet: 16px;
+  --r-card: 14px;
+  --r-btn: 12px;
+  --r-bubble: 16px;
+  --r-pill: 999px;
+}
+
+/* ─── 2. Токены: тёмная тема (Telegram Night) ─────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0d1117;
+    --ground-line: #191f28;
+    --chrome-ink: #9fabba;
+    --chrome-ink-2: #6b7786;
+    --chrome-line: #222a35;
+    --chrome-card: #131a23;
+
+    --app-bg: #17212b;
+    --surface: #232e3c;
+    --surface-2: #1c2734;
+    --line: #2c3a4a;
+    --line-strong: #35465a;
+
+    --ink: #ffffff;
+    --ink-2: #93a6b8;
+    --ink-3: #6d7f8f;
+
+    --accent: #6ab2f2;
+    --accent-ink: #0d1117;
+    --accent-weak: #1d3448;
+
+    --urgent: #ee7a72;
+    --urgent-weak: #3a2321;
+    --important: #dfa94f;
+    --important-weak: #362c1b;
+    --ok: #6cc38a;
+    --ok-weak: #1f3327;
+
+    --guess: #b49ae8;
+    --guess-weak: #2a2540;
+    --guess-line: #4b4070;
+
+    --chat-bg: linear-gradient(180deg, #121c26 0%, #0e1621 100%);
+    --chat-day: rgba(255, 255, 255, .12);
+    --bubble-in: #182533;
+    --bubble-out: #2b5278;
+    --bubble-ink: #ffffff;
+    --bubble-meta: #7a8b9c;
+    --bubble-meta-out: #a4c7e8;
+    --bubble-shadow: 0 1px 1px rgba(0, 0, 0, .35);
+    --transcript-out: rgba(0, 0, 0, .22);
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground: #0d1117;
+  --ground-line: #191f28;
+  --chrome-ink: #9fabba;
+  --chrome-ink-2: #6b7786;
+  --chrome-line: #222a35;
+  --chrome-card: #131a23;
+
+  --app-bg: #17212b;
+  --surface: #232e3c;
+  --surface-2: #1c2734;
+  --line: #2c3a4a;
+  --line-strong: #35465a;
+
+  --ink: #ffffff;
+  --ink-2: #93a6b8;
+  --ink-3: #6d7f8f;
+
+  --accent: #6ab2f2;
+  --accent-ink: #0d1117;
+  --accent-weak: #1d3448;
+
+  --urgent: #ee7a72;
+  --urgent-weak: #3a2321;
+  --important: #dfa94f;
+  --important-weak: #362c1b;
+  --ok: #6cc38a;
+  --ok-weak: #1f3327;
+
+  --guess: #b49ae8;
+  --guess-weak: #2a2540;
+  --guess-line: #4b4070;
+
+  --chat-bg: linear-gradient(180deg, #121c26 0%, #0e1621 100%);
+  --chat-day: rgba(255, 255, 255, .12);
+  --bubble-in: #182533;
+  --bubble-out: #2b5278;
+  --bubble-ink: #ffffff;
+  --bubble-meta: #7a8b9c;
+  --bubble-meta-out: #a4c7e8;
+  --bubble-shadow: 0 1px 1px rgba(0, 0, 0, .35);
+  --transcript-out: rgba(0, 0, 0, .22);
+}
+
+/* ─── 3. Полотно и подпись артборда (чертёж, а не продукт) ────────── */
+* { box-sizing: border-box; }
+
+body.dc {
+  margin: 0;
+  padding: 32px 24px;
+  background-color: var(--ground);
+  background-image:
+    linear-gradient(var(--ground-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--ground-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  color: var(--chrome-ink);
+  font-family: var(--font-chrome);
+  display: flex;
+  justify-content: center;
+}
+
+.board { display: flex; flex-direction: column; gap: var(--s3); }
+.board__head { display: flex; flex-direction: column; gap: 6px; width: 390px; max-width: 100%; }
+.board__no {
+  font: 500 11px/1 var(--font-chrome);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--chrome-ink-2);
+}
+.board__title { margin: 0; font: 600 15px/20px var(--font-chrome); color: var(--chrome-ink); }
+.board__note { margin: 0; font: 400 12px/17px var(--font-chrome); color: var(--chrome-ink-2); }
+.board__note b { color: var(--chrome-ink); font-weight: 600; }
+
+/* ─── 4. Телефон ──────────────────────────────────────────────────── */
+.device {
+  width: 390px;
+  height: 844px;
+  flex: none;
+  border-radius: 38px;
+  padding: 8px;
+  background: var(--chrome-card);
+  border: 1px solid var(--chrome-line);
+  box-shadow: 0 18px 40px -22px rgba(15, 23, 42, .5);
+}
+.screen {
+  width: 100%;
+  height: 100%;
+  border-radius: 30px;
+  overflow: hidden;
+  background: var(--app-bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  display: flex;
+  flex-direction: column;
+}
+
+.status {
+  flex: none;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px 0 30px;
+  font: 600 14px/1 var(--font-ui);
+  color: var(--ink);
+}
+.status__right { display: flex; align-items: center; gap: 5px; }
+.bars { display: flex; align-items: flex-end; gap: 2px; height: 11px; }
+.bars i { display: block; width: 3px; border-radius: 1px; background: currentColor; }
+.bars i:nth-child(1) { height: 4px; }
+.bars i:nth-child(2) { height: 6px; }
+.bars i:nth-child(3) { height: 9px; }
+.bars i:nth-child(4) { height: 11px; }
+.batt {
+  display: block;
+  width: 24px; height: 12px;
+  border-radius: 3px;
+  border: 1.2px solid currentColor;
+  padding: 1.5px;
+  opacity: .9;
+}
+.batt i { display: block; height: 100%; width: 72%; border-radius: 1px; background: currentColor; }
+
+/* ─── 5. Переписка с ботом ────────────────────────────────────────── */
+.tg-head {
+  flex: none;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: 0 var(--s4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.tg-head__back { color: var(--accent); font: 300 26px/1 var(--font-ui); margin: -2px -4px 0 0; }
+.ava {
+  flex: none;
+  width: 36px; height: 36px;
+  border-radius: var(--r-pill);
+  background: linear-gradient(145deg, var(--accent), var(--guess));
+  color: #ffffff;
+  font: 600 16px/36px var(--font-ui);
+  text-align: center;
+}
+.tg-head__name { font: 600 16px/20px var(--font-ui); color: var(--ink); }
+.tg-head__sub { font: var(--t-sub); color: var(--ink-3); }
+.tg-head__dots { margin-left: auto; color: var(--ink-3); font: 400 20px/1 var(--font-ui); }
+
+.chat {
+  flex: 1;
+  min-height: 0;
+  background: var(--chat-bg);
+  padding: var(--s3) var(--s3) var(--s2);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 6px;
+  overflow: hidden;
+}
+.chat__day {
+  align-self: center;
+  margin: var(--s1) 0 var(--s2);
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  background: var(--chat-day);
+  color: var(--ink);
+  font: var(--t-cap);
+}
+
+.msg { display: flex; flex-direction: column; max-width: 84%; }
+.msg--in { align-self: flex-start; align-items: flex-start; }
+.msg--out { align-self: flex-end; align-items: flex-end; }
+.msg--wide { max-width: 92%; }
+
+.bubble {
+  background: var(--bubble-in);
+  color: var(--bubble-ink);
+  border-radius: var(--r-bubble);
+  border-bottom-left-radius: 5px;
+  padding: 7px 10px 6px;
+  font: var(--t-chat);
+  box-shadow: var(--bubble-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.msg--out .bubble {
+  background: var(--bubble-out);
+  border-bottom-left-radius: var(--r-bubble);
+  border-bottom-right-radius: 5px;
+}
+.bubble p { margin: 0; }
+.bubble b { font-weight: 600; }
+
+.bubble__meta-line {
+  font: var(--t-sub);
+  color: var(--ink-2);
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+}
+.bubble__meta-line span { white-space: nowrap; }
+.bubble__meta-line b { color: var(--ink); font-weight: 600; }
+
+.stamp {
+  align-self: flex-end;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: -1px;
+  font: 400 11px/12px var(--font-ui);
+  color: var(--bubble-meta);
+}
+.msg--out .stamp { color: var(--bubble-meta-out); }
+
+.voice { display: flex; align-items: center; gap: 10px; min-width: 196px; }
+.play {
+  flex: none;
+  width: 34px; height: 34px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--accent-ink);
+  display: flex; align-items: center; justify-content: center;
+  font: 400 11px/1 var(--font-ui);
+}
+.voice__body { flex: 1; display: flex; flex-direction: column; gap: 5px; }
+.wave { display: flex; align-items: center; gap: 2px; height: 18px; }
+.wave i { display: block; width: 2px; height: 8px; border-radius: 1px; background: var(--accent); opacity: .45; }
+.wave i:nth-child(3n) { height: 13px; }
+.wave i:nth-child(4n) { height: 5px; }
+.wave i:nth-child(5n) { height: 17px; }
+.wave i:nth-child(7n) { height: 10px; }
+.wave i.on { opacity: 1; }
+.voice__time { font: 400 11px/12px var(--font-ui); color: var(--bubble-meta); }
+.msg--out .voice__time { color: var(--bubble-meta-out); }
+
+.transcript {
+  background: var(--surface-2);
+  border-radius: 10px;
+  padding: 7px 9px;
+  font: var(--t-chat);
+  color: var(--ink);
+}
+.transcript small {
+  display: block;
+  margin-bottom: 3px;
+  font: var(--t-cap);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.msg--out .transcript { background: var(--transcript-out); }
+
+.quote {
+  border-left: 2px solid var(--accent);
+  padding: 2px 0 2px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.quote__from { font: 600 13px/16px var(--font-ui); color: var(--accent); }
+.quote__text { font: var(--t-sub); color: var(--ink-2); }
+
+.kbd { display: grid; gap: 4px; width: 100%; margin-top: 2px; }
+.kbd + .kbd { margin-top: 4px; }
+.kbd--2 { grid-template-columns: 1fr 1fr; }
+.kbd--3 { grid-template-columns: 1fr 1fr 1fr; }
+.kbd__btn {
+  background: var(--bubble-in);
+  box-shadow: var(--bubble-shadow);
+  border-radius: 12px;
+  min-height: 38px;
+  padding: 6px 8px;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center;
+  font: 500 14px/17px var(--font-ui);
+  color: var(--accent);
+}
+
+.tg-input {
+  flex: none;
+  min-height: 52px;
+  padding: var(--s2) var(--s4) var(--s3);
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  color: var(--ink-3);
+  font: var(--t-chat);
+}
+.tg-input__field { flex: 1; }
+.tg-input__ico { display: block; color: var(--ink-3); }
+.tg-input__ico svg { display: block; width: 22px; height: 22px; }
+
+/* ─── 6. Mini App ─────────────────────────────────────────────────── */
+.sheet {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-bg);
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
+  overflow: hidden;
+}
+.grab { flex: none; padding: 7px 0 3px; display: flex; justify-content: center; }
+.grab i { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
+
+.app-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4) var(--s3);
+}
+.app-head__back { color: var(--accent); font: 400 15px/20px var(--font-ui); }
+.app-head__title { font: 600 16px/20px var(--font-ui); color: var(--ink); }
+.app-head__tools { margin-left: auto; display: flex; align-items: center; gap: var(--s3); color: var(--ink-3); font: 400 16px/1 var(--font-ui); }
+
+.app-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 var(--s4) var(--s2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+.app-body > * { flex: 0 0 auto; }
+.app-body--center { justify-content: center; }
+
+.page-title { margin: 0; font: var(--t-title); letter-spacing: -.01em; color: var(--ink); }
+.page-sub { margin: 4px 0 0; font: var(--t-sub); color: var(--ink-2); }
+
+.sec { display: flex; flex-direction: column; gap: var(--s2); }
+.sec__h {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 0 var(--s1);
+  font: var(--t-cap);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.sec__h em { font: var(--t-sub); font-style: normal; letter-spacing: 0; text-transform: none; color: var(--ink-3); }
+
+.card { background: var(--surface); border-radius: var(--r-card); overflow: hidden; }
+
+.row { display: flex; gap: var(--s3); align-items: flex-start; padding: var(--s3) var(--s4) var(--s3) var(--s3); }
+.row + .row { border-top: 1px solid var(--line); }
+.row__mark { flex: none; width: 4px; align-self: stretch; border-radius: 2px; background: transparent; }
+.row__mark--urgent { background: var(--urgent); }
+.row__mark--important { background: var(--important); }
+.row__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.row__title { font: var(--t-body); letter-spacing: -.005em; color: var(--ink); }
+.row__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font: var(--t-sub); color: var(--ink-2); }
+.row__when--now { color: var(--urgent); font-weight: 500; }
+.row__chev { flex: none; color: var(--ink-3); font: 400 17px/21px var(--font-ui); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s2); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px;
+  border-radius: 7px;
+  font: var(--t-cap);
+  white-space: nowrap;
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+.chip--urgent { background: var(--urgent-weak); color: var(--urgent); }
+.chip--important { background: var(--important-weak); color: var(--important); }
+.chip--ok { background: var(--ok-weak); color: var(--ok); }
+.chip--mine { background: var(--accent-weak); color: var(--accent); }
+.chip--theirs { background: var(--surface-2); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.chip--guess { background: var(--guess-weak); color: var(--guess); }
+.chip__dir { font-weight: 700; }
+
+.kv { display: flex; flex-direction: column; }
+.kv__row { display: flex; gap: var(--s3); align-items: flex-start; padding: 10px var(--s4); }
+.kv__row + .kv__row { border-top: 1px solid var(--line); }
+.kv__k { flex: none; width: 92px; padding-top: 2px; font: var(--t-sub); color: var(--ink-2); }
+.kv__v { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font: 400 15px/20px var(--font-ui); color: var(--ink); }
+.kv__v small { display: block; width: 100%; font: var(--t-sub); color: var(--ink-3); }
+.kv__act { flex: none; margin-left: auto; font: 400 14px/20px var(--font-ui); color: var(--accent); }
+
+.source { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--s4) var(--s4); }
+.source__top { display: flex; align-items: center; gap: var(--s2); font: var(--t-sub); color: var(--ink-2); }
+.source__box {
+  background: var(--surface-2);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+  padding: 9px 11px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.source__text { font: 400 14px/19px var(--font-ui); color: var(--ink); }
+.link { color: var(--accent); font: 400 14px/18px var(--font-ui); }
+
+.log { display: flex; flex-direction: column; gap: 9px; padding: var(--s3) var(--s4) var(--s4); }
+.log__item { display: flex; gap: var(--s3); font: var(--t-sub); }
+.log__time { flex: none; width: 96px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.log__what { flex: 1; color: var(--ink-2); }
+
+.fact { display: flex; gap: var(--s3); align-items: flex-start; padding: 10px var(--s4); }
+.fact + .fact { border-top: 1px solid var(--line); }
+.fact__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.fact__v { font: 400 15px/20px var(--font-ui); color: var(--ink); }
+.fact__src { font: var(--t-sub); color: var(--ink-3); }
+.fact__dots { flex: none; color: var(--ink-3); font: 400 17px/20px var(--font-ui); }
+
+.guess {
+  margin-top: var(--s2);
+  border: 1px dashed var(--guess-line);
+  background: var(--guess-weak);
+  border-radius: var(--r-card);
+  padding: 9px var(--s3) 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.guess__v { font: 400 15px/20px var(--font-ui); color: var(--ink); }
+.guess__why { font: var(--t-sub); color: var(--ink-2); }
+.guess__act { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
+.guess__act .btn + .btn { margin-left: var(--s2); }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px;
+  padding: 0 var(--s5);
+  border-radius: var(--r-btn);
+  text-align: center;
+  font: 600 15px/20px var(--font-ui);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.btn--wide { width: 100%; }
+.btn--ghost { background: var(--surface); color: var(--accent); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.btn--sm { min-height: 30px; padding: 0 var(--s3); border-radius: 9px; font: 500 13px/16px var(--font-ui); }
+.btn--quiet { background: var(--surface); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.actions { display: flex; gap: var(--s2); }
+.actions .btn { flex: 1; }
+
+.empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: var(--s3); padding: 0 var(--s2); }
+.empty__mark {
+  width: 64px; height: 64px;
+  margin-bottom: var(--s1);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+  display: flex; align-items: center; justify-content: center;
+}
+.empty__mark i { display: block; width: 26px; height: 26px; border-radius: var(--r-pill); border: 2px dashed var(--ink-3); }
+.empty__h { margin: 0; font: 600 19px/24px var(--font-ui); letter-spacing: -.01em; color: var(--ink); }
+.empty__p { margin: 0; max-width: 292px; font: 400 15px/21px var(--font-ui); color: var(--ink-2); }
+.hints { display: flex; flex-direction: column; gap: 6px; width: 100%; margin-top: var(--s1); }
+.hint {
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 9px var(--s3);
+  text-align: left;
+  font: 400 14px/19px var(--font-ui);
+  color: var(--ink-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.hint b { font-weight: 400; color: var(--ink); }
+.empty__foot { margin: var(--s4) 0 0; max-width: 300px; font: var(--t-sub); color: var(--ink-3); }
+
+.tabs {
+  flex: none;
+  display: flex;
+  padding: 6px var(--s4) 22px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+.tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; color: var(--ink-3); }
+.tab span { font: var(--t-cap); }
+.tab svg { display: block; width: 22px; height: 22px; }
+.tab--on { color: var(--accent); }
+
+.mainbtn { flex: none; padding: var(--s3) var(--s4) 22px; background: var(--app-bg); }
+
+
+/* ─── полотно ─────────────────────────────────────────────────────── */
+body {
+  margin: 0;
+  background-color: var(--ground);
+  background-image:
+    linear-gradient(var(--ground-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--ground-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  color: var(--chrome-ink);
+  font-family: var(--font-chrome);
+}
+
+.canvas-head {
+  padding-block: 28px 20px;
+  padding-inline: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 860px;
+}
+.canvas-head h1 {
+  margin: 0;
+  font: 600 21px/27px var(--font-chrome);
+  letter-spacing: -.01em;
+  color: var(--chrome-ink);
+  text-wrap: balance;
+}
+.canvas-head p { margin: 0; font: 400 13px/19px var(--font-chrome); color: var(--chrome-ink-2); max-width: 62ch; }
+.canvas-head p b { color: var(--chrome-ink); font-weight: 600; }
+
+.canvas-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+.warn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: var(--important-weak);
+  color: var(--important);
+  font: 500 11px/15px var(--font-chrome);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.seg { display: flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--chrome-card); border: 1px solid var(--chrome-line); }
+.seg button {
+  appearance: none; border: 0; cursor: pointer;
+  padding: 5px 11px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--chrome-ink-2);
+  font: 500 11px/15px var(--font-chrome);
+}
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.flow {
+  display: flex; align-items: center; gap: 8px;
+  font: 400 11px/15px var(--font-chrome);
+  color: var(--chrome-ink-2);
+}
+.flow i { display: block; width: 26px; height: 1px; background: var(--chrome-line); }
+
+.canvas-scroll { overflow-x: auto; padding-block: 8px 56px; }
+.canvas-row { display: flex; align-items: flex-start; gap: 40px; padding-inline: 24px; width: max-content; }
+.canvas-row .board__head { min-height: 104px; }
+
+@media (max-width: 460px) {
+  .canvas-head { padding-inline: 16px; }
+  .canvas-row { gap: 28px; padding-inline: 16px; }
+}
+</style>
+</head>
+<body>
+
+<header class="canvas-head">
+  <h1>Соломон — первые экраны</h1>
+  <p>Прототип личного ИИ-секретаря в Telegram: три экрана переписки с ботом и пять экранов Mini App. Слева направо — путь человека: <b>поручение → непонятое поручение → напоминание → списки и память</b>. Прототип не работает: кнопки не нажимаются, данных из базы нет.</p>
+  <div class="canvas-bar">
+    <span class="warn">Выдуманные данные</span>
+    <span class="flow">Тема<i></i></span>
+    <span class="seg" role="group" aria-label="Тема оформления">
+      <button type="button" data-theme-set="auto" aria-pressed="true">Как в системе</button>
+      <button type="button" data-theme-set="light" aria-pressed="false">Светлая</button>
+      <button type="button" data-theme-set="dark" aria-pressed="false">Тёмная</button>
+    </span>
+  </div>
+  <p>Mini App живёт внутри Telegram, поэтому цвета взяты из его темы: на реализации токены подставляются из <code>--tg-theme-*</code>. Переключатель показывает, как экраны выглядят в светлой и тёмной теме Telegram.</p>
+</header>
+
+<div class="canvas-scroll">
+  <div class="canvas-row">
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 01 · бот</div>
+    <h1 class="board__title">Приём поручения и подтверждение</h1>
+    <p class="board__note">Главный момент продукта. Помощник <b>пересказывает своими словами</b>, что понял, и называет, когда напомнит. Подтверждать нажатием не нужно — кнопка есть только у правки.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>10:02</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="tg-head">
+        <span class="tg-head__back">‹</span>
+        <span class="ava">С</span>
+        <span>
+          <span class="tg-head__name">Соломон</span><br>
+          <span class="tg-head__sub">бот</span>
+        </span>
+        <span class="tg-head__dots">⋮</span>
+      </div>
+
+      <div class="chat">
+        <div class="chat__day">Сегодня</div>
+
+        <div class="msg msg--out">
+          <div class="bubble">
+            <p>Я Сергею обещал перезвонить во вторник</p>
+          </div>
+          <div class="stamp">9:41 <span>✓✓</span></div>
+        </div>
+
+        <div class="msg msg--in msg--wide">
+          <div class="bubble">
+            <p>Записал: <b>перезвонить Сергею</b> во вторник. Это ваше обещание — отметил как обещанное вами.</p>
+            <div class="bubble__meta-line">
+              <span>Срок: <b>вт, 22 сентября</b></span>
+              <span>Напомню: <b>вт, 10:00</b></span>
+            </div>
+          </div>
+          <div class="kbd kbd--2">
+            <span class="kbd__btn">Не так</span>
+            <span class="kbd__btn">Открыть задачу</span>
+          </div>
+          <div class="stamp">9:41</div>
+        </div>
+
+        <div class="msg msg--out msg--wide">
+          <div class="bubble">
+            <div class="voice">
+              <span class="play">▶</span>
+              <span class="voice__body">
+                <span class="wave"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                <span class="voice__time">0:11</span>
+              </span>
+            </div>
+            <div class="transcript">
+              <small>Расшифровка</small>
+              Слушай, в пятницу надо отправить Кузнецову расчёт по складу. Не дай забыть, там ещё цифры за август собрать.
+            </div>
+          </div>
+          <div class="stamp">10:02 <span>✓✓</span></div>
+        </div>
+
+        <div class="msg msg--in msg--wide">
+          <div class="bubble">
+            <p>Записал: <b>отправить Кузнецову расчёт по складу</b> — в пятницу.</p>
+            <p>Напомню в четверг вечером, чтобы остался вечер на цифры за август.</p>
+            <div class="bubble__meta-line">
+              <span>Срок: <b>пт, 18 сентября</b></span>
+              <span>Напомню: <b>чт, 18:00</b></span>
+            </div>
+          </div>
+          <div class="kbd kbd--2">
+            <span class="kbd__btn">Не так</span>
+            <span class="kbd__btn">Открыть задачу</span>
+          </div>
+          <div class="stamp">10:02</div>
+        </div>
+      </div>
+
+      <div class="tg-input">
+        <span class="tg-input__ico"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.8 6.2 8.2 12.8a2.2 2.2 0 0 0 3.1 3.1l6.6-6.6a3.9 3.9 0 0 0-5.5-5.5L5.8 10.4a5.6 5.6 0 0 0 7.9 7.9l4.6-4.6"/></svg></span>
+        <span class="tg-input__field">Сообщение</span>
+        <span class="tg-input__ico"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2.8" width="6" height="10.4" rx="3"/><path d="M5.5 10.6a5.5 5.5 0 0 0 11 0"/><path d="M11 16.1v3"/></svg></span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 02 · бот</div>
+    <h1 class="board__title">Помощник не понял</h1>
+    <p class="board__note">Говорит прямо, показывает исходное сообщение целиком и задаёт <b>один</b> вопрос. Варианты ответа — кнопками, чтобы не переписываться.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>14:26</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="tg-head">
+        <span class="tg-head__back">‹</span>
+        <span class="ava">С</span>
+        <span>
+          <span class="tg-head__name">Соломон</span><br>
+          <span class="tg-head__sub">бот</span>
+        </span>
+        <span class="tg-head__dots">⋮</span>
+      </div>
+
+      <div class="chat">
+        <div class="chat__day">Сегодня</div>
+
+        <div class="msg msg--out msg--wide">
+          <div class="bubble">
+            <div class="voice">
+              <span class="play">▶</span>
+              <span class="voice__body">
+                <span class="wave"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                <span class="voice__time">0:07</span>
+              </span>
+            </div>
+            <div class="transcript">
+              <small>Расшифровка</small>
+              Так, ну и с Мариной насчёт вторника... в общем, до среды надо как-то решить.
+            </div>
+          </div>
+          <div class="stamp">14:26 <span>✓✓</span></div>
+        </div>
+
+        <div class="msg msg--in msg--wide">
+          <div class="bubble">
+            <p>Не понял, что нужно сделать. Сообщение сохранил целиком — заново диктовать не нужно.</p>
+            <div class="quote">
+              <span class="quote__from">Ваше голосовое, 0:07 · сегодня, 14:26</span>
+              <span class="quote__text">«Так, ну и с Мариной насчёт вторника... в общем, до среды надо как-то решить.»</span>
+            </div>
+            <p>Что нужно сделать с Мариной?</p>
+          </div>
+          <div class="kbd kbd--3">
+            <span class="kbd__btn">Позвонить</span>
+            <span class="kbd__btn">Написать</span>
+            <span class="kbd__btn">Встретиться</span>
+          </div>
+          <div class="kbd">
+            <span class="kbd__btn">Другое — расскажу словами</span>
+          </div>
+          <div class="kbd">
+            <span class="kbd__btn">Это не поручение</span>
+          </div>
+          <div class="stamp">14:26</div>
+        </div>
+      </div>
+
+      <div class="tg-input">
+        <span class="tg-input__ico"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.8 6.2 8.2 12.8a2.2 2.2 0 0 0 3.1 3.1l6.6-6.6a3.9 3.9 0 0 0-5.5-5.5L5.8 10.4a5.6 5.6 0 0 0 7.9 7.9l4.6-4.6"/></svg></span>
+        <span class="tg-input__field">Сообщение</span>
+        <span class="tg-input__ico"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2.8" width="6" height="10.4" rx="3"/><path d="M5.5 10.6a5.5 5.5 0 0 0 11 0"/><path d="M11 16.1v3"/></svg></span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 03 · бот</div>
+    <h1 class="board__title">Напоминание в срок и отметка о выполнении</h1>
+    <p class="board__note">Развилка «как отмечают выполнение» решена так: <b>кнопка под напоминанием — основной путь</b>, ответ словом («отправил») понимается и подтверждается, и сразу видно, как отменить, если понят неверно. Третий путь — отметка в Mini App, экран 06.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>12:40</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="tg-head">
+        <span class="tg-head__back">‹</span>
+        <span class="ava">С</span>
+        <span>
+          <span class="tg-head__name">Соломон</span><br>
+          <span class="tg-head__sub">бот</span>
+        </span>
+        <span class="tg-head__dots">⋮</span>
+      </div>
+
+      <div class="chat">
+        <div class="chat__day">Вчера</div>
+
+        <div class="msg msg--in msg--wide">
+          <div class="bubble">
+            <p>Завтра — <b>расчёт по складу для Кузнецова</b>. Напоминаю заранее: вы просили вечер на цифры за август.</p>
+            <div class="bubble__meta-line">
+              <span>Срок: <b>завтра, до конца дня</b></span>
+            </div>
+          </div>
+          <div class="kbd kbd--2">
+            <span class="kbd__btn">Готово</span>
+            <span class="kbd__btn">Напомнить утром</span>
+          </div>
+          <div class="stamp">18:00</div>
+        </div>
+
+        <div class="chat__day">Сегодня</div>
+
+        <div class="msg msg--in msg--wide">
+          <div class="bubble">
+            <p>Сегодня: <b>отправить Кузнецову расчёт по складу</b>.</p>
+            <div class="bubble__meta-line">
+              <span>Срок: <b>сегодня, до конца дня</b></span>
+              <span>Вы обещали Кузнецову</span>
+            </div>
+          </div>
+          <div class="kbd kbd--2">
+            <span class="kbd__btn">Готово</span>
+            <span class="kbd__btn">Перенести</span>
+          </div>
+          <div class="stamp">9:00</div>
+        </div>
+
+        <div class="msg msg--out">
+          <div class="bubble">
+            <p>отправил</p>
+          </div>
+          <div class="stamp">12:40 <span>✓✓</span></div>
+        </div>
+
+        <div class="msg msg--in msg--wide">
+          <div class="bubble">
+            <p>Отметил: <b>расчёт Кузнецову отправлен</b>. Задача закрыта, напоминаний по ней больше не будет.</p>
+            <div class="bubble__meta-line">
+              <span>Закрыта: <b>пт, 12:40</b></span>
+            </div>
+          </div>
+          <div class="kbd">
+            <span class="kbd__btn">Не закрывать — я про другое</span>
+          </div>
+          <div class="stamp">12:40</div>
+        </div>
+      </div>
+
+      <div class="tg-input">
+        <span class="tg-input__ico"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.8 6.2 8.2 12.8a2.2 2.2 0 0 0 3.1 3.1l6.6-6.6a3.9 3.9 0 0 0-5.5-5.5L5.8 10.4a5.6 5.6 0 0 0 7.9 7.9l4.6-4.6"/></svg></span>
+        <span class="tg-input__field">Сообщение</span>
+        <span class="tg-input__ico"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2.8" width="6" height="10.4" rx="3"/><path d="M5.5 10.6a5.5 5.5 0 0 0 11 0"/><path d="M11 16.1v3"/></svg></span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 04 · Mini App</div>
+    <h1 class="board__title">Список активных задач — штатное состояние</h1>
+    <p class="board__note">Сгруппировано по сроку, а не по проектам. Приоритет — полоской слева и меткой, и только там, где он выше обычного. <b>Чьё обещание</b> — отдельной меткой: своё синим, чужое — обводкой.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <h2 class="page-title">Задачи</h2>
+            <p class="page-sub">6 активных · две на сегодня</p>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Сегодня</span><em>пт, 18 сентября</em></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark row__mark--urgent"></span>
+                <span class="row__body">
+                  <span class="row__title">Отправить расчёт по складу</span>
+                  <span class="row__meta">
+                    <span class="row__when--now">до конца дня</span>
+                    <span class="chip chip--urgent">Срочно</span>
+                    <span class="chip chip--mine">Я обещал: Кузнецову</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+              <div class="row">
+                <span class="row__mark row__mark--important"></span>
+                <span class="row__body">
+                  <span class="row__title">Собрать цифры по складу за август</span>
+                  <span class="row__meta">
+                    <span>до 17:00</span>
+                    <span class="chip chip--important">Важно</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Дальше</span></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark row__mark--important"></span>
+                <span class="row__body">
+                  <span class="row__title">Перезвонить Сергею</span>
+                  <span class="row__meta">
+                    <span>вт, 22 сентября, 10:00</span>
+                    <span class="chip chip--mine">Я обещал: Сергею</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Марина пришлёт договор на подпись</span>
+                  <span class="row__meta">
+                    <span>ср, 23 сентября</span>
+                    <span class="chip chip--theirs">Обещали мне: Марина</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Продлить ОСАГО</span>
+                  <span class="row__meta">
+                    <span>до 3 октября</span>
+                    <span class="chip">Каждый год</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Без срока</span></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Купить лампочку в коридор</span>
+                  <span class="row__meta"><span>записано 14 сентября</span></span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <span class="tab tab--on">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 5.5h11M8.5 11h11M8.5 16.5h7.5"/><path d="M2.5 5.2 3.9 6.6 6.4 4"/><path d="M2.5 10.7 3.9 12.1 6.4 9.5"/></svg>
+            <span>Задачи</span>
+          </span>
+          <span class="tab">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="3.4" width="15.6" height="15.2" rx="3.2"/><path d="M7 8.4h8M7 12.4h5"/></svg>
+            <span>Память</span>
+          </span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 05 · Mini App</div>
+    <h1 class="board__title">Задач нет — первое, что видит новый человек</h1>
+    <p class="board__note">Не пустая таблица, а объяснение и действие. Две подсказки — <b>настоящими фразами</b>, которые можно сказать голосом: показывают, что формулировать по-особому не надо.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body app-body--center">
+          <div class="empty">
+            <span class="empty__mark"><i></i></span>
+            <h2 class="empty__h">Пока ни одной задачи</h2>
+            <p class="empty__p">Скажите или напишите Соломону поручение обычными словами — он сам разберёт срок и напомнит вовремя.</p>
+            <div class="hints">
+              <div class="hint"><b>«В пятницу отправить расчёт клиенту»</b></div>
+              <div class="hint"><b>«Я обещал Сергею перезвонить во вторник»</b></div>
+            </div>
+            <span class="btn btn--wide">Написать Соломону</span>
+            <p class="empty__foot">Список ведёт он сам. Заводить задачи руками здесь не нужно — только править, если понял не так.</p>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <span class="tab tab--on">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 5.5h11M8.5 11h11M8.5 16.5h7.5"/><path d="M2.5 5.2 3.9 6.6 6.4 4"/><path d="M2.5 10.7 3.9 12.1 6.4 9.5"/></svg>
+            <span>Задачи</span>
+          </span>
+          <span class="tab">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="3.4" width="15.6" height="15.2" rx="3.2"/><path d="M7 8.4h8M7 12.4h5"/></svg>
+            <span>Память</span>
+          </span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 06 · Mini App</div>
+    <h1 class="board__title">Карточка задачи — с источником</h1>
+    <p class="board__note">Срок, статус и следующий шаг сверху, <b>источник — отдельным блоком</b>: то самое сообщение, из которого задача возникла. Разбор оказался неверным — видно, что именно помощник читал.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__back">‹ Задачи</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <h2 class="page-title">Отправить расчёт по складу</h2>
+            <div class="chips">
+              <span class="chip chip--urgent">Срочно</span>
+              <span class="chip chip--mine">Я обещал: Кузнецову</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="kv">
+              <div class="kv__row">
+                <span class="kv__k">Срок</span>
+                <span class="kv__v">
+                  пятница, 18 сентября
+                  <small>до конца дня</small>
+                </span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Напоминания</span>
+                <span class="kv__v">
+                  вчера 18:00 · сегодня 9:00
+                  <small>следующее — сегодня в 16:00</small>
+                </span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Следующий шаг</span>
+                <span class="kv__v">
+                  Собрать цифры за август
+                  <small>отдельная задача, до 17:00</small>
+                </span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Статус</span>
+                <span class="kv__v">
+                  Активна
+                  <small>создана 16 сентября</small>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Откуда взялась</span></div>
+            <div class="card">
+              <div class="source">
+                <div class="source__top">
+                  <span class="chip">Голосовое, 0:11</span>
+                  <span>16 сентября, 10:02</span>
+                </div>
+                <div class="source__box">
+                  <div class="source__text">«Слушай, в пятницу надо отправить Кузнецову расчёт по складу. Не дай забыть, там ещё цифры за август собрать.»</div>
+                  <span class="link">Открыть в переписке</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Что происходило</span></div>
+            <div class="card">
+              <div class="log">
+                <div class="log__item"><span class="log__time">16 сент, 10:02</span><span class="log__what">Понял поручение, записал задачу и напоминание</span></div>
+                <div class="log__item"><span class="log__time">17 сент, 18:00</span><span class="log__what">Напомнил за день до срока</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mainbtn">
+          <div class="actions">
+            <span class="btn">Готово</span>
+            <span class="btn btn--ghost">Перенести</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 07 · Mini App</div>
+    <h1 class="board__title">Память: что подтверждено, а что помощник предположил</h1>
+    <p class="board__note">Факты лежат в карточке и подписаны «с ваших слов». <b>Предположение вынесено из карточки</b> — пунктирная рамка, другой цвет, сказано, откуда взялось, и рядом «верно / не так». Фактом оно не станет, пока человек не ответит.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <h2 class="page-title">Память</h2>
+            <p class="page-sub">Что он знает о вас и что предположил сам</p>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Семья</span></div>
+            <div class="card">
+              <div class="fact">
+                <span class="fact__body">
+                  <span class="fact__v">Жена Марина, дочь Аня — 7 лет</span>
+                  <span class="fact__src">С ваших слов · 12 сентября</span>
+                </span>
+                <span class="fact__dots">⋯</span>
+              </div>
+            </div>
+            <div class="guess">
+              <span class="guess__v">Аню по утрам в школу возите вы</span>
+              <span class="guess__why">Три поручения про школу до 8:30 за две недели.</span>
+              <span class="guess__act">
+                <span class="chip chip--guess">Предположение</span>
+                <span>
+                  <span class="btn btn--sm">Верно</span>
+                  <span class="btn btn--sm btn--quiet">Не так</span>
+                </span>
+              </span>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Дом и машина</span></div>
+            <div class="card">
+              <div class="fact">
+                <span class="fact__body">
+                  <span class="fact__v">Казань, улица Дубравная, 47</span>
+                  <span class="fact__src">С ваших слов · 2 сентября</span>
+                </span>
+                <span class="fact__dots">⋯</span>
+              </div>
+              <div class="fact">
+                <span class="fact__body">
+                  <span class="fact__v">Toyota Camry, 2019 год</span>
+                  <span class="fact__src">С ваших слов · 2 сентября</span>
+                </span>
+                <span class="fact__dots">⋯</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Работа и время</span></div>
+            <div class="card">
+              <div class="fact">
+                <span class="fact__body">
+                  <span class="fact__v">Работа до 18:00, пятница — до 17:00</span>
+                  <span class="fact__src">С ваших слов · 5 сентября</span>
+                </span>
+                <span class="fact__dots">⋯</span>
+              </div>
+            </div>
+            <div class="guess">
+              <span class="guess__v">«Вечером» у вас — это около 19:00</span>
+              <span class="guess__why">По времени, когда вы отвечаете на напоминания.</span>
+              <span class="guess__act">
+                <span class="chip chip--guess">Предположение</span>
+                <span>
+                  <span class="btn btn--sm">Верно</span>
+                  <span class="btn btn--sm btn--quiet">Не так</span>
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <span class="tab">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 5.5h11M8.5 11h11M8.5 16.5h7.5"/><path d="M2.5 5.2 3.9 6.6 6.4 4"/><path d="M2.5 10.7 3.9 12.1 6.4 9.5"/></svg>
+            <span>Задачи</span>
+          </span>
+          <span class="tab tab--on">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="3.4" width="15.6" height="15.2" rx="3.2"/><path d="M7 8.4h8M7 12.4h5"/></svg>
+            <span>Память</span>
+          </span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 08 · Mini App</div>
+    <h1 class="board__title">Память пуста</h1>
+    <p class="board__note">Объясняет, зачем это вообще нужно, и сразу обещает главное: <b>что помощник додумает сам — будет помечено</b> и это можно отклонить. Обещание даётся до того, как появилась первая запись.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body app-body--center">
+          <div class="empty">
+            <span class="empty__mark"><i></i></span>
+            <h2 class="empty__h">Соломон пока ничего о вас не знает</h2>
+            <p class="empty__p">Расскажите о себе между делом — где живёте, какая машина, во сколько заканчиваете работу. Он запомнит и не будет переспрашивать.</p>
+            <div class="hints">
+              <div class="hint"><b>«У меня Camry 2019 года»</b></div>
+              <div class="hint"><b>«Заканчиваю в шесть, по пятницам в пять»</b></div>
+            </div>
+            <span class="btn btn--wide">Рассказать в чате</span>
+            <p class="empty__foot">Всё, что он запомнит, появится здесь. Что он предположил сам — будет помечено, и вы сможете это отклонить.</p>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <span class="tab">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 5.5h11M8.5 11h11M8.5 16.5h7.5"/><path d="M2.5 5.2 3.9 6.6 6.4 4"/><path d="M2.5 10.7 3.9 12.1 6.4 9.5"/></svg>
+            <span>Задачи</span>
+          </span>
+          <span class="tab tab--on">
+            <svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="3.4" width="15.6" height="15.2" rx="3.2"/><path d="M7 8.4h8M7 12.4h5"/></svg>
+            <span>Память</span>
+          </span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+  </div>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var buttons = Array.prototype.slice.call(document.querySelectorAll("[data-theme-set]"));
+  buttons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var mode = btn.getAttribute("data-theme-set");
+      if (mode === "auto") root.removeAttribute("data-theme");
+      else root.setAttribute("data-theme", mode);
+      buttons.forEach(function (b) { b.setAttribute("aria-pressed", String(b === btn)); });
+    });
+  });
+})();
+</script>
+</body>
+</html>
