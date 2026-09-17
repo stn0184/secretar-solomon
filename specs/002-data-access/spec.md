@@ -128,7 +128,7 @@
       `App.tsx` — список и четыре состояния.
 - [x] `techspec/02-layout.md`: `services/`, `db/tasks.py`,
       `lib/tasks.ts`, `supabase/migrations/` в дереве и в слоях §2.2.
-- [ ] `supabase/README.md`: убрать «схемы пока нет», добавить чек-лист
+- [x] `supabase/README.md`: убрать «схемы пока нет», добавить чек-лист
       «Первое подключение проекта»; `README.md` — как применить
       миграции.
 - [ ] `techspec/00-adr.md`: строка «по какому ключу разделяем данные —

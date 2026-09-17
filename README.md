@@ -20,6 +20,10 @@ uv run --directory bot solomon-bot     # бот: long polling, Ctrl+C остан
 npm --prefix miniapp run dev           # Mini App: адрес печатает Vite
 ```
 
+Схема базы — миграции в `supabase/migrations/`: применяются
+`supabase db push` из корня репозитория или тем же SQL в редакторе панели
+Supabase. Первое подключение проекта — по чек-листу `supabase/README.md`.
+
 Жива ли база — `uv run --directory bot solomon-health`.
 Проверки перед коммитом — `node scripts/gate.mjs` (см. `CLAUDE.md`
 §«Сдача изменения»).
