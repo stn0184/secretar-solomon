@@ -8,9 +8,8 @@ from __future__ import annotations
 
 from solomon import texts
 from solomon.config import Settings
-from solomon.db.tasks import DatabaseError, Task
 from solomon.services.tasks import SUMMARY_LIMIT, TaskService, summarize
-from tests.conftest import OWNER_ID
+from tests.conftest import OWNER_ID, BrokenRecorder, FakeRecorder
 
 SETTINGS = Settings(
     telegram_bot_token="123456:test-token",
@@ -18,36 +17,6 @@ SETTINGS = Settings(
     supabase_url="https://example.supabase.co",
     supabase_service_role_key="service-role-key",
 )
-
-
-class FakeRecorder:
-    """Вместо базы — список того, что в неё просили записать."""
-
-    def __init__(self, task: Task | None = None) -> None:
-        self.calls: list[dict[str, object]] = []
-        self.task = task or Task(id="0e2f", title="купить лампочку", status="active")
-
-    async def __call__(
-        self, *, owner_telegram_id: int, chat_id: int, telegram_message_id: int, text: str
-    ) -> Task:
-        self.calls.append(
-            {
-                "owner_telegram_id": owner_telegram_id,
-                "chat_id": chat_id,
-                "telegram_message_id": telegram_message_id,
-                "text": text,
-            }
-        )
-        return self.task
-
-
-class BrokenRecorder:
-    """База не ответила."""
-
-    async def __call__(
-        self, *, owner_telegram_id: int, chat_id: int, telegram_message_id: int, text: str
-    ) -> Task:
-        raise DatabaseError("ConnectTimeout: timed out")
 
 
 def test_short_text_is_retold_as_is() -> None:

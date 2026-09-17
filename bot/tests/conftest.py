@@ -15,9 +15,10 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
-from aiogram.types import Chat, Message, Update, User
+from aiogram.types import Chat, Message, Update, User, Voice
 
 from solomon.config import Settings
+from solomon.db.tasks import DatabaseError, Task
 
 OWNER_ID = 777
 STRANGER_ID = 999
@@ -68,6 +69,36 @@ class RecordingSession(BaseSession):
         return [m.text for m in self.sent if isinstance(m, SendMessage)]
 
 
+class FakeRecorder:
+    """Вместо базы — список того, что в неё просили записать."""
+
+    def __init__(self, task: Task | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.task = task or Task(id="0e2f", title="купить лампочку", status="active")
+
+    async def __call__(
+        self, *, owner_telegram_id: int, chat_id: int, telegram_message_id: int, text: str
+    ) -> Task:
+        self.calls.append(
+            {
+                "owner_telegram_id": owner_telegram_id,
+                "chat_id": chat_id,
+                "telegram_message_id": telegram_message_id,
+                "text": text,
+            }
+        )
+        return self.task
+
+
+class BrokenRecorder:
+    """База не ответила."""
+
+    async def __call__(
+        self, *, owner_telegram_id: int, chat_id: int, telegram_message_id: int, text: str
+    ) -> Task:
+        raise DatabaseError("ConnectTimeout: timed out")
+
+
 @pytest.fixture
 def settings() -> Settings:
     return Settings(
@@ -99,5 +130,18 @@ def make_update(text: str, from_id: int = OWNER_ID, update_id: int = 1) -> Updat
         chat=Chat(id=from_id, type="private"),
         from_user=user,
         text=text,
+    )
+    return Update(update_id=update_id, message=message)
+
+
+def make_voice_update(from_id: int = OWNER_ID, update_id: int = 1) -> Update:
+    """Голосовое сообщение: текста нет, сохранять нечего."""
+    user = User(id=from_id, is_bot=False, first_name="Тим")
+    message = Message(
+        message_id=update_id,
+        date=datetime.now(UTC),
+        chat=Chat(id=from_id, type="private"),
+        from_user=user,
+        voice=Voice(file_id="voice-1", file_unique_id="voice-1", duration=3),
     )
     return Update(update_id=update_id, message=message)
