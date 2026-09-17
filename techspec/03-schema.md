@@ -15,6 +15,9 @@
   `telegram_id` токена. Это колонка, по которой фильтрует бот и по которой
   режут правила доступа (§4). Без неё таблица не заводится.
 - Время — `timestamptz`, `created_at` с `default now()`.
+- Колонка, без которой строка бессмысленна, — `not null`: пустое значение
+  в ней означает не «неизвестно», а недописанный код. Nullable заводится
+  осознанно и помечается в таблице раздела.
 - Перечисления — `text` с `check (... in (...))`, не `enum`: значение
   добавляется миграцией без пересоздания типа.
 - Миграции лежат в `supabase/migrations/<YYYYMMDDHHMMSS>_<что>.sql`,
@@ -78,6 +81,11 @@ record_task(owner_telegram_id bigint, chat_id bigint,
   задачу, привязанную к нему: long polling отдал обновление повторно,
   и бот отвечает «Записал» второй раз.
 - `language sql`, без `security definer`: зовёт её только бот с ролью
-  `service_role`, для `authenticated` и `anon` функция недоступна
-  (`revoke execute ... from anon, authenticated`) — Mini App в этом
-  этапе только читает (§4).
+  `service_role`, для `authenticated` и `anon` функция недоступна —
+  Mini App в этом этапе только читает (§4).
+- Право `execute` забирается **и у роли `public`**, а не только у
+  `anon` с `authenticated`: Postgres выдаёт новой функции execute для
+  `public`, и роль, из которой право наследуется, `revoke ... from anon,
+  authenticated` не трогает. Поэтому в миграции
+  `revoke execute ... from public, anon, authenticated`, а затем
+  `grant execute ... to service_role`.

@@ -106,7 +106,7 @@
 
 ## Задачи
 
-- [ ] Миграция `supabase/migrations/` по `techspec/03-schema.md`:
+- [x] Миграция `supabase/migrations/` по `techspec/03-schema.md`:
       `messages`, `tasks`, индекс, триггер `updated_at`, функция
       `record_task` (§3.4); RLS и политики по `techspec/04-access.md`. Расхождение со схемой — правка §3/§4
       в том же коммите.
