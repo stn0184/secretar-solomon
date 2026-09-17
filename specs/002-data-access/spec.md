@@ -126,7 +126,7 @@
 - [x] `miniapp/src/lib/tasks.ts`: чтение активных задач с границей
       101, результат вместо исключения (образец — `session.ts`);
       `App.tsx` — список и четыре состояния.
-- [ ] `techspec/02-layout.md`: `services/`, `db/tasks.py`,
+- [x] `techspec/02-layout.md`: `services/`, `db/tasks.py`,
       `lib/tasks.ts`, `supabase/migrations/` в дереве и в слоях §2.2.
 - [ ] `supabase/README.md`: убрать «схемы пока нет», добавить чек-лист
       «Первое подключение проекта»; `README.md` — как применить
