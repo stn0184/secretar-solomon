@@ -70,11 +70,11 @@
 
    ```bash
    supabase secrets set TELEGRAM_BOT_TOKEN=... OWNER_TELEGRAM_ID=... \
-     SUPABASE_JWT_SECRET=...
+     JWT_SIGNING_SECRET=...
    supabase functions deploy telegram-auth
    ```
 
-   `SUPABASE_JWT_SECRET` — «JWT secret» из настроек проекта (Settings → API).
+   `JWT_SIGNING_SECRET` — «JWT secret» из настроек проекта (Settings → JWT Keys → Legacy JWT Secret; имя без префикса SUPABASE_ — такие имена Supabase в секретах не принимает).
    Если проект уже переведён на асимметричные ключи подписи и общего секрета
    нет, функция переписывается на выдачу сессии через Supabase Auth — см.
    `techspec/00-adr.md`, строка про проверку человека.

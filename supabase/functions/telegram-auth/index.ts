@@ -8,7 +8,7 @@
  *
  * Секреты задаются один раз:
  *   supabase secrets set TELEGRAM_BOT_TOKEN=... OWNER_TELEGRAM_ID=... \
- *     SUPABASE_JWT_SECRET=...
+ *     JWT_SIGNING_SECRET=...
  */
 
 import { InitDataError, verifyInitData } from "../_shared/init-data.ts";
@@ -45,7 +45,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
   }
 
   const botToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
-  const jwtSecret = Deno.env.get("SUPABASE_JWT_SECRET");
+  const jwtSecret = Deno.env.get("JWT_SIGNING_SECRET");
   const ownerId = Number(Deno.env.get("OWNER_TELEGRAM_ID"));
   if (!botToken || !jwtSecret || !Number.isFinite(ownerId)) {
     console.error("telegram-auth: не заданы секреты функции");
