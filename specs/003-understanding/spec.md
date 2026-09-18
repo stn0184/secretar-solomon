@@ -117,9 +117,11 @@
 - [ ] Миграция: колонки `tasks` и `messages` по `techspec/03-schema.md`
       §3.2–3.3, новая версия `record_task` (§3.4). Правка §3 в том же
       коммите.
-- [ ] `config.py`: `ANTHROPIC_API_KEY`, `OWNER_TIMEZONE` (проверка через
+- [ ] `config.py`: `ANTHROPIC_API_KEY`, необязательный `ANTHROPIC_BASE_URL`
+      (`techspec/05-ai.md` §5.1), `OWNER_TIMEZONE` (проверка через
       `zoneinfo`, неверный пояс — та же ошибка, что пустая переменная);
-      `.env.example`; тест в `test_config.py`; `anthropic` в
+      `.env.example`; тесты в `test_config.py` (ключ, пояс, адрес пустой и
+      заданный); `anthropic` в
       `pyproject.toml` с точной версией (`techspec/01-stack.md` §1.1).
 - [ ] `services/understanding.py`: Pydantic-модель `Understanding`,
       системный промпт по `techspec/05-ai.md` §5.2, вызов
@@ -189,7 +191,8 @@
   правится в том же коммите.
 - `techspec/03-schema.md` §3.2–3.4 — колонки и новая `record_task`.
 - `techspec/02-layout.md` §2.2 — `services/understanding.py`.
-- `techspec/00-adr.md` — две строки: модель, часовой пояс.
+- `techspec/00-adr.md` — три строки: модель, часовой пояс, посредник
+  agenthello.ai вместо прямого доступа к Anthropic.
 - `techspec/01-stack.md` §1.1 — `anthropic`, версия.
 - `spec.md` §5 — развилка «Часовой пояс» закрыта, убрать.
 - `.env.example`, `README.md`, `supabase/README.md` — ключ, пояс,
