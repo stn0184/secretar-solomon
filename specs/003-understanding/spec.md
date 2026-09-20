@@ -161,7 +161,7 @@
 - [x] `bot/tests/fixtures/understanding.jsonl` (десять примеров) и
       маркер `live` в `pyproject.toml`: без `ANTHROPIC_API_KEY` тесты
       `live` пропускаются, не падают.
-- [ ] Документы: `techspec/02-layout.md` (`services/understanding.py`,
+- [x] Документы: `techspec/02-layout.md` (`services/understanding.py`,
       `tests/fixtures/`), `techspec/00-adr.md` (модель; часовой пояс),
       `spec.md` §5 (убрать развилку про пояс), `README.md` и
       `supabase/README.md` (ключ Claude, пояс, как применить миграцию
