@@ -15,9 +15,17 @@ import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import MessageOriginType
-from aiogram.methods import SendMessage, TelegramMethod
+from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
-from aiogram.types import Chat, Message, MessageOriginUser, Update, User, Voice
+from aiogram.types import (
+    CallbackQuery,
+    Chat,
+    Message,
+    MessageOriginUser,
+    Update,
+    User,
+    Voice,
+)
 
 from solomon.config import Settings
 from solomon.db.rpc import DatabaseError
@@ -60,6 +68,16 @@ class RecordingSession(BaseSession):
                 text=method.text,
             )
             return cast(TelegramType, answer)
+        if isinstance(method, EditMessageText):
+            edited = Message(
+                message_id=int(method.message_id or 0),
+                date=datetime.now(UTC),
+                chat=Chat(id=int(method.chat_id or 0), type="private"),
+                text=method.text,
+            )
+            return cast(TelegramType, edited)
+        if isinstance(method, AnswerCallbackQuery):
+            return cast(TelegramType, True)
         raise NotImplementedError(f"В тестах не ожидается метод {type(method).__name__}")
 
     async def stream_content(
@@ -76,6 +94,16 @@ class RecordingSession(BaseSession):
     def texts(self) -> list[str]:
         """Тексты отправленных сообщений."""
         return [m.text for m in self.sent if isinstance(m, SendMessage)]
+
+    @property
+    def edits(self) -> list[EditMessageText]:
+        """Правки уже отправленных сообщений — например, отметка «Сделано»."""
+        return [m for m in self.sent if isinstance(m, EditMessageText)]
+
+    @property
+    def answers(self) -> list[str | None]:
+        """Ответы на нажатия кнопок: всплывающая подсказка в Telegram."""
+        return [m.text for m in self.sent if isinstance(m, AnswerCallbackQuery)]
 
 
 class FakeMessages:
@@ -253,3 +281,28 @@ def make_voice_update(from_id: int = OWNER_ID, update_id: int = 1) -> Update:
         voice=Voice(file_id="voice-1", file_unique_id="voice-1", duration=3),
     )
     return Update(update_id=update_id, message=message)
+
+
+def make_callback_update(
+    data: str,
+    text: str = "Напоминаю: отправить расчёт",
+    from_id: int = OWNER_ID,
+    update_id: int = 1,
+) -> Update:
+    """Нажатие кнопки под напоминанием — как его приносит long polling."""
+    user = User(id=from_id, is_bot=False, first_name="Тим")
+    message = Message(
+        message_id=update_id,
+        date=datetime.now(UTC),
+        chat=Chat(id=from_id, type="private"),
+        from_user=User(id=1, is_bot=True, first_name="Соломон"),
+        text=text,
+    )
+    callback = CallbackQuery(
+        id=f"callback-{update_id}",
+        from_user=user,
+        chat_instance="chat-instance",
+        message=message,
+        data=data,
+    )
+    return Update(update_id=update_id, callback_query=callback)

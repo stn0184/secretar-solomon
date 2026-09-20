@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Router
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    MaybeInaccessibleMessage,
     Message,
     MessageOriginChannel,
     MessageOriginChat,
@@ -17,6 +20,7 @@ from aiogram.types import (
 )
 
 from solomon import texts
+from solomon.services.reminders import ReminderService
 from solomon.services.tasks import TaskService
 
 logger = logging.getLogger(__name__)
@@ -101,6 +105,44 @@ async def handle_text(message: Message, tasks: TaskService | None) -> None:
     await message.answer(outcome.message)
 
 
+async def handle_done(callback: CallbackQuery, reminders: ReminderService | None) -> None:
+    """Нажата кнопка «Сделано» под напоминанием (§6.3).
+
+    Порядок: сначала база, потом сообщение и ответ на callback — иначе бот
+    зачеркнул бы задачу, которую не закрыл (инвариант 4). Повторное нажатие
+    безвредно: задача уже закрыта, а отметка в сообщении уже стоит, и
+    редактировать нечего.
+    """
+    task_id = (callback.data or "").removeprefix(DONE_PREFIX)
+    if reminders is None or not task_id:
+        logger.error("Кнопку «Сделано» некому обработать: бот собран без базы")
+        await callback.answer(texts.NOT_CLOSED)
+        return
+
+    completion = await reminders.complete(task_id)
+    if completion.ok:
+        await mark_done(callback.message)
+    await callback.answer(completion.answer)
+
+
+async def mark_done(message: MaybeInaccessibleMessage | None) -> None:
+    """Убрать кнопку и дописать «✓ Сделано» под напоминанием.
+
+    Старое сообщение Telegram отдаёт без текста (`InaccessibleMessage`), и
+    редактировать там нечего — задача уже закрыта, а это только отметка.
+    """
+    if not isinstance(message, Message) or message.text is None:
+        return
+    if message.text.endswith(texts.DONE_MARK):
+        return
+    try:
+        await message.edit_text(texts.done_message(message.text), reply_markup=None)
+    except TelegramBadRequest as error:
+        # Сообщение старое или уже отредактировано: задача закрыта, и это
+        # важнее, чем вид напоминания.
+        logger.warning("Напоминание не отредактировано: %s", error)
+
+
 async def handle_not_text(message: Message) -> None:
     """Не текст — вежливый отказ, и ничего не сохраняется."""
     logger.info("Сообщение не текстом: %s", message.content_type)
@@ -119,4 +161,5 @@ def build_router() -> Router:
     router.message.register(handle_help, Command("help"))
     router.message.register(handle_text, is_plain_text)
     router.message.register(handle_not_text, is_not_text)
+    router.callback_query.register(handle_done, F.data.startswith(DONE_PREFIX))
     return router

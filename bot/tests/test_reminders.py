@@ -13,19 +13,26 @@ from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
+from aiogram import Bot, Dispatcher
 
+from solomon import texts
 from solomon.db.reminders import DueReminder
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import Task
+from solomon.handlers import done_keyboard
+from solomon.runner import build_dispatcher
 from solomon.services.reminders import ReminderService, by_task, latest, plan
 from solomon.services.tasks import TaskService
 from solomon.services.understanding import Understanding
 from tests.conftest import (
     OWNER_ID,
     OWNER_TIMEZONE,
+    STRANGER_ID,
     FakeAnalyst,
     FakeMessages,
     FakeUnderstandings,
+    RecordingSession,
+    make_callback_update,
     make_settings,
     make_understanding,
 )
@@ -386,3 +393,90 @@ async def test_loop_stops_on_cancel() -> None:
         await ticking
 
     assert lister.calls
+
+
+def build_dispatcher_with(closer: FakeCloser) -> Dispatcher:
+    """Диспетчер с подменённым закрытием задачи: сети и базы нет."""
+    settings = make_settings()
+    service = ReminderService(
+        settings=settings,
+        due=FakeDue(),
+        mark_sent=FakeMarks(),
+        close_task=closer,
+        notify=FakeNotifier(),
+        clock=lambda: FRIDAY_END_OF_DAY,
+    )
+    return build_dispatcher(settings, reminders=service)
+
+
+async def test_done_button_closes_the_task_and_marks_the_message(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Нажата кнопка: задача закрыта, кнопка убрана, внизу «✓ Сделано» (§6.3)."""
+    closer = FakeCloser(Task(id="0e2f", title="отправить расчёт", status="done"))
+    dispatcher = build_dispatcher_with(closer)
+
+    await dispatcher.feed_update(bot, make_callback_update("done:0e2f"))
+
+    assert closer.calls == [(OWNER_ID, "0e2f")]
+    edit = session.edits[0]
+    assert edit.text == "Напоминаю: отправить расчёт\n\n✓ Сделано"
+    assert edit.reply_markup is None
+    assert session.answers == [texts.DONE_ANSWER]
+
+
+async def test_second_press_changes_nothing(bot: Bot, session: RecordingSession) -> None:
+    """Повтор безвреден: задача уже закрыта, отметка уже стоит (§6.3)."""
+    closer = FakeCloser(Task(id="0e2f", title="отправить расчёт", status="done"))
+    dispatcher = build_dispatcher_with(closer)
+    marked = "Напоминаю: отправить расчёт\n\n✓ Сделано"
+
+    await dispatcher.feed_update(bot, make_callback_update("done:0e2f", text=marked))
+
+    assert closer.calls == [(OWNER_ID, "0e2f")]
+    assert session.edits == []
+    assert session.answers == [texts.DONE_ANSWER]
+
+
+async def test_unknown_task_is_not_marked_done(bot: Bot, session: RecordingSession) -> None:
+    """База не нашла задачу — сообщение не трогаем и говорим об этом."""
+    dispatcher = build_dispatcher_with(FakeCloser(None))
+
+    await dispatcher.feed_update(bot, make_callback_update("done:7c31"))
+
+    assert session.edits == []
+    assert session.answers == [texts.DONE_UNKNOWN]
+
+
+async def test_broken_database_does_not_pretend_the_task_is_closed(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Инвариант 4: база не ответила — «✓ Сделано» не появляется."""
+    dispatcher = build_dispatcher_with(FakeCloser(broken=True))
+
+    await dispatcher.feed_update(bot, make_callback_update("done:0e2f"))
+
+    assert session.edits == []
+    assert session.answers == [texts.NOT_CLOSED]
+
+
+async def test_callback_from_a_stranger_never_reaches_the_handler(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Калитка владельца режет чужой callback до обработчика (§6.3, инвариант 2)."""
+    closer = FakeCloser(Task(id="0e2f", title="отправить расчёт", status="done"))
+    dispatcher = build_dispatcher_with(closer)
+
+    await dispatcher.feed_update(bot, make_callback_update("done:0e2f", from_id=STRANGER_ID))
+
+    assert closer.calls == []
+    assert session.sent == []
+
+
+def test_reminder_carries_the_done_button() -> None:
+    """Под напоминанием одна кнопка, и в ней id задачи (§6.3)."""
+    keyboard = done_keyboard("0e2f")
+
+    button = keyboard.inline_keyboard[0][0]
+    assert button.text == texts.DONE_BUTTON
+    assert button.callback_data == "done:0e2f"
