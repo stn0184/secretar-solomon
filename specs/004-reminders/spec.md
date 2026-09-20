@@ -101,7 +101,7 @@
 
 ## Задачи
 
-- [ ] Миграция: таблица `reminders`, индексы, RLS; `record_understanding`
+- [x] Миграция: таблица `reminders`, индексы, RLS; `record_understanding`
       с аргументом `reminders jsonb`; функции `due_reminders`,
       `mark_reminders_sent`, `mark_task_done` (`techspec/03-schema.md`
       §3.4–3.5). Правка §3 в том же коммите.

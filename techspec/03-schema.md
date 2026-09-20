@@ -107,13 +107,14 @@ record_message(owner_telegram_id bigint, chat_id bigint,
 record_understanding(message_id uuid, owner_telegram_id bigint,
                      analysis jsonb, ai_model text,
                      ai_input_tokens int, ai_output_tokens int,
-                     reply text, task jsonb)
+                     reply text, task jsonb, reminders jsonb)
   returns tasks
 ```
 
 В одной транзакции: пишет разбор и ответ в `messages`, и если `task`
-не `null` — заводит строку в `tasks` с `source_message_id`. Задача для
-этого сообщения уже есть — возвращает её, второй не заводит. `task` —
+не `null` — заводит строку в `tasks` с `source_message_id` и строки
+напоминаний из `reminders` (§3.5). Задача для этого сообщения уже есть —
+возвращает её, второй не заводит и напоминаний не добавляет. `task` —
 `null` для `chat` / `about_me`; тогда функция возвращает `null`.
 `owner_telegram_id` передаётся явно и сверяется с владельцем сообщения
 (§4.3): чужое `message_id` — отказ.
@@ -149,9 +150,12 @@ RLS — как у остальных (§4.2).
   той же транзакции, что задачу.
 - `due_reminders(owner_telegram_id bigint, now timestamptz)` —
   созревшие напоминания владельца вместе с полями задачи, только по
-  задачам `status = 'active'`.
+  задачам `status = 'active'`; колонки `id, task_id, stage, fire_at,
+  title, due_at, due_precision`, порядок по `fire_at`.
 - `mark_reminders_sent(owner_telegram_id bigint, ids uuid[],
-  telegram_message_id bigint)`.
+  telegram_message_id bigint)` — `returns void`; уже помеченные строки
+  не трогает, поэтому `sent_at` остаётся временем первой отправки.
 - `mark_task_done(owner_telegram_id bigint, task_id uuid) returns tasks` —
   `status = done` и удаление неотправленных напоминаний задачи одной
-  транзакцией; уже закрытая задача — возвращается как есть.
+  транзакцией; уже закрытая задача — возвращается как есть, чужая или
+  несуществующая — `null` и ни одной правки.
