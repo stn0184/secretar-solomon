@@ -6,11 +6,18 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Sequence
 from datetime import datetime
 from typing import cast
 from zoneinfo import ZoneInfo
 
-from solomon.services.reminders import plan
+import pytest
+
+from solomon.db.reminders import DueReminder
+from solomon.db.rpc import DatabaseError
+from solomon.db.tasks import Task
+from solomon.services.reminders import ReminderService, by_task, latest, plan
 from solomon.services.tasks import TaskService
 from solomon.services.understanding import Understanding
 from tests.conftest import (
@@ -170,3 +177,212 @@ async def test_task_without_a_due_date_promises_nothing() -> None:
 
     assert "Напомню" not in message
     assert rows == []
+
+
+def make_due(stage: str, fire_at: datetime, task_id: str = "0e2f", **fields: object) -> DueReminder:
+    """Созревшее напоминание, как его приносит база (§3.5)."""
+    base: dict[str, object] = {
+        "id": f"{task_id}-{stage}",
+        "task_id": task_id,
+        "stage": stage,
+        "fire_at": fire_at,
+        "title": "отправить расчёт",
+        "due_at": FRIDAY_END_OF_DAY,
+        "due_precision": "day",
+    }
+    return DueReminder(**{**base, **fields})  # type: ignore[arg-type]
+
+
+def test_both_stages_of_one_task_speak_with_the_later_one() -> None:
+    """После простоя созрели обе ступени — сообщение одно, по позднейшей (§6.2)."""
+    before = make_due("before", FRIDAY_END_OF_DAY.replace(hour=9))
+    due = make_due("due", FRIDAY_END_OF_DAY)
+
+    assert latest([before, due]) is due
+    assert latest([due, before]) is due
+
+
+def test_tasks_are_grouped_by_task_not_by_stage() -> None:
+    first = make_due("due", FRIDAY_END_OF_DAY, task_id="0e2f")
+    second = make_due("before", FRIDAY_END_OF_DAY.replace(hour=9), task_id="7c31")
+
+    assert list(by_task([first, second])) == ["0e2f", "7c31"]
+
+
+class FakeDue:
+    """База в тике: что созрело и о чём её спросили."""
+
+    def __init__(self, ripe: list[DueReminder] | None = None, broken: bool = False) -> None:
+        self.ripe = ripe or []
+        self.broken = broken
+        self.calls: list[tuple[int, datetime]] = []
+
+    async def __call__(self, *, owner_telegram_id: int, now: datetime) -> list[DueReminder]:
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        self.calls.append((owner_telegram_id, now))
+        return self.ripe
+
+
+class FakeMarks:
+    """Отметка «ушло»: тест смотрит, что и каким сообщением помечено."""
+
+    def __init__(self, broken: bool = False) -> None:
+        self.broken = broken
+        self.calls: list[tuple[int, list[str], int]] = []
+
+    async def __call__(
+        self, *, owner_telegram_id: int, reminder_ids: Sequence[str], telegram_message_id: int
+    ) -> None:
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        self.calls.append((owner_telegram_id, list(reminder_ids), telegram_message_id))
+
+
+class FakeNotifier:
+    """Вместо Telegram — список отправленного; сломанный роняет отправку."""
+
+    def __init__(self, broken: bool = False) -> None:
+        self.broken = broken
+        self.sent: list[tuple[str, str]] = []
+
+    async def __call__(self, *, text: str, task_id: str) -> int:
+        if self.broken:
+            raise RuntimeError("Telegram: Bad Gateway")
+        self.sent.append((task_id, text))
+        return 40 + len(self.sent)
+
+
+class FakeCloser:
+    """`mark_task_done` без базы: что закрыли и что база на это ответила."""
+
+    def __init__(self, task: Task | None = None, broken: bool = False) -> None:
+        self.task = task
+        self.broken = broken
+        self.calls: list[tuple[int, str]] = []
+
+    async def __call__(self, *, owner_telegram_id: int, task_id: str) -> Task | None:
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        self.calls.append((owner_telegram_id, task_id))
+        return self.task
+
+
+def build_reminders(
+    due: FakeDue | None = None,
+    marks: FakeMarks | None = None,
+    notifier: FakeNotifier | None = None,
+    closer: FakeCloser | None = None,
+) -> tuple[ReminderService, FakeDue, FakeMarks, FakeNotifier]:
+    """Сервис напоминаний на подделках: ни базы, ни сети."""
+    lister = due or FakeDue()
+    marker = marks or FakeMarks()
+    sender = notifier or FakeNotifier()
+    service = ReminderService(
+        settings=make_settings(),
+        due=lister,
+        mark_sent=marker,
+        close_task=closer or FakeCloser(),
+        notify=sender,
+        clock=lambda: FRIDAY_END_OF_DAY,
+    )
+    return service, lister, marker, sender
+
+
+async def test_ripe_reminder_is_sent_and_marked() -> None:
+    """Созрело — ушло с текстом задачи и только потом помечено (§6.2)."""
+    service, lister, marks, notifier = build_reminders(
+        due=FakeDue([make_due("due", FRIDAY_END_OF_DAY)])
+    )
+
+    assert await service.tick() == 1
+    assert lister.calls == [(OWNER_ID, FRIDAY_END_OF_DAY)]
+    task_id, text = notifier.sent[0]
+    assert task_id == "0e2f"
+    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
+    assert marks.calls == [(OWNER_ID, ["0e2f-due"], 41)]
+
+
+async def test_both_stages_make_one_message_and_two_marks() -> None:
+    """После простоя созрели обе ступени: сообщение одно, помечены обе."""
+    ripe = [
+        make_due("before", FRIDAY_END_OF_DAY.replace(hour=9)),
+        make_due("due", FRIDAY_END_OF_DAY),
+    ]
+    service, _, marks, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick() == 1
+    assert len(notifier.sent) == 1
+    assert marks.calls == [(OWNER_ID, ["0e2f-before", "0e2f-due"], 41)]
+
+
+async def test_two_tasks_get_a_message_each() -> None:
+    ripe = [
+        make_due("due", FRIDAY_END_OF_DAY, task_id="0e2f"),
+        make_due("due", FRIDAY_END_OF_DAY, task_id="7c31"),
+    ]
+    service, _, marks, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick() == 2
+    assert [task_id for task_id, _ in notifier.sent] == ["0e2f", "7c31"]
+    assert [call[2] for call in marks.calls] == [41, 42]
+
+
+async def test_empty_tick_sends_nothing() -> None:
+    service, _, marks, notifier = build_reminders()
+
+    assert await service.tick() == 0
+    assert notifier.sent == []
+    assert marks.calls == []
+
+
+async def test_failed_send_leaves_the_reminder_unmarked() -> None:
+    """Telegram не принял — `sent_at` не ставится, попытка повторится (§6.2)."""
+    service, _, marks, _ = build_reminders(
+        due=FakeDue([make_due("due", FRIDAY_END_OF_DAY)]), notifier=FakeNotifier(broken=True)
+    )
+
+    assert await service.tick() == 0
+    assert marks.calls == []
+
+
+async def test_failed_mark_does_not_lose_the_sent_message() -> None:
+    """Ушло, но не помечено — тик не падает: дубль лучше потери (инвариант 5)."""
+    service, _, _, notifier = build_reminders(
+        due=FakeDue([make_due("due", FRIDAY_END_OF_DAY)]), marks=FakeMarks(broken=True)
+    )
+
+    assert await service.tick() == 1
+    assert len(notifier.sent) == 1
+
+
+async def test_broken_database_does_not_kill_the_loop() -> None:
+    """Тик упал на базе — бот жив и принимает сообщения дальше (§6.2)."""
+    service, _, _, notifier = build_reminders(due=FakeDue(broken=True))
+
+    await service.tick_quietly()
+
+    assert notifier.sent == []
+
+
+async def test_overdue_task_says_the_due_date_has_passed() -> None:
+    """Бот был выключен: срок прошёл к моменту отправки — «Срок был» (§6.2)."""
+    ripe = [make_due("due", FRIDAY_END_OF_DAY, due_at=MONDAY_MORNING.replace(hour=18))]
+    service, _, _, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick() == 1
+    _, text = notifier.sent[0]
+    assert text == "Напоминаю: отправить расчёт\nСрок был: понедельник, 21 сентября, 18:00"
+
+
+async def test_loop_stops_on_cancel() -> None:
+    """Остановка процесса отменяет цикл штатно, без ошибки в логе (§6.2)."""
+    service, lister, _, _ = build_reminders(due=FakeDue([]))
+    ticking = asyncio.create_task(service.run(interval_seconds=0.01))
+    await asyncio.sleep(0.03)
+
+    ticking.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ticking
+
+    assert lister.calls

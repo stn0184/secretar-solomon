@@ -115,7 +115,7 @@
       `record_understanding` и уходит в него; строка «Напомню: …» в
       подтверждении (§6.4); `texts.py` — тексты напоминания, «Срок был»,
       «Напомню», «✓ Сделано».
-- [ ] `services/reminders.py::ReminderService.tick(now)` — созревшие →
+- [x] `services/reminders.py::ReminderService.tick(now)` — созревшие →
       одно сообщение на задачу с кнопкой → пометить; ошибки Telegram и
       базы — в лог, без падения; `runner.py` запускает цикл рядом с
       polling и штатно останавливает.

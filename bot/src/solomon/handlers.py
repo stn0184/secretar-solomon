@@ -7,6 +7,8 @@ import logging
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     Message,
     MessageOriginChannel,
     MessageOriginChat,
@@ -18,6 +20,19 @@ from solomon import texts
 from solomon.services.tasks import TaskService
 
 logger = logging.getLogger(__name__)
+
+# Кнопка под напоминанием (`techspec/06-reminders.md` §6.3): в callback
+# уезжает только id задачи, и владельца из него не взять — он из настроек.
+DONE_PREFIX = "done:"
+
+
+def done_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    """Одна кнопка «Сделано» под напоминанием."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=texts.DONE_BUTTON, callback_data=f"{DONE_PREFIX}{task_id}")]
+        ]
+    )
 
 
 def is_plain_text(message: Message) -> bool:
