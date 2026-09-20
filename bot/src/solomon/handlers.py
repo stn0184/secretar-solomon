@@ -6,7 +6,13 @@ import logging
 
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import (
+    Message,
+    MessageOriginChannel,
+    MessageOriginChat,
+    MessageOriginHiddenUser,
+    MessageOriginUser,
+)
 
 from solomon import texts
 from solomon.services.tasks import TaskService
@@ -25,6 +31,26 @@ def is_not_text(message: Message) -> bool:
     return message.text is None
 
 
+def forwarded_sender(message: Message) -> str | None:
+    """Чьё это сообщение, если его переслали.
+
+    Имя нужно разбору: «пришлю смету завтра» от Ани — обещание мне, а не моё
+    (`spec.md` §3.3). Отправитель, скрывший себя, приходит одним именем;
+    канал и группа — названием. Не переслано — `None`, и в промпте этой
+    строки нет.
+    """
+    origin = message.forward_origin
+    if isinstance(origin, MessageOriginUser):
+        return origin.sender_user.full_name
+    if isinstance(origin, MessageOriginHiddenUser):
+        return origin.sender_user_name
+    if isinstance(origin, MessageOriginChat):
+        return origin.sender_chat.title
+    if isinstance(origin, MessageOriginChannel):
+        return origin.chat.title
+    return None
+
+
 async def handle_start(message: Message) -> None:
     """Приветствие владельцу."""
     logger.info("Команда /start")
@@ -40,8 +66,9 @@ async def handle_help(message: Message) -> None:
 async def handle_text(message: Message, tasks: TaskService | None) -> None:
     """Текст владельца — поручение: записываем и подтверждаем своими словами.
 
-    Разбора смысла пока нет: задача — это текст как есть. Решение принимает
-    слой операций, обработчик только отправляет его ответ.
+    Пересланное сообщение с текстом — такой же текст: разбирается как
+    поручение, а имя отправителя уходит в разбор отдельным полем. Решение
+    принимает слой операций, обработчик только отправляет его ответ.
     """
     if tasks is None:
         # Бота запустили без клиента базы — записывать некуда, и молчать о
@@ -54,6 +81,7 @@ async def handle_text(message: Message, tasks: TaskService | None) -> None:
         chat_id=message.chat.id,
         telegram_message_id=message.message_id,
         text=message.text or "",
+        forwarded_from=forwarded_sender(message),
     )
     await message.answer(outcome.message)
 

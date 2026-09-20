@@ -192,6 +192,18 @@ class ModelCall(Protocol):
 Clock = Callable[[], datetime]
 
 
+def create_anthropic_client(settings: Settings) -> AsyncAnthropic:
+    """Клиент Claude. Создаётся один раз при запуске бота (§5.1).
+
+    Адрес задан — ходим к посреднику, пусто — к `api.anthropic.com`: ключ и
+    адрес приходят только из окружения (инвариант 1).
+    """
+    return AsyncAnthropic(
+        api_key=settings.anthropic_api_key,
+        base_url=settings.anthropic_base_url,
+    )
+
+
 def anthropic_call(client: AsyncAnthropic, model: str = MODEL) -> ModelCall:
     """Настоящий вызов: структурированный ответ по схеме `Understanding`."""
 
