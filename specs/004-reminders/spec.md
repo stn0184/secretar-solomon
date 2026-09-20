@@ -108,10 +108,10 @@
 - [x] `services/reminders.py::plan` — чистая функция по §6.1 с
       внедряемым «сейчас»; тесты на все ветки (день, время, прошедший
       `before`, прошедший срок, нет срока, не задача).
-- [ ] `db/reminders.py`: `due_reminders`, `mark_sent`, `mark_task_done` —
+- [x] `db/reminders.py`: `due_reminders`, `mark_sent`, `mark_task_done` —
       все с обязательным `owner_telegram_id`; `db/tasks.py`:
       `record_understanding` передаёт список напоминаний.
-- [ ] `services/tasks.py`: план напоминаний считается перед
+- [x] `services/tasks.py`: план напоминаний считается перед
       `record_understanding` и уходит в него; строка «Напомню: …» в
       подтверждении (§6.4); `texts.py` — тексты напоминания, «Срок был»,
       «Напомню», «✓ Сделано».

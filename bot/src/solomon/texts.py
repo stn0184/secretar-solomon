@@ -46,6 +46,11 @@ def format_time(moment: datetime) -> str:
     return f"{moment:%H:%M}"
 
 
+def format_date(moment: datetime) -> str:
+    """«25 сентября» — день без дня недели, когда важна сама дата."""
+    return f"{moment.day} {MONTHS[moment.month - 1]}"
+
+
 def format_due(due_at: datetime, precision: str | None) -> str:
     """Срок словами: день, а со временем — и час.
 
@@ -57,6 +62,27 @@ def format_due(due_at: datetime, precision: str | None) -> str:
     if precision == "time":
         return f"{day}, {format_time(due_at)}"
     return day
+
+
+def format_remind_at(fire_at: datetime, now: datetime) -> str:
+    """Когда бот постучится: «сегодня в 18:00», «25 сентября в 09:00» (§6.4).
+
+    Одно правило на все случаи: дата и время ближайшего напоминания, какой бы
+    ступенью оно ни было. Оба момента ждутся в поясе владельца.
+    """
+    day = "сегодня" if fire_at.date() == now.date() else format_date(fire_at)
+    return f"{day} в {format_time(fire_at)}"
+
+
+def format_due_moment(due_at: datetime, now: datetime) -> str:
+    """Срок в самом напоминании: «сегодня, 18:00», «пятница, 25 сентября, 18:00».
+
+    Здесь час называется всегда, даже у срока «в пятницу»
+    (`techspec/06-reminders.md` §6.2): бот стучится именно в этот час, и
+    человеку важно видеть, о каком моменте речь.
+    """
+    day = "сегодня" if due_at.date() == now.date() else format_day(due_at)
+    return f"{day}, {format_time(due_at)}"
 
 
 START = (
@@ -105,9 +131,14 @@ def recorded_reply(
     due: str | None = None,
     review_reason: str | None = None,
     priority: str = "normal",
+    remind_at: str | None = None,
 ) -> str:
-    """Подтверждение записи: суть, срок, приоритет (если не обычный) и
-    причина «перепроверьте».
+    """Подтверждение записи: суть, срок, когда напомню, приоритет (если не
+    обычный) и причина «перепроверьте».
+
+    Строка «Напомню» есть только тогда, когда напоминание вправду
+    запланировано (§6.4): обещать её без плана значило бы сказать о том,
+    чего не будет (инвариант 4).
 
     Из ответа модели дословно уходит только `review_reason`
     (`techspec/05-ai.md` §5.4) — остальное собрано здесь.
@@ -115,11 +146,38 @@ def recorded_reply(
     parts = [RECORDED_BY_KIND.get(kind, RECORDED_BY_KIND["task"]).format(title=title)]
     if due:
         parts.append(f"Срок: {due}")
+    if remind_at:
+        parts.append(f"Напомню: {remind_at}")
     if priority in PRIORITY_WORDS:
         parts.append(PRIORITY_WORDS[priority])
     if review_reason:
         parts.append(review_reason)
     return ". ".join(parts)
+
+
+# Напоминание и кнопка под ним (`techspec/06-reminders.md` §6.2, §6.3).
+DONE_BUTTON = "Сделано"
+DONE_MARK = "✓ Сделано"
+DONE_ANSWER = "Задача закрыта."
+DONE_UNKNOWN = "Не нашёл эту задачу."
+
+
+def reminder(title: str, due: str | None, overdue: bool) -> str:
+    """Текст напоминания: о чём и к какому сроку.
+
+    `overdue` — срок уже прошёл в момент отправки (бот был выключен): тогда
+    «Срок был», и человек видит, что напоминание догоняет, а не опережает.
+    Опоздание самого напоминания на текст не влияет.
+    """
+    lines = [f"Напоминаю: {title}"]
+    if due:
+        lines.append(f"{'Срок был' if overdue else 'Срок'}: {due}")
+    return "\n".join(lines)
+
+
+def done_message(text: str) -> str:
+    """Сообщение напоминания после нажатия кнопки: та же суть и отметка."""
+    return f"{text}\n\n{DONE_MARK}"
 
 
 NOT_SAVED = "Не смог записать: база не ответила. Попробуйте ещё раз."

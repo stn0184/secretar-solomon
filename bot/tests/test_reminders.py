@@ -7,10 +7,21 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import cast
 from zoneinfo import ZoneInfo
 
 from solomon.services.reminders import plan
-from tests.conftest import OWNER_TIMEZONE
+from solomon.services.tasks import TaskService
+from solomon.services.understanding import Understanding
+from tests.conftest import (
+    OWNER_ID,
+    OWNER_TIMEZONE,
+    FakeAnalyst,
+    FakeMessages,
+    FakeUnderstandings,
+    make_settings,
+    make_understanding,
+)
 
 TZ = ZoneInfo(OWNER_TIMEZONE)
 
@@ -104,3 +115,58 @@ def test_plan_is_ready_for_the_database_as_rows() -> None:
     assert rows[0]["stage"] == "before"
     assert rows[0]["fire_at"].startswith("2026-09-25T09:00")
     assert rows[1]["stage"] == "due"
+
+
+def build_service(
+    understanding: Understanding, now: datetime
+) -> tuple[TaskService, FakeUnderstandings]:
+    """Приём поручения на подменённой базе и с остановленными часами."""
+    understandings = FakeUnderstandings()
+    service = TaskService(
+        settings=make_settings(),
+        record_message=FakeMessages(),
+        record_understanding=understandings,
+        analyst=FakeAnalyst(understanding),
+        clock=lambda: now,
+    )
+    return service, understandings
+
+
+async def record(understanding: Understanding, now: datetime) -> tuple[str, list[dict[str, str]]]:
+    """Ответ человеку и напоминания, ушедшие в базу тем же вызовом."""
+    service, understandings = build_service(understanding, now)
+    outcome = await service.record_from_message(
+        chat_id=OWNER_ID, telegram_message_id=7, text="в пятницу отправить расчёт"
+    )
+    rows = cast(list[dict[str, str]], understandings.calls[0]["reminders"])
+    return outcome.message, rows
+
+
+async def test_confirmation_names_the_nearest_reminder() -> None:
+    """«Напомню» — про ближайшую ступень, а не про срок (§6.4)."""
+    message, rows = await record(
+        make_understanding(title="отправить расчёт", due_at=FRIDAY_END_OF_DAY, due_precision="day"),
+        MONDAY_MORNING,
+    )
+
+    assert "Напомню: 25 сентября в 09:00" in message
+    assert [row["stage"] for row in rows] == ["before", "due"]
+
+
+async def test_confirmation_says_today_when_the_reminder_is_today() -> None:
+    today = MONDAY_MORNING.replace(hour=18)
+    message, rows = await record(
+        make_understanding(title="отправить расчёт", due_at=today, due_precision="day"),
+        MONDAY_MORNING,
+    )
+
+    assert "Напомню: сегодня в 18:00" in message
+    assert [row["stage"] for row in rows] == ["due"]
+
+
+async def test_task_without_a_due_date_promises_nothing() -> None:
+    """Напоминания нет — и обещания нет: бот не говорит о том, чего не будет."""
+    message, rows = await record(make_understanding(title="купить лампочку"), MONDAY_MORNING)
+
+    assert "Напомню" not in message
+    assert rows == []

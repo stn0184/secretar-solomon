@@ -18,8 +18,9 @@ id из текста некому (`techspec/04-access.md` §4.3).
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
 from supabase import Client
@@ -27,10 +28,13 @@ from supabase import Client
 from solomon import texts
 from solomon.config import Settings
 from solomon.db import tasks as db_tasks
-from solomon.db.tasks import DatabaseError, SavedMessage, Task
+from solomon.db.rpc import DatabaseError
+from solomon.db.tasks import SavedMessage, Task
+from solomon.services.reminders import Planned, next_fire_at, plan
 from solomon.services.understanding import (
     TASK_KINDS,
     Analysis,
+    Clock,
     Understanding,
     UnderstandingService,
     Verdict,
@@ -80,6 +84,7 @@ class UnderstandingRecorder(Protocol):
         ai_output_tokens: int | None,
         reply: str,
         task: Mapping[str, Any] | None,
+        reminders: Sequence[Mapping[str, Any]],
     ) -> Task | None: ...
 
 
@@ -130,11 +135,18 @@ class TaskService:
         record_message: MessageRecorder,
         record_understanding: UnderstandingRecorder,
         analyst: Analyst,
+        clock: Clock | None = None,
     ) -> None:
         self._settings = settings
         self._record_message = record_message
         self._record_understanding = record_understanding
         self._analyst = analyst
+        # «Сейчас» внедряется: от него зависит расписание напоминаний, и
+        # тесты не должны угадывать, который час (`services/reminders.py`).
+        self._clock = clock or self._now
+
+    def _now(self) -> datetime:
+        return datetime.now(self._settings.owner_timezone)
 
     @classmethod
     def with_database(cls, settings: Settings, db: Client, analyst: Analyst) -> TaskService:
@@ -161,6 +173,7 @@ class TaskService:
             ai_output_tokens: int | None,
             reply: str,
             task: Mapping[str, Any] | None,
+            reminders: Sequence[Mapping[str, Any]],
         ) -> Task | None:
             return await db_tasks.record_understanding(
                 db,
@@ -172,6 +185,7 @@ class TaskService:
                 ai_output_tokens=ai_output_tokens,
                 reply=reply,
                 task=task,
+                reminders=reminders,
             )
 
         return cls(
@@ -215,9 +229,17 @@ class TaskService:
             return RecordOutcome(ok=True, message=saved.reply)
 
         verdict = await self._analyst.analyze(text, forwarded_from=forwarded_from)
+        now = self._clock()
         if isinstance(verdict, Analysis):
             understanding = verdict.understanding
-            reply = self._reply_for(understanding)
+            planned = plan(
+                due_at=understanding.due_at,
+                due_precision=understanding.due_precision,
+                kind=understanding.kind,
+                timezone=self._settings.owner_timezone,
+                now=now,
+            )
+            reply = self._reply_for(understanding, planned, now)
             analysis: Mapping[str, Any] | None = understanding.model_dump(mode="json")
             task: Mapping[str, Any] | None = (
                 task_fields(understanding) if understanding.kind in TASK_KINDS else None
@@ -227,6 +249,8 @@ class TaskService:
             output_tokens: int | None = verdict.output_tokens
         else:
             # Разбора не случилось: записываем буквально и говорим об этом.
+            # Срока у такой задачи нет, значит и напоминать не о чем.
+            planned = []
             reply = texts.RECORDED_AS_IS.format(text=summarize(text))
             analysis = None
             task = literal_fields(text)
@@ -244,6 +268,7 @@ class TaskService:
                 ai_output_tokens=output_tokens,
                 reply=reply,
                 task=task,
+                reminders=[item.as_row() for item in planned],
             )
         except DatabaseError as error:
             logger.warning("Разбор не записан: %s", error)
@@ -255,18 +280,34 @@ class TaskService:
             logger.info("Задачи нет: сообщение %s сохранено с разбором", saved.id)
         return RecordOutcome(ok=True, message=reply)
 
-    def _reply_for(self, understanding: Understanding) -> str:
-        """Ответ человеку по видам. Дословно из модели — только причина."""
+    def _reply_for(
+        self, understanding: Understanding, planned: list[Planned], now: datetime
+    ) -> str:
+        """Ответ человеку по видам. Дословно из модели — только причина.
+
+        Строка «Напомню» берётся из того же плана, который уходит в базу
+        (§6.4): бот обещает ровно то, что записал, — и ничего сверх того
+        (инвариант 4).
+        """
         if understanding.kind not in TASK_KINDS:
             return texts.NO_ERRAND
+        timezone = self._settings.owner_timezone
         due = None
         if understanding.due_at is not None:
-            local = understanding.due_at.astimezone(self._settings.owner_timezone)
-            due = texts.format_due(local, understanding.due_precision)
+            due = texts.format_due(
+                understanding.due_at.astimezone(timezone), understanding.due_precision
+            )
+        nearest = next_fire_at(planned)
+        remind_at = (
+            None
+            if nearest is None
+            else texts.format_remind_at(nearest.astimezone(timezone), now.astimezone(timezone))
+        )
         return texts.recorded_reply(
             kind=understanding.kind,
             title=understanding.title,
             due=due,
             review_reason=understanding.review_reason if understanding.needs_review else None,
             priority=understanding.priority,
+            remind_at=remind_at,
         )

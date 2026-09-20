@@ -7,19 +7,35 @@
 from __future__ import annotations
 
 import inspect
+from datetime import datetime
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import pytest
 from supabase import Client
 
+from solomon.db import reminders as db_reminders
 from solomon.db import tasks as db_tasks
-from solomon.db.tasks import DatabaseError, SavedMessage, Task
+from solomon.db.rpc import DatabaseError
+from solomon.db.tasks import SavedMessage, Task
+from tests.conftest import OWNER_TIMEZONE
 
 OWNER_ID = 777
+TZ = ZoneInfo(OWNER_TIMEZONE)
 ROW = {"id": "0e2f", "title": "купить лампочку", "status": "active"}
 MESSAGE_ROW = {"id": "9a71", "text": "купить лампочку", "reply": None}
 ANALYSIS = {"kind": "task", "title": "купить лампочку"}
 TASK_FIELDS = {"title": "купить лампочку", "kind": "task", "needs_review": False}
+REMINDER_ROWS = [{"stage": "before", "fire_at": "2026-09-25T09:00:00+05:00"}]
+REMINDER_ROW = {
+    "id": "b17c",
+    "task_id": "0e2f",
+    "stage": "due",
+    "fire_at": "2026-09-25T18:00:00+05:00",
+    "title": "купить лампочку",
+    "due_at": "2026-09-25T18:00:00+05:00",
+    "due_precision": "day",
+}
 
 
 class FakeResponse:
@@ -139,6 +155,7 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
         ai_output_tokens=45,
         reply="Записал: купить лампочку",
         task=TASK_FIELDS,
+        reminders=REMINDER_ROWS,
     )
 
     assert task == Task(id="0e2f", title="купить лампочку", status="active")
@@ -154,6 +171,7 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
             "ai_output_tokens": 45,
             "reply": "Записал: купить лампочку",
             "task": TASK_FIELDS,
+            "reminders": REMINDER_ROWS,
         },
     )
 
@@ -172,6 +190,7 @@ async def test_record_understanding_without_task_returns_nothing() -> None:
         ai_output_tokens=45,
         reply="Это не похоже на поручение",
         task=None,
+        reminders=[],
     )
 
     assert task is None
@@ -191,6 +210,7 @@ async def test_record_understanding_ignores_empty_composite_row() -> None:
         ai_output_tokens=45,
         reply="Это не похоже на поручение",
         task=None,
+        reminders=[],
     )
 
     assert task is None
@@ -230,12 +250,97 @@ async def test_broken_row_is_a_failure_not_a_half_task() -> None:
         await db_tasks.list_active_tasks(as_client(fake), owner_telegram_id=OWNER_ID, limit=101)
 
 
+async def test_due_reminders_asks_about_the_owner_and_the_moment() -> None:
+    """Отбор созревших: владелец и «сейчас» уходят в функцию явно (§6.2)."""
+    fake = FakeClient(data=[REMINDER_ROW])
+    now = datetime(2026, 9, 25, 18, 0, tzinfo=TZ)
+
+    due = await db_reminders.due_reminders(as_client(fake), owner_telegram_id=OWNER_ID, now=now)
+
+    assert fake.calls[0] == (
+        "rpc",
+        "due_reminders",
+        {"owner_telegram_id": OWNER_ID, "now": now.isoformat()},
+    )
+    assert due[0].task_id == "0e2f"
+    assert due[0].stage == "due"
+    assert due[0].fire_at == datetime(2026, 9, 25, 18, 0, tzinfo=TZ)
+    assert due[0].title == "купить лампочку"
+
+
+async def test_due_reminders_without_rows_is_an_empty_tick() -> None:
+    fake = FakeClient(data=None)
+
+    assert (
+        await db_reminders.due_reminders(
+            as_client(fake), owner_telegram_id=OWNER_ID, now=datetime.now(TZ)
+        )
+        == []
+    )
+
+
+async def test_broken_reminder_row_is_a_failure() -> None:
+    """Нет полей задачи — отказ: напоминание без сути отправлять нечего."""
+    fake = FakeClient(data=[{"id": "b17c", "task_id": "0e2f"}])
+
+    with pytest.raises(DatabaseError):
+        await db_reminders.due_reminders(
+            as_client(fake), owner_telegram_id=OWNER_ID, now=datetime.now(TZ)
+        )
+
+
+async def test_mark_sent_passes_ids_and_the_telegram_message() -> None:
+    fake = FakeClient(data=None)
+
+    await db_reminders.mark_sent(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        reminder_ids=["b17c"],
+        telegram_message_id=51,
+    )
+
+    assert fake.calls[0] == (
+        "rpc",
+        "mark_reminders_sent",
+        {"owner_telegram_id": OWNER_ID, "ids": ["b17c"], "telegram_message_id": 51},
+    )
+
+
+async def test_mark_task_done_returns_the_closed_task() -> None:
+    fake = FakeClient(data={**ROW, "status": "done"})
+
+    task = await db_reminders.mark_task_done(
+        as_client(fake), owner_telegram_id=OWNER_ID, task_id="0e2f"
+    )
+
+    assert fake.calls[0] == (
+        "rpc",
+        "mark_task_done",
+        {"owner_telegram_id": OWNER_ID, "task_id": "0e2f"},
+    )
+    assert task == Task(id="0e2f", title="купить лампочку", status="done")
+
+
+async def test_mark_task_done_returns_nothing_for_a_foreign_task() -> None:
+    """Чужой или выдуманный `task_id`: база не нашла, и закрывать нечего (§6.3)."""
+    fake = FakeClient(data={"id": None, "title": None, "status": None})
+
+    task = await db_reminders.mark_task_done(
+        as_client(fake), owner_telegram_id=OWNER_ID, task_id="0e2f"
+    )
+
+    assert task is None
+
+
 def test_owner_is_required_by_every_query() -> None:
     """Инвариант 2 держится сигнатурой: владельца не забыть и не подставить."""
     for query in (
         db_tasks.record_message,
         db_tasks.record_understanding,
         db_tasks.list_active_tasks,
+        db_reminders.due_reminders,
+        db_reminders.mark_sent,
+        db_reminders.mark_task_done,
     ):
         parameter = inspect.signature(query).parameters["owner_telegram_id"]
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY

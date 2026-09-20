@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -20,7 +20,8 @@ from aiogram.methods.base import TelegramType
 from aiogram.types import Chat, Message, MessageOriginUser, Update, User, Voice
 
 from solomon.config import Settings
-from solomon.db.tasks import DatabaseError, SavedMessage, Task
+from solomon.db.rpc import DatabaseError
+from solomon.db.tasks import SavedMessage, Task
 from solomon.services.understanding import Analysis, Understanding, Verdict
 
 OWNER_ID = 777
@@ -120,6 +121,7 @@ class FakeUnderstandings:
         ai_output_tokens: int | None,
         reply: str,
         task: Mapping[str, Any] | None,
+        reminders: Sequence[Mapping[str, Any]],
     ) -> Task | None:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -133,6 +135,7 @@ class FakeUnderstandings:
                 "ai_output_tokens": ai_output_tokens,
                 "reply": reply,
                 "task": task,
+                "reminders": list(reminders),
             }
         )
         return self.task
