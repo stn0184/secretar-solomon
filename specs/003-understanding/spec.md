@@ -137,7 +137,7 @@
       `.env.example`; тесты в `test_config.py` (ключ, пояс, адрес пустой и
       заданный); `anthropic` в
       `pyproject.toml` с точной версией (`techspec/01-stack.md` §1.1).
-- [ ] `services/understanding.py`: Pydantic-модель `Understanding`,
+- [x] `services/understanding.py`: Pydantic-модель `Understanding`,
       системный промпт по `techspec/05-ai.md` §5.2, вызов
       `messages.parse`, разбор отказов §5.4 в результат «разобрал /
       не разобрал»; клиент и модель подменяемы через протокол.
