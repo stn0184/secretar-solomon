@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram import Bot
@@ -22,6 +23,9 @@ from solomon.db.tasks import DatabaseError, Task
 
 OWNER_ID = 777
 STRANGER_ID = 999
+# Пояс владельца в тестах: +05:00 круглый год, без перехода на летнее время —
+# ожидаемые даты считаются глазами и не зависят от месяца.
+OWNER_TIMEZONE = "Asia/Yekaterinburg"
 # Игрушечный токен: сети в тестах нет, за S105/S106 здесь отвечает per-file-ignores.
 TEST_TOKEN = "123456789:test-token"
 
@@ -99,14 +103,21 @@ class BrokenRecorder:
         raise DatabaseError("ConnectTimeout: timed out")
 
 
-@pytest.fixture
-def settings() -> Settings:
+def make_settings() -> Settings:
+    """Настройки для тестов: один набор на все файлы, а не копия в каждом."""
     return Settings(
         telegram_bot_token=TEST_TOKEN,
         owner_telegram_id=OWNER_ID,
+        owner_timezone=ZoneInfo(OWNER_TIMEZONE),
         supabase_url="https://example.supabase.co",
         supabase_service_role_key="service-role-key",
+        anthropic_api_key="sk-ant-test",
     )
+
+
+@pytest.fixture
+def settings() -> Settings:
+    return make_settings()
 
 
 @pytest.fixture

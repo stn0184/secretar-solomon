@@ -7,16 +7,10 @@
 from __future__ import annotations
 
 from solomon import texts
-from solomon.config import Settings
 from solomon.services.tasks import SUMMARY_LIMIT, TaskService, summarize
-from tests.conftest import OWNER_ID, BrokenRecorder, FakeRecorder
+from tests.conftest import OWNER_ID, BrokenRecorder, FakeRecorder, make_settings
 
-SETTINGS = Settings(
-    telegram_bot_token="123456:test-token",
-    owner_telegram_id=OWNER_ID,
-    supabase_url="https://example.supabase.co",
-    supabase_service_role_key="service-role-key",
-)
+SETTINGS = make_settings()
 
 
 def test_short_text_is_retold_as_is() -> None:

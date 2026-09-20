@@ -5,9 +5,11 @@ description = "Соломон — Telegram-бот на long polling"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiogram==3.31.0",
+    "anthropic==1.7.0",
     "supabase==2.31.0",
     "httpx==0.28.1",
     "python-dotenv==1.2.3",
+    "tzdata==2026.4",
 ]
 
 [project.scripts]

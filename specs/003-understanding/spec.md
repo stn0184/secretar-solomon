@@ -131,7 +131,7 @@
 - [x] Миграция: колонки `tasks` и `messages` по `techspec/03-schema.md`
       §3.2–3.3, функции `record_message` и `record_understanding` вместо
       `record_task` (§3.4). Правка §3 в том же коммите.
-- [ ] `config.py`: `ANTHROPIC_API_KEY`, необязательный `ANTHROPIC_BASE_URL`
+- [x] `config.py`: `ANTHROPIC_API_KEY`, необязательный `ANTHROPIC_BASE_URL`
       (`techspec/05-ai.md` §5.1), `OWNER_TIMEZONE` (проверка через
       `zoneinfo`, неверный пояс — та же ошибка, что пустая переменная);
       `.env.example`; тесты в `test_config.py` (ключ, пояс, адрес пустой и

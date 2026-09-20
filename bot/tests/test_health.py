@@ -4,13 +4,9 @@ import httpx
 
 from solomon.config import Settings
 from solomon.db.health import HealthReport, check_database, report_for_error, report_for_status
+from tests.conftest import make_settings
 
-SETTINGS = Settings(
-    telegram_bot_token="123456:test-token",
-    owner_telegram_id=777,
-    supabase_url="https://example.supabase.co",
-    supabase_service_role_key="service-role-key",
-)
+SETTINGS = make_settings()
 
 
 def test_two_hundred_means_alive() -> None:
