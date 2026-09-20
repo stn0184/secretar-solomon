@@ -15,6 +15,7 @@ from tests.conftest import (
     FakeMessages,
     FakeUnderstandings,
     RecordingSession,
+    make_forwarded_update,
     make_understanding,
     make_update,
     make_voice_update,
@@ -153,3 +154,20 @@ async def test_bot_without_database_says_nothing_was_saved(
     await dispatcher.feed_update(bot, make_update("купить лампочку", update_id=9))
 
     assert session.texts == [texts.NOT_SAVED]
+
+
+async def test_forwarded_message_is_an_errand_with_a_named_sender(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    service, messages, analyst = build_tasks(settings, title="принять смету от Ани")
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(
+        bot, make_forwarded_update("пришлю смету завтра", sender="Аня", update_id=10)
+    )
+
+    # Пересланное с текстом — обычное поручение, а имя отправителя уходит
+    # в разбор отдельно: чьё это обещание (`spec.md` §3.3).
+    assert session.texts == ["Записал: принять смету от Ани"]
+    assert messages.calls[0]["text"] == "пришлю смету завтра"
+    assert analyst.calls == [("пришлю смету завтра", "Аня")]

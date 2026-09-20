@@ -14,9 +14,10 @@ from zoneinfo import ZoneInfo
 import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
+from aiogram.enums import MessageOriginType
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
-from aiogram.types import Chat, Message, Update, User, Voice
+from aiogram.types import Chat, Message, MessageOriginUser, Update, User, Voice
 
 from solomon.config import Settings
 from solomon.db.tasks import DatabaseError, SavedMessage, Task
@@ -213,6 +214,27 @@ def make_update(text: str, from_id: int = OWNER_ID, update_id: int = 1) -> Updat
         chat=Chat(id=from_id, type="private"),
         from_user=user,
         text=text,
+    )
+    return Update(update_id=update_id, message=message)
+
+
+def make_forwarded_update(
+    text: str, sender: str = "Аня", from_id: int = OWNER_ID, update_id: int = 1
+) -> Update:
+    """Пересланное владельцу сообщение с текстом: автор оригинала назван."""
+    user = User(id=from_id, is_bot=False, first_name="Тим")
+    origin = MessageOriginUser(
+        type=MessageOriginType.USER,
+        date=datetime.now(UTC),
+        sender_user=User(id=555, is_bot=False, first_name=sender),
+    )
+    message = Message(
+        message_id=update_id,
+        date=datetime.now(UTC),
+        chat=Chat(id=from_id, type="private"),
+        from_user=user,
+        text=text,
+        forward_origin=origin,
     )
     return Update(update_id=update_id, message=message)
 
