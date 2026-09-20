@@ -18,7 +18,8 @@ from typing import Any
 
 from supabase import Client
 
-RECORD_TASK_FUNCTION = "record_task"
+RECORD_MESSAGE_FUNCTION = "record_message"
+RECORD_UNDERSTANDING_FUNCTION = "record_understanding"
 TASKS_TABLE = "tasks"
 ACTIVE_STATUS = "active"
 TASK_COLUMNS = "id, title, status"
@@ -42,12 +43,43 @@ class Task:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class SavedMessage:
+    """Строка `messages` после первого шага приёма (§3.4).
+
+    `reply` пуст — ответа этому сообщению ещё не давали: либо оно только что
+    заведено, либо прошлый заход упал между шагами и разбирать нужно заново.
+    """
+
+    id: str
+    reply: str | None
+
+
 async def _ask(call: Callable[[], Any]) -> Any:
     """Сходить в базу из отдельного потока; любой отказ — свой тип."""
     try:
         return await asyncio.to_thread(call)
     except Exception as error:  # отказ клиента превращается в DatabaseError, а не в трассировку
         raise DatabaseError(f"{type(error).__name__}: {error}") from error
+
+
+def _single_row(data: Any) -> Any:
+    """PostgREST отдаёт составную строку объектом; список из одной — тоже."""
+    if isinstance(data, list):
+        return data[0] if data else None
+    return data
+
+
+def _message_from_row(row: Any) -> SavedMessage:
+    """Разобрать строку сообщения. Без `id` второй шаг некуда адресовать."""
+    if not isinstance(row, Mapping):
+        raise DatabaseError("База вернула не строку сообщения.")
+    try:
+        message_id = str(row["id"])
+    except KeyError as error:
+        raise DatabaseError(f"В ответе базы нет поля сообщения: {error}.") from error
+    reply = row.get("reply")
+    return SavedMessage(id=message_id, reply=None if reply is None else str(reply))
 
 
 def _task_from_row(row: Any) -> Task:
@@ -60,20 +92,20 @@ def _task_from_row(row: Any) -> Task:
         raise DatabaseError(f"В ответе базы нет поля задачи: {error}.") from error
 
 
-async def record_task(
+async def record_message(
     db: Client,
     *,
     owner_telegram_id: int,
     chat_id: int,
     telegram_message_id: int,
     text: str,
-) -> Task:
-    """Записать сообщение и задачу одной транзакцией.
+) -> SavedMessage:
+    """Шаг первый: сохранить сообщение до всякого разбора.
 
-    Зовётся SQL-функция `record_task` (`techspec/03-schema.md` §3.4): две
-    вставки подряд оставили бы сообщение без задачи, если между ними откажет
-    база. Повтор того же обновления новых строк не пишет и возвращает уже
-    заведённую задачу.
+    Зовётся SQL-функция `record_message` (`techspec/03-schema.md` §3.4):
+    поручение лежит в базе с первой секунды (инвариант 5), даже если модель
+    потом не ответит. Повтор того же обновления новой строки не пишет и
+    возвращает прежнюю — вместе с ответом, который бот уже давал.
     """
     params = {
         "owner_telegram_id": owner_telegram_id,
@@ -81,13 +113,47 @@ async def record_task(
         "telegram_message_id": telegram_message_id,
         "text": text,
     }
-    data = await _ask(lambda: db.rpc(RECORD_TASK_FUNCTION, params).execute().data)
-    # PostgREST отдаёт составную строку объектом, но на всякий случай
-    # принимается и список из одной строки.
-    if isinstance(data, list):
-        data = data[0] if data else None
+    data = _single_row(await _ask(lambda: db.rpc(RECORD_MESSAGE_FUNCTION, params).execute().data))
     if data is None:
-        raise DatabaseError("База не вернула задачу.")
+        raise DatabaseError("База не вернула сообщение.")
+    return _message_from_row(data)
+
+
+async def record_understanding(
+    db: Client,
+    *,
+    message_id: str,
+    owner_telegram_id: int,
+    analysis: Mapping[str, Any] | None,
+    ai_model: str | None,
+    ai_input_tokens: int | None,
+    ai_output_tokens: int | None,
+    reply: str,
+    task: Mapping[str, Any] | None,
+) -> Task | None:
+    """Шаг второй: разбор, ответ бота и задача — одной транзакцией.
+
+    Возвращает заведённую задачу; `None` — когда задачи и не должно быть
+    (разговор, сведение о себе). Владелец передаётся явно и сверяется с
+    владельцем сообщения на стороне базы (`techspec/04-access.md` §4.3).
+    """
+    params = {
+        "message_id": message_id,
+        "owner_telegram_id": owner_telegram_id,
+        "analysis": analysis,
+        "ai_model": ai_model,
+        "ai_input_tokens": ai_input_tokens,
+        "ai_output_tokens": ai_output_tokens,
+        "reply": reply,
+        "task": task,
+    }
+    data = _single_row(
+        await _ask(lambda: db.rpc(RECORD_UNDERSTANDING_FUNCTION, params).execute().data)
+    )
+    # Функция возвращает пустую строку составного типа, когда задачи нет:
+    # у неё нет и `id`, и это не отказ базы, а «записывать было нечего».
+    if data is None or (isinstance(data, Mapping) and data.get("id") is None):
+        return None
     return _task_from_row(data)
 
 

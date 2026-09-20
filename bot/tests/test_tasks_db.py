@@ -13,10 +13,13 @@ import pytest
 from supabase import Client
 
 from solomon.db import tasks as db_tasks
-from solomon.db.tasks import DatabaseError, Task
+from solomon.db.tasks import DatabaseError, SavedMessage, Task
 
 OWNER_ID = 777
 ROW = {"id": "0e2f", "title": "купить лампочку", "status": "active"}
+MESSAGE_ROW = {"id": "9a71", "text": "купить лампочку", "reply": None}
+ANALYSIS = {"kind": "task", "title": "купить лампочку"}
+TASK_FIELDS = {"title": "купить лампочку", "kind": "task", "needs_review": False}
 
 
 class FakeResponse:
@@ -71,10 +74,10 @@ def as_client(fake: FakeClient) -> Client:
     return cast(Client, fake)
 
 
-async def test_record_task_calls_rpc_with_whole_message() -> None:
-    fake = FakeClient(data=ROW)
+async def test_record_message_calls_rpc_with_whole_text() -> None:
+    fake = FakeClient(data=MESSAGE_ROW)
 
-    task = await db_tasks.record_task(
+    saved = await db_tasks.record_message(
         as_client(fake),
         owner_telegram_id=OWNER_ID,
         chat_id=42,
@@ -82,10 +85,10 @@ async def test_record_task_calls_rpc_with_whole_message() -> None:
         text="купить лампочку",
     )
 
-    assert task == Task(id="0e2f", title="купить лампочку", status="active")
+    assert saved == SavedMessage(id="9a71", reply=None)
     assert fake.calls[0] == (
         "rpc",
-        "record_task",
+        "record_message",
         {
             "owner_telegram_id": OWNER_ID,
             "chat_id": 42,
@@ -95,10 +98,11 @@ async def test_record_task_calls_rpc_with_whole_message() -> None:
     )
 
 
-async def test_record_task_accepts_single_row_list() -> None:
-    fake = FakeClient(data=[ROW])
+async def test_record_message_returns_the_reply_already_given() -> None:
+    """Повтор обновления: ответ бота лежит в строке, и звать модель незачем."""
+    fake = FakeClient(data=[{**MESSAGE_ROW, "reply": "Записал: купить лампочку"}])
 
-    task = await db_tasks.record_task(
+    saved = await db_tasks.record_message(
         as_client(fake),
         owner_telegram_id=OWNER_ID,
         chat_id=42,
@@ -106,14 +110,14 @@ async def test_record_task_accepts_single_row_list() -> None:
         text="купить лампочку",
     )
 
-    assert task.title == "купить лампочку"
+    assert saved.reply == "Записал: купить лампочку"
 
 
-async def test_record_task_without_row_is_a_failure() -> None:
+async def test_record_message_without_row_is_a_failure() -> None:
     fake = FakeClient(data=None)
 
     with pytest.raises(DatabaseError):
-        await db_tasks.record_task(
+        await db_tasks.record_message(
             as_client(fake),
             owner_telegram_id=OWNER_ID,
             chat_id=42,
@@ -122,11 +126,81 @@ async def test_record_task_without_row_is_a_failure() -> None:
         )
 
 
+async def test_record_understanding_sends_analysis_and_task() -> None:
+    fake = FakeClient(data=ROW)
+
+    task = await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a71",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=45,
+        reply="Записал: купить лампочку",
+        task=TASK_FIELDS,
+    )
+
+    assert task == Task(id="0e2f", title="купить лампочку", status="active")
+    assert fake.calls[0] == (
+        "rpc",
+        "record_understanding",
+        {
+            "message_id": "9a71",
+            "owner_telegram_id": OWNER_ID,
+            "analysis": ANALYSIS,
+            "ai_model": "claude-opus-5",
+            "ai_input_tokens": 120,
+            "ai_output_tokens": 45,
+            "reply": "Записал: купить лампочку",
+            "task": TASK_FIELDS,
+        },
+    )
+
+
+async def test_record_understanding_without_task_returns_nothing() -> None:
+    """Разговор: разбор записан, задачи нет — и это не отказ базы."""
+    fake = FakeClient(data=None)
+
+    task = await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a71",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=45,
+        reply="Это не похоже на поручение",
+        task=None,
+    )
+
+    assert task is None
+
+
+async def test_record_understanding_ignores_empty_composite_row() -> None:
+    """PostgREST может отдать пустую строку составного типа вместо null."""
+    fake = FakeClient(data={"id": None, "title": None, "status": None})
+
+    task = await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a71",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=45,
+        reply="Это не похоже на поручение",
+        task=None,
+    )
+
+    assert task is None
+
+
 async def test_client_error_becomes_database_error() -> None:
     fake = FakeClient(error=ConnectionError("no route to host"))
 
     with pytest.raises(DatabaseError) as failure:
-        await db_tasks.record_task(
+        await db_tasks.record_message(
             as_client(fake),
             owner_telegram_id=OWNER_ID,
             chat_id=42,
@@ -158,7 +232,11 @@ async def test_broken_row_is_a_failure_not_a_half_task() -> None:
 
 def test_owner_is_required_by_every_query() -> None:
     """Инвариант 2 держится сигнатурой: владельца не забыть и не подставить."""
-    for query in (db_tasks.record_task, db_tasks.list_active_tasks):
+    for query in (
+        db_tasks.record_message,
+        db_tasks.record_understanding,
+        db_tasks.list_active_tasks,
+    ):
         parameter = inspect.signature(query).parameters["owner_telegram_id"]
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
         assert parameter.default is inspect.Parameter.empty

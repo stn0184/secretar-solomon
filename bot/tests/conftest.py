@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -19,7 +19,8 @@ from aiogram.methods.base import TelegramType
 from aiogram.types import Chat, Message, Update, User, Voice
 
 from solomon.config import Settings
-from solomon.db.tasks import DatabaseError, Task
+from solomon.db.tasks import DatabaseError, SavedMessage, Task
+from solomon.services.understanding import Analysis, Understanding, Verdict
 
 OWNER_ID = 777
 STRANGER_ID = 999
@@ -28,6 +29,8 @@ STRANGER_ID = 999
 OWNER_TIMEZONE = "Asia/Yekaterinburg"
 # Игрушечный токен: сети в тестах нет, за S105/S106 здесь отвечает per-file-ignores.
 TEST_TOKEN = "123456789:test-token"
+
+_DEFAULT_TASK = Task(id="0e2f", title="купить лампочку", status="active")
 
 
 class RecordingSession(BaseSession):
@@ -73,16 +76,19 @@ class RecordingSession(BaseSession):
         return [m.text for m in self.sent if isinstance(m, SendMessage)]
 
 
-class FakeRecorder:
-    """Вместо базы — список того, что в неё просили записать."""
+class FakeMessages:
+    """Первый шаг приёма: вместо базы — список того, что в неё просили записать."""
 
-    def __init__(self, task: Task | None = None) -> None:
+    def __init__(self, message: SavedMessage | None = None, broken: bool = False) -> None:
         self.calls: list[dict[str, object]] = []
-        self.task = task or Task(id="0e2f", title="купить лампочку", status="active")
+        self.message = message or SavedMessage(id="9a71", reply=None)
+        self.broken = broken
 
     async def __call__(
         self, *, owner_telegram_id: int, chat_id: int, telegram_message_id: int, text: str
-    ) -> Task:
+    ) -> SavedMessage:
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
         self.calls.append(
             {
                 "owner_telegram_id": owner_telegram_id,
@@ -91,16 +97,82 @@ class FakeRecorder:
                 "text": text,
             }
         )
+        return self.message
+
+
+class FakeUnderstandings:
+    """Второй шаг приёма: разбор, ответ бота и задача одной транзакцией."""
+
+    def __init__(self, task: Task | None = _DEFAULT_TASK, broken: bool = False) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.task = task
+        self.broken = broken
+
+    async def __call__(
+        self,
+        *,
+        message_id: str,
+        owner_telegram_id: int,
+        analysis: Mapping[str, Any] | None,
+        ai_model: str | None,
+        ai_input_tokens: int | None,
+        ai_output_tokens: int | None,
+        reply: str,
+        task: Mapping[str, Any] | None,
+    ) -> Task | None:
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        self.calls.append(
+            {
+                "message_id": message_id,
+                "owner_telegram_id": owner_telegram_id,
+                "analysis": analysis,
+                "ai_model": ai_model,
+                "ai_input_tokens": ai_input_tokens,
+                "ai_output_tokens": ai_output_tokens,
+                "reply": reply,
+                "task": task,
+            }
+        )
         return self.task
 
 
-class BrokenRecorder:
-    """База не ответила."""
+def make_understanding(**fields: Any) -> Understanding:
+    """Ответ модели по схеме §5.3 — меняется только то, что важно тесту."""
+    base: dict[str, Any] = {
+        "kind": "task",
+        "title": "купить лампочку",
+        "due_at": None,
+        "due_precision": None,
+        "priority": "normal",
+        "promise": None,
+        "people": [],
+        "needs_review": False,
+        "review_reason": None,
+        "reply_hint": None,
+    }
+    return Understanding.model_validate({**base, **fields})
 
-    async def __call__(
-        self, *, owner_telegram_id: int, chat_id: int, telegram_message_id: int, text: str
-    ) -> Task:
-        raise DatabaseError("ConnectTimeout: timed out")
+
+class FakeAnalyst:
+    """Вместо Claude — заранее решённый вердикт и список того, что спросили."""
+
+    def __init__(self, verdict: Understanding | Verdict) -> None:
+        self.verdict: Verdict = (
+            Analysis(
+                understanding=verdict,
+                model="claude-opus-5",
+                input_tokens=120,
+                output_tokens=45,
+            )
+            if isinstance(verdict, Understanding)
+            else verdict
+        )
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def analyze(self, text: str, *, forwarded_from: str | None = None) -> Verdict:
+        self.calls.append((text, forwarded_from))
+        return self.verdict
 
 
 def make_settings() -> Settings:

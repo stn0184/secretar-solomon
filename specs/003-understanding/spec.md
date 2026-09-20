@@ -141,9 +141,9 @@
       системный промпт по `techspec/05-ai.md` §5.2, вызов
       `messages.parse`, разбор отказов §5.4 в результат «разобрал /
       не разобрал»; клиент и модель подменяемы через протокол.
-- [ ] `db/tasks.py`: `record_message` и `record_understanding` через RPC;
+- [x] `db/tasks.py`: `record_message` и `record_understanding` через RPC;
       чтение без изменений.
-- [ ] `services/tasks.py`: `record_from_message` — сообщение → разбор →
+- [x] `services/tasks.py`: `record_from_message` — сообщение → разбор →
       разбор с задачей и ответом → ответ; повтор отдаёт сохранённый ответ; сборка ответа по видам (`task`/`idea`/`wish`, `chat`/
       `about_me`, `needs_review`, «как есть») из `texts.py`; срок в
       ответе — по-русски в поясе владельца («пятница, 20 сентября»,
