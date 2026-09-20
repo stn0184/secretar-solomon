@@ -121,3 +121,37 @@ record_understanding(message_id uuid, owner_telegram_id bigint,
 Поля задачи берутся из `task` по именам колонок §3.3; `people` ждётся
 массивом, всё остальное — строками. Прежняя `record_task` (этап 002)
 удалена той же миграцией.
+
+### 3.5 `reminders` — напоминания
+
+Когда и о чём стучаться (§6). Живут в базе, чтобы пережить перезапуск
+бота (`spec.md` §3.4); рождаются в той же транзакции, что задача.
+
+| Колонка | Тип | Что это |
+| --- | --- | --- |
+| `id` | uuid | ключ |
+| `owner_telegram_id` | bigint | владелец (§3.1) |
+| `task_id` | uuid, `references tasks(id) on delete cascade` | о какой задаче |
+| `stage` | text, `check in ('before', 'due')` | заранее или к сроку (§6.1) |
+| `fire_at` | timestamptz | когда стучаться |
+| `sent_at` | timestamptz, nullable | когда отправлено; пусто — ещё ждёт |
+| `telegram_message_id` | bigint, nullable | сообщение в Telegram, под которым кнопка |
+| `created_at` | timestamptz, `default now()` | |
+
+`unique (task_id, stage)`; частичный индекс
+`(owner_telegram_id, fire_at) where sent_at is null` — под запрос тика.
+RLS — как у остальных (§4.2).
+
+Функции (только `service_role`, как §3.4):
+
+- `record_understanding` получает ещё один аргумент `reminders jsonb`
+  (список `{stage, fire_at}`, может быть пустым) и вставляет строки в
+  той же транзакции, что задачу.
+- `due_reminders(owner_telegram_id bigint, now timestamptz)` —
+  созревшие напоминания владельца вместе с полями задачи, только по
+  задачам `status = 'active'`.
+- `mark_reminders_sent(owner_telegram_id bigint, ids uuid[],
+  telegram_message_id bigint)`.
+- `mark_task_done(owner_telegram_id bigint, task_id uuid) returns tasks` —
+  `status = done` и удаление неотправленных напоминаний задачи одной
+  транзакцией; уже закрытая задача — возвращается как есть.
