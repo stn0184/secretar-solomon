@@ -158,7 +158,7 @@
       `test_tasks_service.py` — ветки task / chat / needs_review /
       «как есть», повтор возвращает ту же задачу; `test_handlers.py` —
       пересланное сообщение.
-- [ ] `bot/tests/fixtures/understanding.jsonl` (десять примеров) и
+- [x] `bot/tests/fixtures/understanding.jsonl` (десять примеров) и
       маркер `live` в `pyproject.toml`: без `ANTHROPIC_API_KEY` тесты
       `live` пропускаются, не падают.
 - [ ] Документы: `techspec/02-layout.md` (`services/understanding.py`,

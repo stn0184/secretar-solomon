@@ -57,3 +57,9 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["src", "."]
+markers = [
+    "live: ходит в Claude по-настоящему; нужен ключ, в воротах не участвует",
+]
+# Живой прогон стоит денег и требует ключа, поэтому по умолчанию он вне
+# выборки: `uv run --directory bot pytest -m live` зовёт его явно.
+addopts = "-m 'not live'"
