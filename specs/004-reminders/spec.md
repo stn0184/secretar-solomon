@@ -105,7 +105,7 @@
       с аргументом `reminders jsonb`; функции `due_reminders`,
       `mark_reminders_sent`, `mark_task_done` (`techspec/03-schema.md`
       §3.4–3.5). Правка §3 в том же коммите.
-- [ ] `services/reminders.py::plan` — чистая функция по §6.1 с
+- [x] `services/reminders.py::plan` — чистая функция по §6.1 с
       внедряемым «сейчас»; тесты на все ветки (день, время, прошедший
       `before`, прошедший срок, нет срока, не задача).
 - [ ] `db/reminders.py`: `due_reminders`, `mark_sent`, `mark_task_done` —
