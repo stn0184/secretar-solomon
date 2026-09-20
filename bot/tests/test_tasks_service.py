@@ -63,6 +63,26 @@ def test_long_text_is_cut_to_the_limit_with_ellipsis() -> None:
     assert len(retold) == SUMMARY_LIMIT + 1
 
 
+async def test_urgent_task_names_its_priority() -> None:
+    analyst = FakeAnalyst(
+        make_understanding(
+            title="отправить расчёт клиенту",
+            due_at=FRIDAY_EVENING.replace(hour=18, minute=0),
+            due_precision="day",
+            priority="high",
+        )
+    )
+    service, _, _ = build_service(analyst)
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="в пятницу отправить расчёт клиенту, срочно"
+    )
+
+    assert outcome.message == (
+        "Записал: отправить расчёт клиенту. Срок: пятница, 18 сентября. Приоритет: высокий"
+    )
+
+
 async def test_task_with_a_due_date_is_recorded_and_retold() -> None:
     analyst = FakeAnalyst(
         make_understanding(

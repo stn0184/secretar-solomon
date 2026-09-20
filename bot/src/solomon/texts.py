@@ -96,10 +96,18 @@ NO_ERRAND = "Это не похоже на поручение — ничего �
 RECORDED_AS_IS = "Записал как есть: «{text}». Разобрать сейчас не смог."
 
 
+PRIORITY_WORDS = {"high": "Приоритет: высокий", "low": "Приоритет: низкий"}
+
+
 def recorded_reply(
-    kind: str, title: str, due: str | None = None, review_reason: str | None = None
+    kind: str,
+    title: str,
+    due: str | None = None,
+    review_reason: str | None = None,
+    priority: str = "normal",
 ) -> str:
-    """Подтверждение записи: суть, срок и причина «перепроверьте».
+    """Подтверждение записи: суть, срок, приоритет (если не обычный) и
+    причина «перепроверьте».
 
     Из ответа модели дословно уходит только `review_reason`
     (`techspec/05-ai.md` §5.4) — остальное собрано здесь.
@@ -107,6 +115,8 @@ def recorded_reply(
     parts = [RECORDED_BY_KIND.get(kind, RECORDED_BY_KIND["task"]).format(title=title)]
     if due:
         parts.append(f"Срок: {due}")
+    if priority in PRIORITY_WORDS:
+        parts.append(PRIORITY_WORDS[priority])
     if review_reason:
         parts.append(review_reason)
     return ". ".join(parts)

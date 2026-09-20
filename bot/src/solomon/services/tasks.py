@@ -268,4 +268,5 @@ class TaskService:
             title=understanding.title,
             due=due,
             review_reason=understanding.review_reason if understanding.needs_review else None,
+            priority=understanding.priority,
         )
