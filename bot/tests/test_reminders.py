@@ -14,6 +14,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram import Bot, Dispatcher
+from aiogram.methods import SendMessage
+from aiogram.types import InlineKeyboardMarkup
+from supabase import Client
 
 from solomon import texts
 from solomon.db.reminders import DueReminder
@@ -21,6 +24,7 @@ from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import Task
 from solomon.handlers import done_keyboard
 from solomon.runner import build_dispatcher
+from solomon.runner import build_reminders as build_reminders_service
 from solomon.services.reminders import ReminderService, by_task, latest, plan
 from solomon.services.tasks import TaskService
 from solomon.services.understanding import Understanding
@@ -480,3 +484,64 @@ def test_reminder_carries_the_done_button() -> None:
     button = keyboard.inline_keyboard[0][0]
     assert button.text == texts.DONE_BUTTON
     assert button.callback_data == "done:0e2f"
+
+
+class FakeRpcResponse:
+    def __init__(self, data: object) -> None:
+        self.data = data
+
+
+class FakeRpcQuery:
+    def __init__(self, data: object) -> None:
+        self._data = data
+
+    def execute(self) -> FakeRpcResponse:
+        return FakeRpcResponse(self._data)
+
+
+class FakeRpcClient:
+    """Клиент Supabase в тике: созревшее по первому вопросу, тишина дальше."""
+
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+        self.calls: list[str] = []
+
+    def rpc(self, function: str, params: dict[str, object]) -> FakeRpcQuery:
+        self.calls.append(function)
+        return FakeRpcQuery(self.rows if function == "due_reminders" else None)
+
+
+async def test_reminder_goes_to_the_owner_with_the_button(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Сборка из `runner.py` целиком: текст, чат владельца и кнопка (§6.2)."""
+    row: dict[str, object] = {
+        "id": "b17c",
+        "task_id": "0e2f",
+        "stage": "due",
+        "fire_at": FRIDAY_END_OF_DAY.isoformat(),
+        "title": "отправить расчёт",
+        "due_at": FRIDAY_END_OF_DAY.isoformat(),
+        "due_precision": "day",
+    }
+    client = FakeRpcClient([row])
+    service = build_reminders_service(make_settings(), cast(Client, client), bot)
+
+    assert await service.tick(FRIDAY_END_OF_DAY) == 1
+    sent = session.sent[0]
+    assert isinstance(sent, SendMessage)
+    assert sent.chat_id == OWNER_ID
+    assert sent.text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
+    assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
+    assert sent.reply_markup.inline_keyboard[0][0].callback_data == "done:0e2f"
+    assert client.calls == ["due_reminders", "mark_reminders_sent"]
+
+
+async def test_late_reminder_does_not_age_the_due_date() -> None:
+    """Напоминание опоздало, а срок ещё впереди: «Срок», а не «Срок был»."""
+    ripe = [make_due("before", FRIDAY_END_OF_DAY.replace(hour=9))]
+    service, _, _, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick(FRIDAY_END_OF_DAY.replace(hour=12)) == 1
+    _, text = notifier.sent[0]
+    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
