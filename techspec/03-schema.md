@@ -63,29 +63,41 @@ polling может отдать обновление повторно, и вто
 Индекс `(owner_telegram_id, status)` — под главный запрос «активные
 задачи владельца».
 
-### 3.4 `record_task` — приём сообщения одной транзакцией
+### 3.4 Приём сообщения: две функции
 
-Бот не делает две вставки подряд: между ними возможен отказ, и тогда
-сообщение есть, а задачи нет — поручение потеряно (инвариант 5).
-Вместо этого миграция заводит SQL-функцию, которую бот зовёт через RPC:
+Сообщение сохраняется **до** разбора моделью, разбор и задача — после,
+одной транзакцией. Обе функции зовёт только бот (`service_role`;
+`revoke execute … from public, anon, authenticated`).
 
 ```sql
-record_task(owner_telegram_id bigint, chat_id bigint,
-            telegram_message_id bigint, text text)
+record_message(owner_telegram_id bigint, chat_id bigint,
+               telegram_message_id bigint, text text)
+  returns messages
+```
+
+Вставляет строку в `messages`; если такая уже есть (`unique` §3.2) —
+возвращает существующую, ничего не меняя. По возвращённой строке бот
+видит повтор: у неё заполнен `reply` — ответ уже давался, модель не
+зовётся, тот же текст отправляется снова. `reply` пуст — первый заход
+упал между шагами, разбираем заново.
+
+```sql
+record_understanding(message_id uuid, owner_telegram_id bigint,
+                     analysis jsonb, ai_model text,
+                     ai_input_tokens int, ai_output_tokens int,
+                     reply text, task jsonb)
   returns tasks
 ```
 
-- Вставляет строку в `messages` и строку в `tasks` с
-  `source_message_id` на неё — в одной транзакции: либо обе, либо ни одной.
-- Сообщение уже есть (`unique` §3.2) — новых строк не пишет, возвращает
-  задачу, привязанную к нему: long polling отдал обновление повторно,
-  и бот отвечает «Записал» второй раз.
-- `language sql`, без `security definer`: зовёт её только бот с ролью
-  `service_role`, для `authenticated` и `anon` функция недоступна —
-  Mini App в этом этапе только читает (§4).
-- Право `execute` забирается **и у роли `public`**, а не только у
-  `anon` с `authenticated`: Postgres выдаёт новой функции execute для
-  `public`, и роль, из которой право наследуется, `revoke ... from anon,
-  authenticated` не трогает. Поэтому в миграции
-  `revoke execute ... from public, anon, authenticated`, а затем
-  `grant execute ... to service_role`.
+В одной транзакции: пишет разбор и ответ в `messages`, и если `task`
+не `null` — заводит строку в `tasks` с `source_message_id`. Задача для
+этого сообщения уже есть — возвращает её, второй не заводит. `task` —
+`null` для `chat` / `about_me`; тогда функция возвращает `null`.
+`owner_telegram_id` передаётся явно и сверяется с владельцем сообщения
+(§4.3): чужое `message_id` — отказ.
+
+Прежняя `record_task` (этап 002) удаляется той же миграцией.
+
+Колонки `messages` под это (в дополнение к §3.2): `analysis jsonb`,
+`ai_model text`, `ai_input_tokens int`, `ai_output_tokens int`,
+`reply text` — все nullable: заполняются вторым шагом.
