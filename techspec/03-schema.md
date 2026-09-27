@@ -107,15 +107,18 @@ record_message(owner_telegram_id bigint, chat_id bigint,
 record_understanding(message_id uuid, owner_telegram_id bigint,
                      analysis jsonb, ai_model text,
                      ai_input_tokens int, ai_output_tokens int,
-                     reply text, task jsonb, reminders jsonb)
+                     reply text, task jsonb, reminders jsonb,
+                     facts jsonb)
   returns tasks
 ```
 
-В одной транзакции: пишет разбор и ответ в `messages`, и если `task`
-не `null` — заводит строку в `tasks` с `source_message_id` и строки
-напоминаний из `reminders` (§3.5). Задача для этого сообщения уже есть —
-возвращает её, второй не заводит и напоминаний не добавляет. `task` —
-`null` для `chat` / `about_me`; тогда функция возвращает `null`.
+В одной транзакции: пишет разбор и ответ в `messages`, вставляет записи
+памяти из `facts` (§3.7 — для любого вида сообщения, раньше ранних
+выходов), и если `task` не `null` — заводит строку в `tasks` с
+`source_message_id` и строки напоминаний из `reminders` (§3.5). Задача
+для этого сообщения уже есть — возвращает её, второй не заводит и
+напоминаний не добавляет; записи памяти повтор не дублирует по `unique`.
+`task` — `null` для `chat` / `about_me`; тогда функция возвращает `null`.
 `owner_telegram_id` передаётся явно и сверяется с владельцем сообщения
 (§4.3): чужое `message_id` — отказ.
 
@@ -198,7 +201,7 @@ Mini App ходит в базу под ролью `authenticated` (§4.1), вл�
 | `category` | text, `check in ('family','home','car','work','habit','preference','other')` | для группировки на экране |
 | `text` | text | сама запись: «Машина — Toyota Camry» |
 | `status` | text, `check in ('fact','guess')` | сказано прямо или выведено (§8.1) |
-| `source_message_id` | uuid, `references messages(id)`, nullable | откуда взялось |
+| `source_message_id` | uuid, `references messages(id) on delete set null`, nullable | откуда взялось; сообщение — след, его удаление память не стирает |
 | `created_at` | timestamptz, `default now()` | |
 | `updated_at` | timestamptz, `default now()` | триггер, как у `tasks` |
 
@@ -211,5 +214,8 @@ authenticated`: приложение подтверждает (`update status`) 
 `{category, text, status}`, может быть пустым; статус уже проставлен
 ботом, §8.2) и вставляет строки в той же транзакции, что задача и
 напоминания: `on conflict (owner_telegram_id, category, text) do update
-set status = 'fact' where excluded.status = 'fact'` — статус только
-растёт (§8.3).
+set status = 'fact', source_message_id = excluded.source_message_id
+where excluded.status = 'fact' and facts.status = 'guess'` — статус
+только растёт (§8.3), а источником становится сообщение, где человек
+сказал это прямо: по нему приложение подписывает запись «с ваших слов».
+Миграция 006 (`..._facts.sql`).
