@@ -208,5 +208,8 @@ authenticated`: приложение подтверждает (`update status`) 
 ней, функций для него не нужно.
 
 `record_understanding` получает аргумент `facts jsonb` (список
-`{category, text, status}`, может быть пустым) и вставляет строки
-`on conflict do nothing` в той же транзакции, что задача и напоминания.
+`{category, text, status}`, может быть пустым; статус уже проставлен
+ботом, §8.2) и вставляет строки в той же транзакции, что задача и
+напоминания: `on conflict (owner_telegram_id, category, text) do update
+set status = 'fact' where excluded.status = 'fact'` — статус только
+растёт (§8.3).
