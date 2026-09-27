@@ -33,6 +33,7 @@ from solomon.db.rpc import DatabaseError
 from solomon.services.understanding import (
     Analysis,
     ModelAnswer,
+    ModelCall,
     NotUnderstood,
     Understanding,
     UnderstandingService,
@@ -349,15 +350,19 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 
 # --------------------------------------------------------------- живой прогон
 
-# Десять русских сообщений с ожидаемым разбором: этим владелец смотрит, как
-# помощник понимает. Прогон ходит в модель по-настоящему, поэтому в воротах
-# не участвует — `pyproject.toml`, маркер `live`.
+# Десять русских сообщений с ожидаемым разбором плюс три примера памяти:
+# этим владелец смотрит, как помощник понимает. Прогон ходит в модель
+# по-настоящему, поэтому в воротах не участвует — `pyproject.toml`,
+# маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
+FIXTURE_COUNT = 13
 # «Сейчас» для живого прогона: среда, 10:30. Даты в примерах посчитаны от
 # него, иначе «в пятницу» значило бы разное в разные дни.
 LIVE_MOMENT = (2026, 9, 16, 10, 30)
-# Из десяти примеров двум разрешено разойтись: модель — не таблица.
+# Из десяти обычных примеров двум разрешено разойтись: модель — не таблица.
+# Примеры памяти (поле `facts`) сходятся строго — по виду и по статусу.
 MIN_MATCHING_KINDS = 8
+MEMORY_EXPECTATIONS = ("fact", "guess", "none")
 
 
 def load_fixtures() -> list[dict[str, Any]]:
@@ -374,11 +379,62 @@ def live_settings() -> Settings:
     return settings
 
 
-def test_fixtures_are_ten_examples_with_expected_fields() -> None:
+def known_for(case: dict[str, Any]) -> list[Fact]:
+    """Известные факты примера — строки «категория: текст», как в промпте."""
+    facts: list[Fact] = []
+    for index, line in enumerate(case.get("known", [])):
+        category, text = str(line).split(": ", 1)
+        facts.append(Fact(id=f"known-{index}", category=category, text=text, status="fact"))
+    return facts
+
+
+def service_for(
+    settings: Settings, call: ModelCall, now: datetime, case: dict[str, Any]
+) -> UnderstandingService:
+    """Сервис на один пример: у каждого свой список известного."""
+    known = known_for(case)
+
+    async def read_known() -> list[Fact]:
+        return known
+
+    return UnderstandingService(settings, call, clock=lambda: now, known=read_known)
+
+
+def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
+    """Чем пример памяти разошёлся с ожиданием; `None` — сошёлся."""
+    expected = case["facts"]
+    if got.kind != case["kind"]:
+        return f"{case['text']}: ждали {case['kind']}, получили {got.kind}"
+    if expected == "none":
+        if not got.facts:
+            return None
+        return f"{case['text']}: ждали пустой facts, получили {got.facts}"
+    if not got.facts:
+        return f"{case['text']}: ждали запись {expected}, facts пуст"
+    status = fact_status(got.kind)
+    return None if status == expected else f"{case['text']}: ждали {expected}, получили {status}"
+
+
+def test_fixtures_are_thirteen_examples_with_expected_fields() -> None:
     fixtures = load_fixtures()
 
-    assert len(fixtures) == 10
+    assert len(fixtures) == FIXTURE_COUNT
     assert all({"text", "kind", "due_date", "priority"} <= set(case) for case in fixtures)
+    memory = [case for case in fixtures if "facts" in case]
+    assert len(memory) == 3
+    assert all(case["facts"] in MEMORY_EXPECTATIONS for case in memory)
+
+
+def test_memory_mismatch_checks_kind_and_status() -> None:
+    case = {"text": "у меня Camry", "kind": "about_me", "facts": "fact"}
+    remembered = make_understanding(
+        kind="about_me", facts=[{"category": "car", "text": "Машина — Toyota Camry"}]
+    )
+
+    assert memory_mismatch(case, remembered) is None
+    assert memory_mismatch(case, make_understanding(kind="about_me")) is not None
+    assert memory_mismatch(case, make_understanding(kind="chat")) is not None
+    assert memory_mismatch({**case, "facts": "none"}, remembered) is not None
 
 
 def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -395,17 +451,20 @@ def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.live
 async def test_live_model_understands_the_fixtures() -> None:
-    """Вживую: kind совпадает хотя бы у восьми примеров, даты — у всех."""
+    """Вживую: kind сходится хотя бы у восьми обычных примеров, даты — у всех,
+    примеры памяти — строго по виду и статусу записей."""
     settings = live_settings()
     now = datetime(*LIVE_MOMENT, tzinfo=settings.owner_timezone)
     client = create_anthropic_client(settings)
-    service = UnderstandingService(settings, anthropic_call(client), clock=lambda: now)
+    call = anthropic_call(client)
     fixtures = load_fixtures()
 
     try:
         verdicts = await asyncio.gather(
             *(
-                service.analyze(case["text"], forwarded_from=case.get("forwarded_from"))
+                service_for(settings, call, now, case).analyze(
+                    case["text"], forwarded_from=case.get("forwarded_from")
+                )
                 for case in fixtures
             )
         )
@@ -414,11 +473,19 @@ async def test_live_model_understands_the_fixtures() -> None:
 
     kinds: list[str] = []
     dates: list[str] = []
+    memory: list[str] = []
+    general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
         got = verdict.understanding
-        if got.kind != case["kind"]:
-            kinds.append(f"{case['text']}: ждали {case['kind']}, получили {got.kind}")
+        if "facts" in case:
+            mismatch = memory_mismatch(case, got)
+            if mismatch:
+                memory.append(mismatch)
+        else:
+            general += 1
+            if got.kind != case["kind"]:
+                kinds.append(f"{case['text']}: ждали {case['kind']}, получили {got.kind}")
         expected_date = case["due_date"]
         if expected_date is None:
             continue
@@ -428,7 +495,6 @@ async def test_live_model_understands_the_fixtures() -> None:
             dates.append(f"{case['text']}: ждали {expected_date}, получили {actual_date}")
 
     assert not dates, "Даты разошлись:\n" + "\n".join(dates)
-    matched = len(fixtures) - len(kinds)
-    assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {len(fixtures)}:\n" + "\n".join(
-        kinds
-    )
+    assert not memory, "Память разошлась:\n" + "\n".join(memory)
+    matched = general - len(kinds)
+    assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)

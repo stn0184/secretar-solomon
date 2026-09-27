@@ -125,7 +125,7 @@
       состояниями, строка записи с раскрытием источника и действиями;
       `App.tsx` — переключение вкладок, `BackButton` только внутри
       карточки задачи.
-- [ ] `understanding.jsonl` — три примера памяти; `supabase/README.md`
+- [x] `understanding.jsonl` — три примера памяти; `supabase/README.md`
       — четвёртая таблица в чек-листе RLS, миграция 006.
 - [ ] Документы: `techspec/02-layout.md` (`db/facts.py`, `lib/facts.ts`,
       компоненты), `techspec/00-adr.md` (факт/предположение),
