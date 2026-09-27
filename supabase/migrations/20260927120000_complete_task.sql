@@ -20,17 +20,17 @@ language plpgsql
 security invoker
 as $$
 declare
-  owner bigint := (auth.jwt() ->> 'telegram_id')::bigint;
+  owner_id bigint := (auth.jwt() ->> 'telegram_id')::bigint;
   saved public.tasks;
 begin
-  if owner is null then
+  if owner_id is null then
     return null;
   end if;
 
   select t.* into saved
     from public.tasks t
    where t.id = complete_task.task_id
-     and t.owner_telegram_id = owner;
+     and t.owner_telegram_id = owner_id;
 
   if not found then
     return null;
@@ -38,7 +38,7 @@ begin
 
   delete from public.reminders r
    where r.task_id = complete_task.task_id
-     and r.owner_telegram_id = owner
+     and r.owner_telegram_id = owner_id
      and r.sent_at is null;
 
   if saved.status = 'done' then
@@ -48,7 +48,7 @@ begin
   update public.tasks t
      set status = 'done'
    where t.id = complete_task.task_id
-     and t.owner_telegram_id = owner
+     and t.owner_telegram_id = owner_id
    returning t.* into saved;
 
   return saved;

@@ -90,7 +90,8 @@ button {
 
 .screen {
   max-width: 34rem;
-  min-height: 100vh;
+  /* высота видимой части — от Telegram, вне его — окно браузера */
+  min-height: var(--tg-viewport-stable-height, 100vh);
   margin: 0 auto;
   padding: var(--s2) var(--s4) calc(var(--s4) + env(safe-area-inset-bottom));
   display: flex;

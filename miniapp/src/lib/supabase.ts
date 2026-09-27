@@ -93,6 +93,10 @@ export async function query<T>(
   }
 
   if (response.error) {
+    // Сеть не ответила: supabase-js не бросает, а отдаёт ошибку со статусом 0.
+    if (response.status === 0) {
+      return failure("network");
+    }
     return failure(isAuthError(response) ? "access" : "refused");
   }
   return { ok: true, data: response.data };

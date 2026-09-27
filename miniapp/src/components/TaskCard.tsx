@@ -11,12 +11,12 @@ import {
 } from "../lib/tasks.ts";
 import { confirmDelete } from "../lib/telegram.ts";
 import { type ActionKind, Actions } from "./Actions.tsx";
+import { PriorityChip, PromiseChip, ReviewChip } from "./Chip.tsx";
 import { ErrorNote } from "./ErrorNote.tsx";
 import { Field } from "./Field.tsx";
 import { Header } from "./Header.tsx";
 import { Reminders } from "./Reminders.tsx";
 import { SourceMessage } from "./SourceMessage.tsx";
-import { taskChips } from "./TaskRow.tsx";
 
 type DetailsState =
   | { kind: "loading" }
@@ -97,7 +97,6 @@ export function TaskCard({
     setReloadKey((k) => k + 1);
   }
 
-  const chips = taskChips(task, false);
   const dueToday = task.dueAt !== null && sameDay(task.dueAt, now);
 
   return (
@@ -110,14 +109,22 @@ export function TaskCard({
             {task.dueAt ? formatDue(task.dueAt, task.duePrecision, now) : "не назван"}
           </Field>
           {task.kind !== "task" ? <Field label="Вид">{KIND_WORD[task.kind]}</Field> : null}
-          {task.priority === "high" ? <Field label="Приоритет">{chips[0]}</Field> : null}
+          {task.priority === "high" ? (
+            <Field label="Приоритет">
+              <PriorityChip task={task} compact={false} />
+            </Field>
+          ) : null}
           {task.priority === "low" ? <Field label="Приоритет">низкий</Field> : null}
           {task.promise ? (
-            <Field label="Обещание">{chips.find((c) => c.key === "mine" || c.key === "theirs")}</Field>
+            <Field label="Обещание">
+              <PromiseChip task={task} compact={false} />
+            </Field>
           ) : null}
           {task.people.length > 0 ? <Field label="Люди">{task.people.join(", ")}</Field> : null}
           {task.needsReview ? (
-            <Field label="Разбор">{chips.find((c) => c.key === "review")}</Field>
+            <Field label="Разбор">
+              <ReviewChip task={task} />
+            </Field>
           ) : null}
         </div>
       </div>

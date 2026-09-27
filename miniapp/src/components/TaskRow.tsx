@@ -1,46 +1,6 @@
 import { formatDue, formatRecorded } from "../lib/format.ts";
 import { type GroupKey, type Task, isOverdue } from "../lib/tasks.ts";
-import { Chip } from "./Chip.tsx";
-
-/** Как метки называют вид записи — задача метки не получает, она по умолчанию. */
-const KIND_LABEL: Record<Task["kind"], string | null> = {
-  task: null,
-  idea: "Идея",
-  wish: "Желание",
-};
-
-/** Метки строки — те же слова, что у бота в подтверждении. */
-export function taskChips(task: Task, compact: boolean) {
-  const chips = [];
-  if (task.priority === "high") {
-    chips.push(
-      <Chip key="high" tone="high">
-        {compact ? "Высокий приоритет" : "Высокий"}
-      </Chip>,
-    );
-  }
-  if (task.promise === "mine") {
-    chips.push(
-      <Chip key="mine" tone="mine">
-        {compact && task.people[0] ? `Я обещал: ${task.people[0]}` : "Я обещал"}
-      </Chip>,
-    );
-  } else if (task.promise === "to_me") {
-    chips.push(
-      <Chip key="theirs" tone="theirs">
-        {compact && task.people[0] ? `Обещали мне: ${task.people[0]}` : "Обещали мне"}
-      </Chip>,
-    );
-  }
-  if (task.needsReview) {
-    chips.push(
-      <Chip key="review" tone="review">
-        Перепроверьте
-      </Chip>,
-    );
-  }
-  return chips;
-}
+import { KindChip, PriorityChip, PromiseChip, ReviewChip } from "./Chip.tsx";
 
 /**
  * Строка списка: полоска приоритета слева, суть, срок словами и метки.
@@ -68,7 +28,6 @@ export function TaskRow({
     : group === "today"
       ? "row__when row__when--today"
       : "row__when";
-  const kindLabel = KIND_LABEL[task.kind];
 
   return (
     <button type="button" className="row" onClick={() => onOpen(task)}>
@@ -76,13 +35,15 @@ export function TaskRow({
       <span className="row__body">
         <span className="row__title">{task.title}</span>
         <span className="row__meta">
-          {kindLabel ? <Chip tone="kind">{kindLabel}</Chip> : null}
+          <KindChip task={task} />
           <span className={whenClass}>
             {task.dueAt
               ? formatDue(task.dueAt, task.duePrecision, now)
               : formatRecorded(task.createdAt)}
           </span>
-          {taskChips(task, true)}
+          <PriorityChip task={task} compact />
+          <PromiseChip task={task} compact />
+          <ReviewChip task={task} />
         </span>
       </span>
       <span className="row__chev" aria-hidden="true">

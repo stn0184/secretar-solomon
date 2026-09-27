@@ -35,6 +35,9 @@ Bot Settings → Menu Button → адрес. После этого кнопка 
 ### 7.4 Проверка публикации
 
 - `curl -sI https://<user>.github.io/<repo>/` отвечает 200;
-- в исходнике страницы нет строк `service_role`, `sk-`, токена бота
-  (инвариант 1) — проверяется в workflow до deploy: `grep` по `dist/`;
+- в сборке нет ключа service-role, ключа Claude и токена бота
+  (инвариант 1) — проверяет `scripts/check-dist.mjs` по `dist/` в
+  workflow до deploy и в воротах после сборки: ищет строки `service_role`,
+  `sk-ant-`, токен по форме и разбирает каждый JWT — роль в клейме должна
+  быть `anon`;
 - открытие из Telegram показывает список задач владельца.
