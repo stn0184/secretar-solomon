@@ -111,7 +111,7 @@
       неоднозначностям — первым коммитом.
 - [x] Миграция: `complete_task` для `authenticated` (§3.6), проверка
       политик `reminders`/`messages` на чтение владельцем. Правка §3.
-- [ ] `design.md` §1 и §3 из одобренного прототипа: токены → `--tg-theme-*`,
+- [x] `design.md` §1 и §3 из одобренного прототипа: токены → `--tg-theme-*`,
       инвентарь компонентов; §4 — строка об одобрении.
 - [x] `lib/`: `tasks.ts` (список с группировкой, карточка: задача +
       сообщение + напоминания, `complete`, `remove`), `session.ts` —
@@ -125,7 +125,7 @@
 - [x] Публикация: `vite.config.ts` (`base` из `VITE_BASE_PATH`),
       `.github/workflows/pages.yml` (сборка, grep секретов, deploy),
       `README.md` — как настроить секреты и кнопку меню.
-- [ ] `CLAUDE.md` §«Сдача изменения» — правило push по §7.2;
+- [x] `CLAUDE.md` §«Сдача изменения» — правило push по §7.2;
       `techspec/00-adr.md` — GitHub Pages и push; `techspec/02-layout.md`
       §2.3 — `components/`, `format.ts`, workflow.
 - [ ] Закрытие прототипа: `prototype/000-first-screens` → `archive/`

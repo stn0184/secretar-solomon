@@ -29,17 +29,20 @@ bot/                     Telegram-бот, Python 3.12, long polling
 
 miniapp/                 Mini App внутри Telegram, React + TS + Vite
   index.html             подключает telegram-web-app.js
-  vite.config.ts         envDir = корень репозитория
+  vite.config.ts         envDir = корень репозитория, base из VITE_BASE_PATH
   eslint.config.js
   src/
     main.tsx             точка входа
-    App.tsx              экран: список активных задач
-    styles.css           цвета из --tg-theme-*
+    App.tsx              состояние: сессия, список ↔ карточка, BackButton
+    styles.css           токены из --tg-theme-*, вёрстка по design.md §1
+    components/          экраны (TaskList, TaskCard) и их части — design.md §3
     lib/
-      telegram.ts        доступ к SDK Telegram
-      session.ts         обмен initData на токен доступа
-      supabase.ts        клиент базы с этим токеном
-      tasks.ts           активные задачи владельца
+      telegram.ts        SDK Telegram: initData, тема, BackButton, showPopup, close
+      session.ts         обмен initData на токен и его обновление
+      supabase.ts        клиент базы и query: живой токен, тексты отказов
+      tasks.ts           задачи: чтение, группировка, карточка, «Сделано», «Удалить»
+      format.ts          даты словами в поясе устройства
+      *.test.ts          тесты чистых функций, node --test
 
 supabase/                база и Edge Functions
   config.toml            настройки для Supabase CLI
@@ -49,7 +52,9 @@ supabase/                база и Edge Functions
     telegram-auth/       HTTP-обвязка функции
   types/deno.d.ts        кусок API Deno для tsc
 
+.github/workflows/pages.yml   публикация Mini App на GitHub Pages (§7)
 scripts/gate.mjs         ворота: стековые проверки + состояние спек
+scripts/check-dist.mjs   сборка Mini App без секретов — зовут workflow и ворота
 specs/  techspec/  prototype/   документы и очередь работ
 .env.example             один файл на все части, значений нет
 ```
@@ -128,7 +133,7 @@ aiogram, ни про сеть — отправка приходит в него 
 ### 2.3 Слои Mini App
 
 ```
-main.tsx ──▶ App.tsx (и будущие компоненты) ──▶ src/lib/*
+main.tsx ──▶ App.tsx ──▶ components/* ──▶ src/lib/*
 ```
 
 `src/lib/` — вся работа с внешними системами: Telegram, Edge Function,
@@ -137,8 +142,17 @@ main.tsx ──▶ App.tsx (и будущие компоненты) ──▶ sr
 Чтение данных живёт там же: `tasks.ts` спрашивает задачи, компонент
 только показывает, что пришло.
 
-Отказ — это текст на экране, а не исключение: `session.ts` возвращает
-результат с сообщением на русском, компонент его показывает.
+`App.tsx` держит состояние приложения — сессию, список, какой экран
+открыт — и отдаёт экранам (`TaskList`, `TaskCard`) данные и колбэки;
+экраны собираются из мелких компонентов по инвентарю `design.md` §3.
+Роутера нет: экраны переключаются состоянием, «назад» — кнопка Telegram
+и своя стрелка.
+
+Отказ — это текст на экране, а не исключение: `supabase.ts` возвращает
+результат с сообщением на русском (`query`), компонент его показывает.
+Истёкший токен `query` обновляет сам и повторяет запрос один раз. Чистые
+функции `lib/` — даты словами, группировка, разбор строк — проверяются
+тестами на Node (`npm --prefix miniapp test`), DOM им не нужен.
 
 ### 2.4 Слои Edge Functions
 
