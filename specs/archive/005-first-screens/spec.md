@@ -1,6 +1,6 @@
 # 005. Первые экраны Mini App: список, карточка, публикация
 
-**Статус:** в работе
+**Статус:** сделано
 **Размер:** L
 **Зависит от:** 004
 **Прототип:** одобрен prototype/005-first-screens
@@ -128,7 +128,7 @@
 - [x] `CLAUDE.md` §«Сдача изменения» — правило push по §7.2;
       `techspec/00-adr.md` — GitHub Pages и push; `techspec/02-layout.md`
       §2.3 — `components/`, `format.ts`, workflow.
-- [ ] Закрытие прототипа: `prototype/000-first-screens` → `archive/`
+- [x] Закрытие прототипа: `prototype/000-first-screens` → `archive/`
       (или переименованный `005-…`, как решит круг прототипа), строка
       в `prototype/archive/README.md`.
 
