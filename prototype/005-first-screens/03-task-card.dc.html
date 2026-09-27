@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 · Карточка задачи — Соломон</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="tokens.css">
+</head>
+<body class="dc">
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 03 · Mini App</div>
+    <h1 class="board__title">Карточка задачи — источник и напоминания</h1>
+    <p class="board__note">Сверху поля как у бота в подтверждении; ниже <b>исходное сообщение целиком</b> — видно, что именно помощник читал; затем напоминания: отправленные и те, что ждут. Два действия внизу: «Сделано» и «Удалить». «Назад» — двумя способами: кнопка Telegram слева в шапке и своя стрелка над заголовком.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__tgback">‹</span>
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <span class="back"><i>‹</i>Задачи</span>
+            <h2 class="page-title" style="margin-top: 6px">Отправить Кузнецову расчёт по складу</h2>
+          </div>
+
+          <div class="card">
+            <div class="kv">
+              <div class="kv__row">
+                <span class="kv__k">Срок</span>
+                <span class="kv__v">сегодня, 15:00<small>среда, 30 сентября</small></span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Приоритет</span>
+                <span class="kv__v"><span class="chip chip--high">Высокий</span></span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Обещание</span>
+                <span class="kv__v"><span class="chip chip--mine">Я обещал</span></span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Люди</span>
+                <span class="kv__v">Кузнецов</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Исходное сообщение</span></div>
+            <div class="card">
+              <div class="source">
+                <div class="source__top">
+                  <span>Текст</span>
+                  <span>понедельник, 28 сентября, 10:02</span>
+                </div>
+                <div class="source__box">
+                  <div class="source__text">В среду к трём надо отправить Кузнецову расчёт по складу, я ему обещал. Это важно, не дай забыть.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Напоминания</span></div>
+            <div class="card">
+              <div class="rem">
+                <div class="rem__item">
+                  <span class="rem__dot"></span>
+                  <span class="rem__when">вторник, 29 сентября, 15:00 <span class="rem__stage">заранее</span></span>
+                  <span class="rem__state rem__state--sent">отправлено</span>
+                </div>
+                <div class="rem__item">
+                  <span class="rem__dot rem__dot--wait"></span>
+                  <span class="rem__when">сегодня, 15:00 <span class="rem__stage">в срок</span></span>
+                  <span class="rem__state">ждёт</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <p class="note">Изменить текст или срок пока можно только через бота.</p>
+        </div>
+
+        <div class="mainbtn">
+          <div class="actions">
+            <span class="btn">Сделано</span>
+            <span class="btn btn--danger">Удалить</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+</body>
+</html>

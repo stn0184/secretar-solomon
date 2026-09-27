@@ -1,0 +1,937 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Соломон — 005: список, карточка</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Соломон — визуальный язык прототипа 005 (от prototype/000, экраны 04–06).
+   Один источник токенов для всех артбордов: цвет только через переменные.
+   Продукт живёт внутри Telegram, поэтому токены названы по ролям —
+   на реализации они подставляются из темы Telegram (--tg-theme-*),
+   соответствие — в README.md рядом. */
+
+/* ─── 1. Токены: светлая тема ─────────────────────────────────────── */
+:root {
+  color-scheme: light dark;
+
+  /* полотно прототипа — это не продукт, это бумага под ним */
+  --ground: #e6eaf0;
+  --ground-line: #d5dbe4;
+  --chrome-ink: #3d4553;
+  --chrome-ink-2: #79828f;
+  --chrome-line: #c9d1dc;
+  --chrome-card: #fbfcfe;
+
+  /* поверхности приложения (=> --tg-theme-secondary-bg / bg / section-separator) */
+  --app-bg: #eff0f4;
+  --surface: #ffffff;
+  --surface-2: #f5f6f9;
+  --line: #e3e5ea;
+  --line-strong: #d3d6dd;
+
+  /* текст (=> --tg-theme-text / hint / subtitle-text) */
+  --ink: #0f1116;
+  --ink-2: #6b7280;
+  --ink-3: #a0a6b0;
+
+  /* действие (=> --tg-theme-button / button-text / link) */
+  --accent: #3390ec;
+  --accent-ink: #ffffff;
+  --accent-weak: #e7f1fc;
+
+  /* смысловые цвета: состояние задачи, а не украшение
+     (--urgent => --tg-theme-destructive-text) */
+  --urgent: #ce4238;
+  --urgent-weak: #fceceb;
+  --important: #b1741a;
+  --important-weak: #faf0dd;
+  --ok: #2f9a58;
+  --ok-weak: #e7f4ec;
+
+  /* сомнение помощника («перепроверьте») — отдельный смысл, не статус и не ошибка */
+  --guess: #6f57ac;
+  --guess-weak: #f1edfa;
+  --guess-line: #c3b5e3;
+
+  /* системный попап Telegram (showPopup) — контейнер, который мы не проектируем */
+  --dim: rgba(0, 0, 0, .34);
+  --popup-bg: rgba(250, 250, 252, .96);
+  --popup-line: rgba(60, 60, 67, .3);
+
+  /* типографика: продукт — системным шрифтом Telegram, подписи чертежа — моно */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-chrome: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --t-title: 600 22px/28px var(--font-ui);
+  --t-body: 400 16px/21px var(--font-ui);
+  --t-sub: 400 13px/17px var(--font-ui);
+  --t-cap: 500 11px/14px var(--font-ui);
+
+  /* шаг сетки: 4 */
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px;
+  --r-sheet: 16px;
+  --r-card: 14px;
+  --r-btn: 12px;
+  --r-pill: 999px;
+}
+
+/* ─── 2. Токены: тёмная тема (Telegram Night) ─────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0d1117;
+    --ground-line: #191f28;
+    --chrome-ink: #9fabba;
+    --chrome-ink-2: #6b7786;
+    --chrome-line: #222a35;
+    --chrome-card: #131a23;
+
+    --app-bg: #17212b;
+    --surface: #232e3c;
+    --surface-2: #1c2734;
+    --line: #2c3a4a;
+    --line-strong: #35465a;
+
+    --ink: #ffffff;
+    --ink-2: #93a6b8;
+    --ink-3: #6d7f8f;
+
+    --accent: #6ab2f2;
+    --accent-ink: #0d1117;
+    --accent-weak: #1d3448;
+
+    --urgent: #ee7a72;
+    --urgent-weak: #3a2321;
+    --important: #dfa94f;
+    --important-weak: #362c1b;
+    --ok: #6cc38a;
+    --ok-weak: #1f3327;
+
+    --guess: #b49ae8;
+    --guess-weak: #2a2540;
+    --guess-line: #4b4070;
+
+    --dim: rgba(0, 0, 0, .5);
+    --popup-bg: rgba(38, 38, 42, .96);
+    --popup-line: rgba(140, 140, 150, .35);
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground: #0d1117;
+  --ground-line: #191f28;
+  --chrome-ink: #9fabba;
+  --chrome-ink-2: #6b7786;
+  --chrome-line: #222a35;
+  --chrome-card: #131a23;
+
+  --app-bg: #17212b;
+  --surface: #232e3c;
+  --surface-2: #1c2734;
+  --line: #2c3a4a;
+  --line-strong: #35465a;
+
+  --ink: #ffffff;
+  --ink-2: #93a6b8;
+  --ink-3: #6d7f8f;
+
+  --accent: #6ab2f2;
+  --accent-ink: #0d1117;
+  --accent-weak: #1d3448;
+
+  --urgent: #ee7a72;
+  --urgent-weak: #3a2321;
+  --important: #dfa94f;
+  --important-weak: #362c1b;
+  --ok: #6cc38a;
+  --ok-weak: #1f3327;
+
+  --guess: #b49ae8;
+  --guess-weak: #2a2540;
+  --guess-line: #4b4070;
+
+  --dim: rgba(0, 0, 0, .5);
+  --popup-bg: rgba(38, 38, 42, .96);
+  --popup-line: rgba(140, 140, 150, .35);
+}
+
+/* ─── 3. Полотно и подпись артборда (чертёж, а не продукт) ────────── */
+* { box-sizing: border-box; }
+
+body.dc {
+  margin: 0;
+  padding: 32px 24px;
+  background-color: var(--ground);
+  background-image:
+    linear-gradient(var(--ground-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--ground-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  color: var(--chrome-ink);
+  font-family: var(--font-chrome);
+  display: flex;
+  justify-content: center;
+}
+
+.board { display: flex; flex-direction: column; gap: var(--s3); }
+.board__head { display: flex; flex-direction: column; gap: 6px; width: 390px; max-width: 100%; }
+.board__no {
+  font: 500 11px/1 var(--font-chrome);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--chrome-ink-2);
+}
+.board__title { margin: 0; font: 600 15px/20px var(--font-chrome); color: var(--chrome-ink); }
+.board__note { margin: 0; font: 400 12px/17px var(--font-chrome); color: var(--chrome-ink-2); }
+.board__note b { color: var(--chrome-ink); font-weight: 600; }
+
+/* ─── 4. Телефон ──────────────────────────────────────────────────── */
+.device {
+  width: 390px;
+  height: 844px;
+  flex: none;
+  border-radius: 38px;
+  padding: 8px;
+  background: var(--chrome-card);
+  border: 1px solid var(--chrome-line);
+  box-shadow: 0 18px 40px -22px rgba(15, 23, 42, .5);
+}
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 30px;
+  overflow: hidden;
+  background: var(--app-bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  display: flex;
+  flex-direction: column;
+}
+
+.status {
+  flex: none;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px 0 30px;
+  font: 600 14px/1 var(--font-ui);
+  color: var(--ink);
+}
+.status__right { display: flex; align-items: center; gap: 5px; }
+.bars { display: flex; align-items: flex-end; gap: 2px; height: 11px; }
+.bars i { display: block; width: 3px; border-radius: 1px; background: currentColor; }
+.bars i:nth-child(1) { height: 4px; }
+.bars i:nth-child(2) { height: 6px; }
+.bars i:nth-child(3) { height: 9px; }
+.bars i:nth-child(4) { height: 11px; }
+.batt {
+  display: block;
+  width: 24px; height: 12px;
+  border-radius: 3px;
+  border: 1.2px solid currentColor;
+  padding: 1.5px;
+  opacity: .9;
+}
+.batt i { display: block; height: 100%; width: 72%; border-radius: 1px; background: currentColor; }
+
+/* ─── 5. Mini App: лист и шапка Telegram ──────────────────────────── */
+.sheet {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-bg);
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
+  overflow: hidden;
+}
+.grab { flex: none; padding: 7px 0 3px; display: flex; justify-content: center; }
+.grab i { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
+
+/* шапка — это шапка Telegram: название бота, «⋯», «✕» и его кнопка «назад» (BackButton) */
+.app-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4) var(--s3);
+}
+.app-head__tgback { color: var(--accent); font: 300 26px/20px var(--font-ui); margin: -3px 2px 0 -2px; }
+.app-head__title { font: 600 16px/20px var(--font-ui); color: var(--ink); }
+.app-head__tools { margin-left: auto; display: flex; align-items: center; gap: var(--s3); color: var(--ink-3); font: 400 16px/1 var(--font-ui); }
+
+.app-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 var(--s4) var(--s2);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.app-body > * { flex: 0 0 auto; }
+.app-body--center { justify-content: center; }
+
+/* своя стрелка «назад» — внутри приложения, над заголовком карточки */
+.back { display: inline-flex; align-items: center; gap: 2px; color: var(--accent); font: 400 15px/20px var(--font-ui); }
+.back i { font: 400 22px/20px var(--font-ui); margin-top: -2px; font-style: normal; }
+
+.page-title { margin: 0; font: var(--t-title); letter-spacing: -.01em; color: var(--ink); }
+.page-sub { margin: 4px 0 0; font: var(--t-sub); color: var(--ink-2); }
+
+/* ─── 6. Список: группы по сроку ──────────────────────────────────── */
+.sec { display: flex; flex-direction: column; gap: 6px; }
+.sec__h {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 0 var(--s1);
+  font: var(--t-cap);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.sec__h--overdue { color: var(--urgent); }
+.sec__h em { font: var(--t-sub); font-style: normal; letter-spacing: 0; text-transform: none; color: var(--ink-3); }
+
+.card { background: var(--surface); border-radius: var(--r-card); overflow: hidden; }
+
+.row { display: flex; gap: var(--s3); align-items: flex-start; padding: 9px var(--s4) 9px var(--s3); }
+.row + .row { border-top: 1px solid var(--line); }
+.row__mark { flex: none; width: 4px; align-self: stretch; border-radius: 2px; background: transparent; }
+.row__mark--high { background: var(--important); }
+.row__mark--overdue { background: var(--urgent); }
+.row__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.row__title { font: var(--t-body); letter-spacing: -.005em; color: var(--ink); }
+.row__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font: var(--t-sub); color: var(--ink-2); }
+.row__when--overdue { color: var(--urgent); font-weight: 500; }
+.row__when--today { color: var(--ink); font-weight: 500; }
+.row__chev { flex: none; color: var(--ink-3); font: 400 17px/21px var(--font-ui); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s2); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px;
+  border-radius: 7px;
+  font: var(--t-cap);
+  white-space: nowrap;
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+.chip--high { background: var(--important-weak); color: var(--important); }
+.chip--mine { background: var(--accent-weak); color: var(--accent); }
+.chip--theirs { background: var(--surface-2); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.chip--review { background: var(--guess-weak); color: var(--guess); }
+.chip--kind { background: transparent; color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line); }
+
+/* ─── 7. Карточка: поля, источник, напоминания ────────────────────── */
+.kv { display: flex; flex-direction: column; }
+.kv__row { display: flex; gap: var(--s3); align-items: flex-start; padding: 10px var(--s4); }
+.kv__row + .kv__row { border-top: 1px solid var(--line); }
+.kv__k { flex: none; width: 92px; padding-top: 2px; font: var(--t-sub); color: var(--ink-2); }
+.kv__v { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font: 400 15px/20px var(--font-ui); color: var(--ink); }
+.kv__v small { display: block; width: 100%; font: var(--t-sub); color: var(--ink-3); }
+
+.source { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--s4) var(--s4); }
+.source__top { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); font: var(--t-sub); color: var(--ink-2); }
+.source__box {
+  background: var(--surface-2);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+  padding: 9px 11px;
+}
+.source__text { font: 400 14px/19px var(--font-ui); color: var(--ink); }
+
+.rem { display: flex; flex-direction: column; }
+.rem__item { display: flex; gap: var(--s3); align-items: center; padding: 9px var(--s4); }
+.rem__item + .rem__item { border-top: 1px solid var(--line); }
+.rem__dot { flex: none; width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--ok); }
+.rem__dot--wait { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-3); }
+.rem__when { flex: 1; font: 400 15px/20px var(--font-ui); color: var(--ink); font-variant-numeric: tabular-nums; }
+.rem__stage { font: var(--t-sub); color: var(--ink-3); }
+.rem__state { flex: none; font: var(--t-sub); color: var(--ink-2); }
+.rem__state--sent { color: var(--ok); }
+
+.note { margin: 0; padding: 0 var(--s1); font: var(--t-sub); color: var(--ink-3); }
+
+/* ─── 8. Кнопки ───────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px;
+  padding: 0 var(--s5);
+  border-radius: var(--r-btn);
+  text-align: center;
+  font: 600 15px/20px var(--font-ui);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.btn--wide { width: 100%; }
+.btn--ghost { background: var(--surface); color: var(--accent); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.btn--danger { background: var(--surface); color: var(--urgent); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.actions { display: flex; gap: var(--s2); }
+.actions .btn { flex: 1; }
+.mainbtn { flex: none; padding: var(--s3) var(--s4) 22px; background: var(--app-bg); }
+
+/* ─── 9. Пусто ────────────────────────────────────────────────────── */
+.empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: var(--s3); padding: 0 var(--s2); }
+.empty__mark {
+  width: 64px; height: 64px;
+  margin-bottom: var(--s1);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+  display: flex; align-items: center; justify-content: center;
+}
+.empty__mark i { display: block; width: 26px; height: 26px; border-radius: var(--r-pill); border: 2px dashed var(--ink-3); }
+.empty__h { margin: 0; font: 600 19px/24px var(--font-ui); letter-spacing: -.01em; color: var(--ink); }
+.empty__p { margin: 0; max-width: 292px; font: 400 15px/21px var(--font-ui); color: var(--ink-2); }
+.hints { display: flex; flex-direction: column; gap: 6px; width: 100%; margin-top: var(--s1); }
+.hint {
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 9px var(--s3);
+  text-align: left;
+  font: 400 14px/19px var(--font-ui);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+/* ─── 10. Системный попап Telegram (showPopup) ────────────────────── */
+.dim {
+  position: absolute; inset: 0;
+  background: var(--dim);
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 var(--s6);
+}
+.popup {
+  width: 270px;
+  border-radius: 14px;
+  background: var(--popup-bg);
+  color: var(--ink);
+  backdrop-filter: blur(20px);
+  overflow: hidden;
+  text-align: center;
+}
+.popup__body { padding: 19px 16px 17px; display: flex; flex-direction: column; gap: 4px; }
+.popup__title { font: 600 17px/22px var(--font-ui); }
+.popup__text { font: 400 13px/17px var(--font-ui); }
+.popup__btns { display: flex; border-top: .5px solid var(--popup-line); }
+.popup__btn { flex: 1; min-height: 44px; display: flex; align-items: center; justify-content: center; font: 400 17px/22px var(--font-ui); color: var(--accent); }
+.popup__btn + .popup__btn { border-left: .5px solid var(--popup-line); }
+.popup__btn--destructive { color: var(--urgent); }
+
+
+/* ─── полотно ─────────────────────────────────────────────────────── */
+body {
+  margin: 0;
+  background-color: var(--ground);
+  background-image:
+    linear-gradient(var(--ground-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--ground-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  color: var(--chrome-ink);
+  font-family: var(--font-chrome);
+}
+
+.canvas-head {
+  padding-block: 28px 20px;
+  padding-inline: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 860px;
+}
+.canvas-head h1 {
+  margin: 0;
+  font: 600 21px/27px var(--font-chrome);
+  letter-spacing: -.01em;
+  color: var(--chrome-ink);
+  text-wrap: balance;
+}
+.canvas-head p { margin: 0; font: 400 13px/19px var(--font-chrome); color: var(--chrome-ink-2); max-width: 62ch; }
+.canvas-head p b { color: var(--chrome-ink); font-weight: 600; }
+.canvas-head code { font: 500 12px/1 var(--font-chrome); color: var(--chrome-ink); }
+
+.canvas-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+.warn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: var(--important-weak);
+  color: var(--important);
+  font: 500 11px/15px var(--font-chrome);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.seg { display: flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--chrome-card); border: 1px solid var(--chrome-line); }
+.seg button {
+  appearance: none; border: 0; cursor: pointer;
+  padding: 5px 11px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--chrome-ink-2);
+  font: 500 11px/15px var(--font-chrome);
+}
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.flow {
+  display: flex; align-items: center; gap: 8px;
+  font: 400 11px/15px var(--font-chrome);
+  color: var(--chrome-ink-2);
+}
+.flow i { display: block; width: 26px; height: 1px; background: var(--chrome-line); }
+
+.canvas-scroll { overflow-x: auto; padding-block: 8px 56px; }
+.canvas-row { display: flex; align-items: flex-start; gap: 40px; padding-inline: 24px; width: max-content; }
+.canvas-row .board__head { min-height: 140px; }
+
+@media (max-width: 460px) {
+  .canvas-head { padding-inline: 16px; }
+  .canvas-row { gap: 28px; padding-inline: 16px; }
+}
+</style>
+</head>
+<body>
+
+<header class="canvas-head">
+  <h1>Соломон — этап 005: список задач и карточка</h1>
+  <p>Прототип первых экранов Mini App. Слева направо — путь человека: <b>список → (тот же список, когда задач нет) → карточка задачи → подтверждение удаления</b>. Прототип не работает: кнопки не нажимаются, данных из базы нет.</p>
+  <div class="canvas-bar">
+    <span class="warn">Выдуманные данные</span>
+    <span class="flow">Тема<i></i></span>
+    <span class="seg" role="group" aria-label="Тема оформления">
+      <button type="button" data-theme-set="auto" aria-pressed="true">Как в системе</button>
+      <button type="button" data-theme-set="light" aria-pressed="false">Светлая</button>
+      <button type="button" data-theme-set="dark" aria-pressed="false">Тёмная</button>
+    </span>
+  </div>
+  <p>Mini App живёт внутри Telegram, поэтому цвета взяты из его темы: на реализации токены подставляются из <code>--tg-theme-*</code>. Переключатель показывает, как экраны выглядят в светлой и тёмной теме Telegram. «Сегодня» на экранах — среда, 30 сентября.</p>
+</header>
+
+<div class="canvas-scroll">
+  <div class="canvas-row">
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 01 · Mini App</div>
+    <h1 class="board__title">Список активных задач — штатное состояние</h1>
+    <p class="board__note">Шесть групп по сроку в фиксированном порядке: <b>просрочено → сегодня → на неделе → позже → без срока</b>, идеи и желания — своей группой внизу. Пустые группы не показываются. Срок словами — теми же, что у бота. Приоритет — полоской и меткой только там, где он высокий. Нижних вкладок нет: экран один.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <h2 class="page-title">Задачи</h2>
+            <p class="page-sub">7 активных · одна просрочена</p>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h sec__h--overdue"><span>Просрочено</span></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark row__mark--overdue"></span>
+                <span class="row__body">
+                  <span class="row__title">Перезвонить Сергею по договору</span>
+                  <span class="row__meta">
+                    <span class="row__when--overdue">понедельник, 28 сентября, 10:00</span>
+                    <span class="chip chip--mine">Я обещал: Сергею</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Сегодня</span><em>среда, 30 сентября</em></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark row__mark--high"></span>
+                <span class="row__body">
+                  <span class="row__title">Отправить Кузнецову расчёт по складу</span>
+                  <span class="row__meta">
+                    <span class="row__when--today">сегодня, 15:00</span>
+                    <span class="chip chip--high">Высокий приоритет</span>
+                    <span class="chip chip--mine">Я обещал: Кузнецову</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>На неделе</span></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Марина пришлёт договор на подпись</span>
+                  <span class="row__meta">
+                    <span>пятница, 2 октября</span>
+                    <span class="chip chip--theirs">Обещали мне: Марина</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Записаться к стоматологу</span>
+                  <span class="row__meta">
+                    <span>суббота, 3 октября, 11:00</span>
+                    <span class="chip chip--review">Перепроверьте</span>
+                  </span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Позже</span></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Продлить ОСАГО</span>
+                  <span class="row__meta"><span>четверг, 15 октября</span></span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Без срока</span></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Купить лампочку в коридор</span>
+                  <span class="row__meta"><span>записано 24 сентября</span></span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Идеи и желания</span></div>
+            <div class="card">
+              <div class="row">
+                <span class="row__mark"></span>
+                <span class="row__body">
+                  <span class="row__title">Съездить в Карелию на выходные</span>
+                  <span class="row__meta"><span class="chip chip--kind">Желание</span><span>записано 26 сентября</span></span>
+                </span>
+                <span class="row__chev">›</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 02 · Mini App</div>
+    <h1 class="board__title">Задач нет — первое, что видит новый человек</h1>
+    <p class="board__note">Текст из спеки: «Задач пока нет. Напишите боту — и она появится здесь». Две подсказки — <b>настоящими фразами</b>, которые можно так и написать. Единственное действие — вернуться в чат: заводить задачи здесь нельзя, их ведёт бот.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body app-body--center">
+          <div class="empty">
+            <span class="empty__mark"><i></i></span>
+            <h2 class="empty__h">Задач пока нет</h2>
+            <p class="empty__p">Напишите боту — и она появится здесь. Срок и напоминание он разберёт сам.</p>
+            <div class="hints">
+              <div class="hint">«В пятницу отправить расчёт Кузнецову»</div>
+              <div class="hint">«Я обещал Сергею перезвонить во вторник»</div>
+            </div>
+            <span class="btn btn--wide">Вернуться в чат</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 03 · Mini App</div>
+    <h1 class="board__title">Карточка задачи — источник и напоминания</h1>
+    <p class="board__note">Сверху поля как у бота в подтверждении; ниже <b>исходное сообщение целиком</b> — видно, что именно помощник читал; затем напоминания: отправленные и те, что ждут. Два действия внизу: «Сделано» и «Удалить». «Назад» — двумя способами: кнопка Telegram слева в шапке и своя стрелка над заголовком.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__tgback">‹</span>
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <span class="back"><i>‹</i>Задачи</span>
+            <h2 class="page-title" style="margin-top: 6px">Отправить Кузнецову расчёт по складу</h2>
+          </div>
+
+          <div class="card">
+            <div class="kv">
+              <div class="kv__row">
+                <span class="kv__k">Срок</span>
+                <span class="kv__v">сегодня, 15:00<small>среда, 30 сентября</small></span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Приоритет</span>
+                <span class="kv__v"><span class="chip chip--high">Высокий</span></span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Обещание</span>
+                <span class="kv__v"><span class="chip chip--mine">Я обещал</span></span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Люди</span>
+                <span class="kv__v">Кузнецов</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Исходное сообщение</span></div>
+            <div class="card">
+              <div class="source">
+                <div class="source__top">
+                  <span>Текст</span>
+                  <span>понедельник, 28 сентября, 10:02</span>
+                </div>
+                <div class="source__box">
+                  <div class="source__text">В среду к трём надо отправить Кузнецову расчёт по складу, я ему обещал. Это важно, не дай забыть.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Напоминания</span></div>
+            <div class="card">
+              <div class="rem">
+                <div class="rem__item">
+                  <span class="rem__dot"></span>
+                  <span class="rem__when">вторник, 29 сентября, 15:00 <span class="rem__stage">заранее</span></span>
+                  <span class="rem__state rem__state--sent">отправлено</span>
+                </div>
+                <div class="rem__item">
+                  <span class="rem__dot rem__dot--wait"></span>
+                  <span class="rem__when">сегодня, 15:00 <span class="rem__stage">в срок</span></span>
+                  <span class="rem__state">ждёт</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <p class="note">Изменить текст или срок пока можно только через бота.</p>
+        </div>
+
+        <div class="mainbtn">
+          <div class="actions">
+            <span class="btn">Сделано</span>
+            <span class="btn btn--danger">Удалить</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="board">
+  <header class="board__head">
+    <div class="board__no">Экран 04 · Mini App</div>
+    <h1 class="board__title">«Удалить» — подтверждение системным окном Telegram</h1>
+    <p class="board__note">Своего окна нет: подтверждение — <b>системный попап Telegram</b> (showPopup), с красной кнопкой. В тексте сказано, что уходит и что остаётся: напоминания — вместе с задачей, сообщение в переписке — на месте. Вид окна рисует Telegram, здесь показано, как оно выглядит на iOS.</p>
+  </header>
+
+  <div class="device">
+    <div class="screen">
+
+      <div class="status">
+        <span>9:41</span>
+        <span class="status__right">
+          <span class="bars"><i></i><i></i><i></i><i></i></span>
+          <span class="batt"><i></i></span>
+        </span>
+      </div>
+
+      <div class="sheet">
+        <div class="grab"><i></i></div>
+
+        <div class="app-head">
+          <span class="app-head__tgback">‹</span>
+          <span class="app-head__title">Соломон</span>
+          <span class="app-head__tools"><span>⋯</span><span>✕</span></span>
+        </div>
+
+        <div class="app-body">
+          <div>
+            <span class="back"><i>‹</i>Задачи</span>
+            <h2 class="page-title" style="margin-top: 6px">Отправить Кузнецову расчёт по складу</h2>
+          </div>
+
+          <div class="card">
+            <div class="kv">
+              <div class="kv__row">
+                <span class="kv__k">Срок</span>
+                <span class="kv__v">сегодня, 15:00<small>среда, 30 сентября</small></span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Приоритет</span>
+                <span class="kv__v"><span class="chip chip--high">Высокий</span></span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Обещание</span>
+                <span class="kv__v"><span class="chip chip--mine">Я обещал</span></span>
+              </div>
+              <div class="kv__row">
+                <span class="kv__k">Люди</span>
+                <span class="kv__v">Кузнецов</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Исходное сообщение</span></div>
+            <div class="card">
+              <div class="source">
+                <div class="source__top">
+                  <span>Текст</span>
+                  <span>понедельник, 28 сентября, 10:02</span>
+                </div>
+                <div class="source__box">
+                  <div class="source__text">В среду к трём надо отправить Кузнецову расчёт по складу, я ему обещал. Это важно, не дай забыть.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec__h"><span>Напоминания</span></div>
+            <div class="card">
+              <div class="rem">
+                <div class="rem__item">
+                  <span class="rem__dot"></span>
+                  <span class="rem__when">вторник, 29 сентября, 15:00 <span class="rem__stage">заранее</span></span>
+                  <span class="rem__state rem__state--sent">отправлено</span>
+                </div>
+                <div class="rem__item">
+                  <span class="rem__dot rem__dot--wait"></span>
+                  <span class="rem__when">сегодня, 15:00 <span class="rem__stage">в срок</span></span>
+                  <span class="rem__state">ждёт</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <p class="note">Изменить текст или срок пока можно только через бота.</p>
+        </div>
+
+        <div class="mainbtn">
+          <div class="actions">
+            <span class="btn">Сделано</span>
+            <span class="btn btn--danger">Удалить</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="dim">
+        <div class="popup">
+          <div class="popup__body">
+            <div class="popup__title">Удалить задачу?</div>
+            <div class="popup__text">«Отправить Кузнецову расчёт по складу» исчезнет вместе с напоминаниями. Сообщение в переписке останется.</div>
+          </div>
+          <div class="popup__btns">
+            <span class="popup__btn">Отмена</span>
+            <span class="popup__btn popup__btn--destructive">Удалить</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+  </div>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var buttons = Array.prototype.slice.call(document.querySelectorAll("[data-theme-set]"));
+  buttons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var mode = btn.getAttribute("data-theme-set");
+      if (mode === "auto") root.removeAttribute("data-theme");
+      else root.setAttribute("data-theme", mode);
+      buttons.forEach(function (b) { b.setAttribute("aria-pressed", String(b === btn)); });
+    });
+  });
+})();
+</script>
+</body>
+</html>
