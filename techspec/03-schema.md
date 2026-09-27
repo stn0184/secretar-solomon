@@ -185,3 +185,28 @@ Mini App ходит в базу под ролью `authenticated` (§4.1), вл�
   срабатывает и под `authenticated` — проверки ссылочной целостности
   RLS не подчиняются. Mini App держит задачу из списка и докачивает
   только сообщение и напоминания — два запроса вместо трёх.
+
+### 3.7 `facts` — память о пользователе
+
+Что помощник знает о человеке (§8). Одна строка — одно обстоятельство
+одной фразой.
+
+| Колонка | Тип | Что это |
+| --- | --- | --- |
+| `id` | uuid | ключ |
+| `owner_telegram_id` | bigint | владелец (§3.1) |
+| `category` | text, `check in ('family','home','car','work','habit','preference','other')` | для группировки на экране |
+| `text` | text | сама запись: «Машина — Toyota Camry» |
+| `status` | text, `check in ('fact','guess')` | сказано прямо или выведено (§8.1) |
+| `source_message_id` | uuid, `references messages(id)`, nullable | откуда взялось |
+| `created_at` | timestamptz, `default now()` | |
+| `updated_at` | timestamptz, `default now()` | триггер, как у `tasks` |
+
+`unique (owner_telegram_id, category, text)` (§8.3); индекс
+`(owner_telegram_id, status)`. RLS — §4.2, политика `for all to
+authenticated`: приложение подтверждает (`update status`) и удаляет под
+ней, функций для него не нужно.
+
+`record_understanding` получает аргумент `facts jsonb` (список
+`{category, text, status}`, может быть пустым) и вставляет строки
+`on conflict do nothing` в той же транзакции, что задача и напоминания.
