@@ -42,6 +42,8 @@ const CHECKS = [
   { name: "bot:tests", cmd: "uv run --directory bot pytest -q" },
   { name: "miniapp:lint", cmd: "npm --prefix miniapp run lint" },
   { name: "miniapp:types", cmd: "npm --prefix miniapp run typecheck" },
+  // Чистые функции Mini App (даты словами, группировка) — на Node, без DOM.
+  { name: "miniapp:tests", cmd: "npm --prefix miniapp test" },
   // Сборка Mini App — это и есть её тест: падает на ошибке типов или импорта.
   { name: "miniapp:build", cmd: "npm --prefix miniapp run build" },
   { name: "supabase:types", cmd: "npm --prefix supabase run typecheck" },
