@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from io import BytesIO
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -18,8 +20,10 @@ from aiogram.types import (
     MessageOriginHiddenUser,
     MessageOriginUser,
 )
+from aiogram.utils.chat_action import ChatActionSender
 
 from solomon import texts
+from solomon.db.tasks import SpeechKind
 from solomon.services.reminders import ReminderService
 from solomon.services.tasks import TaskService
 
@@ -45,9 +49,37 @@ def is_plain_text(message: Message) -> bool:
     return text is not None and not text.startswith("/")
 
 
+@dataclass(frozen=True, slots=True)
+class Speech:
+    """Голосовое или кружок: что нужно сервису, чтобы записать и расслышать (§9.1)."""
+
+    kind: SpeechKind
+    file_id: str
+    duration: int
+
+
+def speech_of(message: Message) -> Speech | None:
+    """Голосовое или видео-кружок — или ничего, если это не речь."""
+    if message.voice is not None:
+        return Speech("voice", message.voice.file_id, message.voice.duration)
+    if message.video_note is not None:
+        return Speech("video_note", message.video_note.file_id, message.video_note.duration)
+    return None
+
+
+def speech_in(message: Message) -> dict[str, Speech] | bool:
+    """Фильтр речи: пропускает голос и кружок и отдаёт обработчику, что пришло.
+
+    Пересланное голосовое — то же голосовое: у него есть файл и длительность,
+    а имя отправителя разбирает `forwarded_sender`.
+    """
+    speech = speech_of(message)
+    return {"speech": speech} if speech is not None else False
+
+
 def is_not_text(message: Message) -> bool:
-    """Голос, фотография, стикер, пересланное без текста."""
-    return message.text is None
+    """Фотография, стикер, аудиофайл — ни текст, ни речь."""
+    return message.text is None and speech_of(message) is None
 
 
 def forwarded_sender(message: Message) -> str | None:
@@ -105,6 +137,40 @@ async def handle_text(message: Message, tasks: TaskService | None) -> None:
     await message.answer(outcome.message)
 
 
+async def handle_speech(
+    message: Message, bot: Bot, tasks: TaskService | None, speech: Speech
+) -> None:
+    """Голосовое или кружок владельца — поручение: скачать, расслышать, записать.
+
+    Файл качается в память замыканием, которое уходит в сервис: сервис не
+    знает про aiogram, а байты на диск не попадают (`techspec/09-voice.md`
+    §9.2). Пока идёт распознавание и разбор, в чате висит «печатает…» — это
+    дольше текста, и молчание пугает; статус живёт пять секунд, поэтому его
+    повторяет `ChatActionSender`.
+    """
+    if tasks is None:
+        logger.error("Голосовое некуда записать: бот собран без базы")
+        await message.answer(texts.NOT_SAVED)
+        return
+
+    async def load_audio() -> bytes:
+        buffer = BytesIO()
+        await bot.download(speech.file_id, destination=buffer)
+        return buffer.getvalue()
+
+    async with ChatActionSender.typing(chat_id=message.chat.id, bot=bot):
+        outcome = await tasks.record_from_voice(
+            chat_id=message.chat.id,
+            telegram_message_id=message.message_id,
+            kind=speech.kind,
+            file_id=speech.file_id,
+            duration=speech.duration,
+            load_audio=load_audio,
+            forwarded_from=forwarded_sender(message),
+        )
+    await message.answer(outcome.message)
+
+
 async def handle_done(callback: CallbackQuery, reminders: ReminderService | None) -> None:
     """Нажата кнопка «Сделано» под напоминанием (§6.3).
 
@@ -144,8 +210,8 @@ async def mark_done(message: MaybeInaccessibleMessage | None) -> None:
 
 
 async def handle_not_text(message: Message) -> None:
-    """Не текст — вежливый отказ, и ничего не сохраняется."""
-    logger.info("Сообщение не текстом: %s", message.content_type)
+    """Ни текст, ни речь — вежливый отказ, и ничего не сохраняется."""
+    logger.info("Сообщение не текстом и не голосом: %s", message.content_type)
     await message.answer(texts.NOT_TEXT)
 
 
@@ -154,12 +220,14 @@ def build_router() -> Router:
 
     Именно фабрика, а не общий объект модуля: роутер aiogram привязывается
     к одному диспетчеру навсегда, и второй сборке достался бы занятый.
-    Порядок важен: команды разбираются раньше свободного текста.
+    Порядок важен: команды разбираются раньше свободного текста, речь —
+    раньше отказа на всё остальное.
     """
     router = Router(name="basic")
     router.message.register(handle_start, CommandStart())
     router.message.register(handle_help, Command("help"))
     router.message.register(handle_text, is_plain_text)
+    router.message.register(handle_speech, speech_in)
     router.message.register(handle_not_text, is_not_text)
     router.callback_query.register(handle_done, F.data.startswith(DONE_PREFIX))
     return router

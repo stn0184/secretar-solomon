@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -15,21 +16,31 @@ import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import MessageOriginType
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, TelegramMethod
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    EditMessageText,
+    GetFile,
+    SendChatAction,
+    SendMessage,
+    TelegramMethod,
+)
 from aiogram.methods.base import TelegramType
 from aiogram.types import (
     CallbackQuery,
     Chat,
+    File,
     Message,
     MessageOriginUser,
+    PhotoSize,
     Update,
     User,
+    VideoNote,
     Voice,
 )
 
 from solomon.config import Settings
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import MessageKind, SavedMessage, Task
+from solomon.db.tasks import MessageKind, SavedMessage, SpeechKind, Task
 from solomon.services.transcription import Transcript, TranscriptionResult
 from solomon.services.understanding import (
     Analysis,
@@ -58,6 +69,8 @@ class RecordingSession(BaseSession):
     def __init__(self) -> None:
         super().__init__()
         self.sent: list[TelegramMethod[Any]] = []
+        # Что «лежит» в Telegram под любым file_id: скачивание отдаёт эти байты.
+        self.file_bytes = AUDIO
 
     async def close(self) -> None:
         return None
@@ -87,6 +100,17 @@ class RecordingSession(BaseSession):
             return cast(TelegramType, edited)
         if isinstance(method, AnswerCallbackQuery):
             return cast(TelegramType, True)
+        if isinstance(method, SendChatAction):
+            return cast(TelegramType, True)
+        if isinstance(method, GetFile):
+            # Первый шаг `bot.download`: Telegram называет путь, по которому
+            # потом качается содержимое (`stream_content`).
+            found = File(
+                file_id=method.file_id,
+                file_unique_id=method.file_id,
+                file_path=f"voice/{method.file_id}.oga",
+            )
+            return cast(TelegramType, found)
         raise NotImplementedError(f"В тестах не ожидается метод {type(method).__name__}")
 
     async def stream_content(
@@ -97,12 +121,17 @@ class RecordingSession(BaseSession):
         chunk_size: int = 65536,
         raise_for_status: bool = True,
     ) -> AsyncGenerator[bytes, None]:
-        yield b""
+        yield self.file_bytes
 
     @property
     def texts(self) -> list[str]:
         """Тексты отправленных сообщений."""
         return [m.text for m in self.sent if isinstance(m, SendMessage)]
+
+    @property
+    def actions(self) -> list[str]:
+        """Статусы чата («печатает…»), которые бот показывал по дороге."""
+        return [m.action for m in self.sent if isinstance(m, SendChatAction)]
 
     @property
     def edits(self) -> list[EditMessageText]:
@@ -249,6 +278,11 @@ class FakeTranscriber:
 
     async def transcribe(self, audio: bytes) -> TranscriptionResult:
         self.calls.append(audio)
+        # Настоящее распознавание ждёт сети. Без настоящей паузы фоновый статус
+        # «печатает…» не успел бы ни разу отправиться: до первой отправки его
+        # задаче нужно несколько ходов цикла событий. Пауза короче ~16 мс на
+        # Windows попадает под разрешение часов цикла и ведёт себя как `sleep(0)`.
+        await asyncio.sleep(0.05)
         return self.result
 
 
@@ -321,15 +355,56 @@ def make_forwarded_update(
     return Update(update_id=update_id, message=message)
 
 
-def make_voice_update(from_id: int = OWNER_ID, update_id: int = 1) -> Update:
-    """Голосовое сообщение: текста нет, сохранять нечего."""
+def make_voice_update(
+    from_id: int = OWNER_ID,
+    update_id: int = 1,
+    kind: SpeechKind = "voice",
+    duration: int = 32,
+    sender: str | None = None,
+) -> Update:
+    """Голосовое или видео-кружок: текста нет, есть файл и длительность.
+
+    `sender` — сообщение переслано владельцу от этого человека.
+    """
+    user = User(id=from_id, is_bot=False, first_name="Тим")
+    origin = (
+        MessageOriginUser(
+            type=MessageOriginType.USER,
+            date=datetime.now(UTC),
+            sender_user=User(id=555, is_bot=False, first_name=sender),
+        )
+        if sender
+        else None
+    )
+    message = Message(
+        message_id=update_id,
+        date=datetime.now(UTC),
+        chat=Chat(id=from_id, type="private"),
+        from_user=user,
+        forward_origin=origin,
+        voice=(
+            Voice(file_id="voice-1", file_unique_id="voice-1", duration=duration)
+            if kind == "voice"
+            else None
+        ),
+        video_note=(
+            VideoNote(file_id="note-1", file_unique_id="note-1", length=240, duration=duration)
+            if kind == "video_note"
+            else None
+        ),
+    )
+    return Update(update_id=update_id, message=message)
+
+
+def make_photo_update(from_id: int = OWNER_ID, update_id: int = 1) -> Update:
+    """Фотография: ни текста, ни речи — бот такое пока не понимает."""
     user = User(id=from_id, is_bot=False, first_name="Тим")
     message = Message(
         message_id=update_id,
         date=datetime.now(UTC),
         chat=Chat(id=from_id, type="private"),
         from_user=user,
-        voice=Voice(file_id="voice-1", file_unique_id="voice-1", duration=3),
+        photo=[PhotoSize(file_id="photo-1", file_unique_id="photo-1", width=90, height=90)],
     )
     return Update(update_id=update_id, message=message)
 
