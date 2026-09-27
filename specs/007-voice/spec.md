@@ -130,7 +130,7 @@ Deepgram (`nova-3`, `ru`), расшифровка идёт тем же путё�
 - [x] Mini App: `tasks.ts`/`facts.ts` читают `kind` и `duration_seconds`
       источника; `SourceMessage` — подпись «Голосовое · m:ss» / «Кружок
       · m:ss» над текстом; тест форматирования длительности.
-- [ ] Документы: `techspec/02-layout.md` (`services/transcription.py`),
+- [x] Документы: `techspec/02-layout.md` (`services/transcription.py`),
       `README.md` и `supabase/README.md` (ключ Deepgram, миграция 007),
       `HELP` бота — что теперь можно голосом и что бот запоминает о
       человеке (долг 006).
