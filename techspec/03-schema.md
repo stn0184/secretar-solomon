@@ -36,8 +36,11 @@
 | `owner_telegram_id` | bigint | владелец (§3.1) |
 | `chat_id` | bigint | чат Telegram, откуда пришло |
 | `telegram_message_id` | bigint | id сообщения в этом чате |
-| `kind` | text, `check in ('text')` | вид: пока только текст; голос и фото добавят свои значения |
-| `text` | text | текст сообщения как есть |
+| `kind` | text, `check in ('text', 'voice', 'video_note')` | вид сообщения (§9.1); фото добавит своё значение |
+| `text` | text, `default ''` | текст сообщения как есть; у голоса — расшифровка, пустая до неё (§9.3) |
+| `telegram_file_id` | text, nullable | у голоса и кружка — файл в Telegram, по нему можно скачать снова |
+| `duration_seconds` | int, nullable | длительность звука — мера стоимости распознавания |
+| `transcript_confidence` | numeric, nullable | уверенность распознавания 0–1 (§9.4) |
 | `received_at` | timestamptz, `default now()` | когда бот его получил |
 | `analysis` | jsonb, nullable | что модель поняла: её ответ по схеме §5.3 целиком |
 | `ai_model` | text, nullable | какая модель разбирала |
@@ -93,7 +96,10 @@ polling может отдать обновление повторно, и вто
 
 ```sql
 record_message(owner_telegram_id bigint, chat_id bigint,
-               telegram_message_id bigint, text text)
+               telegram_message_id bigint, text text,
+               kind text default 'text',
+               telegram_file_id text default null,
+               duration_seconds int default null)
   returns messages
 ```
 
