@@ -20,8 +20,8 @@
 Артборды генерируются из `make-boards.py` (шапка, статус-бар и вкладки —
 одни на все экраны); после правки:
 
-    python prototype/006-memory/make-boards.py
-    node prototype/006-memory/build-canvas.mjs
+    python prototype/archive/006-memory/make-boards.py
+    node prototype/archive/006-memory/build-canvas.mjs
 
 ## Экраны
 
