@@ -219,6 +219,7 @@ def make_settings() -> Settings:
         supabase_url="https://example.supabase.co",
         supabase_service_role_key="service-role-key",
         anthropic_api_key="sk-ant-test",
+        deepgram_api_key="dg-test",
     )
 
 

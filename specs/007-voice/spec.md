@@ -102,7 +102,7 @@ Deepgram (`nova-3`, `ru`), расшифровка идёт тем же путё�
       колонки; `record_message` и `record_understanding` с новыми
       необязательными аргументами (§3.2, §3.4). Правка §3 в том же
       коммите.
-- [ ] `config.py`: `DEEPGRAM_API_KEY`; `.env.example`; `deepgram-sdk`
+- [x] `config.py`: `DEEPGRAM_API_KEY`; `.env.example`; `deepgram-sdk`
       в `pyproject.toml` с точной версией — `techspec/01-stack.md` §1.1;
       тест в `test_config.py`.
 - [ ] `services/transcription.py`: протокол `Transcriber`, результат

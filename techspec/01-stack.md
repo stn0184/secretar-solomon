@@ -17,6 +17,7 @@
 | aiogram | 3.31.0 | Long polling без входящих соединений — бот живёт на домашнем компьютере |
 | anthropic | 1.7.0 | Официальный SDK Claude: `AsyncAnthropic` и структурированный ответ `messages.parse` (`techspec/05-ai.md` §5.1) |
 | supabase | 2.31.0 | Официальный клиент; бот ходит в базу ключом service-role |
+| deepgram-sdk | 7.10.0 | Официальный SDK Deepgram с асинхронным клиентом (`AsyncDeepgramClient`) и типами (`py.typed`) — pre-recorded API, `nova-3`, `language=ru` (`techspec/09-voice.md` §9.2); актуальная на PyPI на 2026-09-28, тянет `httpx` и `pydantic`, которые уже в стеке |
 | httpx | 0.28.1 | Health-запрос идёт мимо клиента: он должен отвечать и тогда, когда схемы ещё нет |
 | python-dotenv | 1.2.3 | Читает корневой `.env` при локальном запуске |
 | tzdata | 2026.4 | База часовых поясов IANA: в Windows её нет в системе, а без неё `OWNER_TIMEZONE` не превратить в пояс |

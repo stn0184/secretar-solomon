@@ -13,6 +13,7 @@ FULL_ENV = {
     "SUPABASE_URL": "https://example.supabase.co",
     "SUPABASE_SERVICE_ROLE_KEY": "service-role-key",
     "ANTHROPIC_API_KEY": "sk-ant-test",
+    "DEEPGRAM_API_KEY": "dg-test",
 }
 
 
@@ -26,6 +27,7 @@ def test_full_env_gives_settings() -> None:
         supabase_url="https://example.supabase.co",
         supabase_service_role_key="service-role-key",
         anthropic_api_key="sk-ant-test",
+        deepgram_api_key="dg-test",
         anthropic_base_url=None,
     )
 

@@ -258,6 +258,22 @@ wheels = [
 ]
 
 [[package]]
+name = "deepgram-sdk"
+version = "7.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/82/d9/4bb497c90641887e47e8faa30e985cee9ee1279952eddfc1261c72acee0e/deepgram_sdk-7.10.0.tar.gz", hash = "sha256:c183fdfef88373c0b2bdd25fd38a81594149b05268a7a17f869a56882eb64ce9", size = 247494, upload-time = "2026-09-21T09:50:18.089Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/2e/d8e256653552e9f36b4360e59056b4286fdc3c742ed1f0689903ce9f72ca/deepgram_sdk-7.10.0-py3-none-any.whl", hash = "sha256:d6d97e9bcd10667d0d062a9d79b67ef5dd65d3939864177966f6045347db5569", size = 646874, upload-time = "2026-09-21T09:50:16.762Z" },
+]
+
+[[package]]
 name = "deprecation"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -789,6 +805,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiogram" },
     { name = "anthropic" },
+    { name = "deepgram-sdk" },
     { name = "httpx" },
     { name = "python-dotenv" },
     { name = "supabase" },
@@ -807,6 +824,7 @@ dev = [
 requires-dist = [
     { name = "aiogram", specifier = "==3.31.0" },
     { name = "anthropic", specifier = "==1.7.0" },
+    { name = "deepgram-sdk", specifier = "==7.10.0" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "python-dotenv", specifier = "==1.2.3" },
     { name = "supabase", specifier = "==2.31.0" },

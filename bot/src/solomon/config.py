@@ -48,6 +48,8 @@ class Settings:
     supabase_url: str
     supabase_service_role_key: str
     anthropic_api_key: str
+    # Ключ Deepgram — распознавание голосовых (`techspec/09-voice.md` §9.2).
+    deepgram_api_key: str
     # Пусто — ходим в api.anthropic.com; задано — в посредника
     # (`techspec/05-ai.md` §5.1).
     anthropic_base_url: str | None = None
@@ -73,6 +75,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     url = _required(env, "SUPABASE_URL").rstrip("/")
     service_key = _required(env, "SUPABASE_SERVICE_ROLE_KEY")
     anthropic_key = _required(env, "ANTHROPIC_API_KEY")
+    deepgram_key = _required(env, "DEEPGRAM_API_KEY")
     anthropic_base_url = _optional(env, "ANTHROPIC_BASE_URL")
 
     try:
@@ -97,5 +100,6 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         supabase_url=url,
         supabase_service_role_key=service_key,
         anthropic_api_key=anthropic_key,
+        deepgram_api_key=deepgram_key,
         anthropic_base_url=anthropic_base_url.rstrip("/") if anthropic_base_url else None,
     )
