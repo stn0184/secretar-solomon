@@ -98,7 +98,7 @@ Deepgram (`nova-3`, `ru`), расшифровка идёт тем же путё�
 
 ## Задачи
 
-- [ ] Миграция: `messages.kind` расширен, `text default ''`, три новые
+- [x] Миграция: `messages.kind` расширен, `text default ''`, три новые
       колонки; `record_message` и `record_understanding` с новыми
       необязательными аргументами (§3.2, §3.4). Правка §3 в том же
       коммите.
