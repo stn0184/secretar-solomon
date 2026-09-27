@@ -1,67 +1,608 @@
 /*
- * Цвета берутся из темы Telegram: переменные --tg-theme-* выставляет скрипт
- * telegram-web-app.js. Значения после запятой — запасные, чтобы вне Telegram
- * приложение оставалось читаемым, а не белым на белом.
+ * Визуальный язык — design.md §1, значения — из одобренного прототипа 005.
+ *
+ * Цвет только через переменные. Поверхности и текст берутся из темы Telegram
+ * (--tg-theme-*, их выставляет telegram-web-app.js), значения после запятой —
+ * запасные, чтобы вне Telegram приложение оставалось читаемым. Смысловые
+ * цвета — важно, ок, предположение — в теме не водятся: это фиксированные
+ * пары под светлую и тёмную схему, переключает их атрибут data-scheme на
+ * <html> (ставит lib/telegram.ts из colorScheme SDK). Отдельных стилей под
+ * тёмную тему нет.
  */
 
+/* ─── Токены ────────────────────────────────────────────────────────── */
+
 :root {
-  --bg: var(--tg-theme-bg-color, #ffffff);
-  --surface: var(--tg-theme-secondary-bg-color, #f2f2f7);
-  --text: var(--tg-theme-text-color, #1c1c1e);
-  --muted: var(--tg-theme-hint-color, #8e8e93);
-  --accent: var(--tg-theme-link-color, #2f7cf6);
+  --app-bg: var(--tg-theme-secondary-bg-color, #eff0f4);
+  --surface: var(--tg-theme-bg-color, #ffffff);
+  --line: var(--tg-theme-section-separator-color, #e3e5ea);
+  --ink: var(--tg-theme-text-color, #0f1116);
+  --ink-2: var(--tg-theme-subtitle-text-color, #6b7280);
+  --ink-3: var(--tg-theme-hint-color, #a0a6b0);
+  --accent: var(--tg-theme-button-color, #3390ec);
+  --accent-ink: var(--tg-theme-button-text-color, #ffffff);
+  --urgent: var(--tg-theme-destructive-text-color, #ce4238);
+
+  /* производные — от темы, какой бы она ни была */
+  --surface-2: color-mix(in srgb, var(--ink) 5%, var(--surface));
+  --line-strong: color-mix(in srgb, var(--ink) 16%, var(--surface));
+  --accent-weak: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  --urgent-weak: color-mix(in srgb, var(--urgent) 12%, var(--surface));
+
+  /* смысловые пары: состояние задачи, не украшение */
+  --important: #b1741a;
+  --important-weak: #faf0dd;
+  --ok: #2f9a58;
+  --ok-weak: #e7f4ec;
+  --guess: #6f57ac;
+  --guess-weak: #f1edfa;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --t-title: 600 22px/28px var(--font-ui);
+  --t-body: 400 16px/21px var(--font-ui);
+  --t-sub: 400 13px/17px var(--font-ui);
+  --t-cap: 500 11px/14px var(--font-ui);
+
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --r-sheet: 16px;
+  --r-card: 14px;
+  --r-btn: 12px;
+  --r-pill: 999px;
 }
+
+:root[data-scheme="dark"] {
+  --surface: var(--tg-theme-section-bg-color, var(--tg-theme-bg-color, #232e3c));
+  --important: #dfa94f;
+  --important-weak: #362c1b;
+  --ok: #6cc38a;
+  --ok-weak: #1f3327;
+  --guess: #b49ae8;
+  --guess-weak: #2a2540;
+}
+
+/* ─── Основа ────────────────────────────────────────────────────────── */
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  font-size: 16px;
-  line-height: 1.5;
+  background: var(--app-bg);
+  color: var(--ink);
+  font: var(--t-body);
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  font: inherit;
+  color: inherit;
 }
 
 .screen {
   max-width: 34rem;
+  min-height: 100vh;
   margin: 0 auto;
-  padding: 2rem 1.25rem 3rem;
-}
-
-.title {
-  margin: 0 0 0.25rem;
-  font-size: 1.75rem;
-  font-weight: 600;
-}
-
-.subtitle {
-  margin: 0 0 1.75rem;
-  color: var(--muted);
-}
-
-.facts {
-  margin: 0;
+  padding: var(--s2) var(--s4) calc(var(--s4) + env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 10px;
 }
 
-.fact {
-  background: var(--surface);
-  border-radius: 0.75rem;
-  padding: 0.75rem 1rem;
+/* ─── Шапка экрана ──────────────────────────────────────────────────── */
+
+.head {
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--s2);
 }
 
-.fact dt {
-  color: var(--muted);
-  font-size: 0.8125rem;
+.back {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  margin: 0 0 6px;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--accent);
+  font: 400 15px/20px var(--font-ui);
+  cursor: pointer;
+}
+
+.back i {
+  font: 400 22px/20px var(--font-ui);
+  font-style: normal;
+  margin-top: -2px;
+}
+
+.page-title {
+  margin: 0;
+  font: var(--t-title);
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.page-sub {
+  margin: 4px 0 0;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+/* ─── Группы и строки списка ────────────────────────────────────────── */
+
+.sec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sec__h {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0;
+  padding: 0 var(--s1);
+  font: var(--t-cap);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  color: var(--ink-3);
 }
 
-.fact dd {
-  margin: 0.25rem 0 0;
+.sec__h--overdue {
+  color: var(--urgent);
+}
+
+.sec__h em {
+  font: var(--t-sub);
+  font-style: normal;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-3);
+}
+
+.card {
+  background: var(--surface);
+  border-radius: var(--r-card);
+  overflow: hidden;
+}
+
+.row {
+  appearance: none;
+  border: 0;
+  background: none;
+  width: 100%;
+  text-align: left;
+  display: flex;
+  gap: var(--s3);
+  align-items: flex-start;
+  padding: 9px var(--s4) 9px var(--s3);
+  cursor: pointer;
+}
+
+.row:active {
+  background: var(--surface-2);
+}
+
+.row + .row {
+  border-top: 1px solid var(--line);
+}
+
+.row__mark {
+  flex: none;
+  width: 4px;
+  align-self: stretch;
+  border-radius: 2px;
+  background: transparent;
+}
+
+.row__mark--high {
+  background: var(--important);
+}
+
+.row__mark--overdue {
+  background: var(--urgent);
+}
+
+.row__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.row__title {
+  font: var(--t-body);
+  letter-spacing: -0.005em;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.row__when--overdue {
+  color: var(--urgent);
+  font-weight: 500;
+}
+
+.row__when--today {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.row__chev {
+  flex: none;
+  color: var(--ink-3);
+  font: 400 17px/21px var(--font-ui);
+}
+
+/* ─── Метки ─────────────────────────────────────────────────────────── */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 7px;
+  font: var(--t-cap);
+  white-space: nowrap;
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+
+.chip--high {
+  background: var(--important-weak);
+  color: var(--important);
+}
+
+.chip--mine {
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
+.chip--theirs {
+  background: var(--surface-2);
+  color: var(--ink-2);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.chip--review {
+  background: var(--guess-weak);
+  color: var(--guess);
+}
+
+.chip--kind {
+  background: transparent;
+  color: var(--ink-3);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+/* ─── Карточка: поля, источник, напоминания ─────────────────────────── */
+
+.kv {
+  display: flex;
+  flex-direction: column;
+}
+
+.kv__row {
+  display: flex;
+  gap: var(--s3);
+  align-items: flex-start;
+  padding: 10px var(--s4);
+}
+
+.kv__row + .kv__row {
+  border-top: 1px solid var(--line);
+}
+
+.kv__k {
+  flex: none;
+  width: 92px;
+  padding-top: 2px;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.kv__v {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font: 400 15px/20px var(--font-ui);
+  color: var(--ink);
+}
+
+.kv__v small {
+  display: block;
+  width: 100%;
+  font: var(--t-sub);
+  color: var(--ink-3);
+}
+
+.source {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4) var(--s4);
+}
+
+.source__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.source__box {
+  margin: 0;
+  background: var(--surface-2);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+  padding: 9px 11px;
+}
+
+.source__text {
+  margin: 0;
+  font: 400 14px/19px var(--font-ui);
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rem {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rem__item {
+  display: flex;
+  gap: var(--s3);
+  align-items: center;
+  padding: 9px var(--s4);
+}
+
+.rem__item + .rem__item {
+  border-top: 1px solid var(--line);
+}
+
+.rem__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--ok);
+}
+
+.rem__dot--wait {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--ink-3);
+}
+
+.rem__when {
+  flex: 1;
+  font: 400 15px/20px var(--font-ui);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.rem__stage {
+  font: var(--t-sub);
+  color: var(--ink-3);
+}
+
+.rem__state {
+  flex: none;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.rem__state--sent {
+  color: var(--ok);
+}
+
+.note {
+  margin: 0;
+  padding: 0 var(--s1);
+  font: var(--t-sub);
+  color: var(--ink-3);
+}
+
+/* ─── Кнопки и действия ─────────────────────────────────────────────── */
+
+.btn {
+  appearance: none;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 var(--s5);
+  border-radius: var(--r-btn);
+  text-align: center;
+  font: 600 15px/20px var(--font-ui);
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.btn--wide {
+  width: 100%;
+}
+
+.btn--ghost {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.btn--danger {
+  background: var(--surface);
+  color: var(--urgent);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.actions {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  padding: var(--s3) 0 calc(var(--s2) + env(safe-area-inset-bottom));
+  background: var(--app-bg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.actions__row {
+  display: flex;
+  gap: var(--s2);
+}
+
+.actions__row .btn {
+  flex: 1;
+}
+
+.actions__error {
+  margin: 0;
+  padding: 0 var(--s1);
+  font: var(--t-sub);
+  color: var(--urgent);
+}
+
+/* ─── Состояния: загрузка, пусто, ошибка ────────────────────────────── */
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+}
+
+.skeleton__row {
+  height: 56px;
+  background: var(--surface);
+  position: relative;
+  overflow: hidden;
+}
+
+.skeleton__row + .skeleton__row {
+  border-top: 1px solid var(--line);
+}
+
+.skeleton__row::after {
+  content: "";
+  position: absolute;
+  left: var(--s3);
+  top: 14px;
+  width: 62%;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  box-shadow: 0 18px 0 -2px var(--surface-2);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--s3);
+  padding: 15vh var(--s2) 0;
+}
+
+.empty__mark {
+  width: 64px;
+  height: 64px;
+  margin-bottom: var(--s1);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty__mark i {
+  display: block;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-pill);
+  border: 2px dashed var(--ink-3);
+}
+
+.empty__h {
+  margin: 0;
+  font: 600 19px/24px var(--font-ui);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.empty__p {
+  margin: 0;
+  max-width: 292px;
+  font: 400 15px/21px var(--font-ui);
+  color: var(--ink-2);
+}
+
+.hints {
+  list-style: none;
+  margin: var(--s1) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.hint {
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 9px var(--s3);
+  text-align: left;
+  font: 400 14px/19px var(--font-ui);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s4);
+  background: var(--surface);
+  border-radius: var(--r-card);
+}
+
+.error__text {
+  margin: 0;
+  font: 400 15px/20px var(--font-ui);
+  color: var(--ink);
 }
