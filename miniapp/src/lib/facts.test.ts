@@ -37,14 +37,23 @@ describe("parseFact", () => {
       text: "Машина — Toyota Camry",
       status: "fact",
       created_at: "2026-09-12T09:00:00+05:00",
-      source: { text: "у меня Toyota Camry", received_at: "2026-09-12T08:59:00+05:00", kind: "about_me" },
+      source: {
+        text: "у меня Toyota Camry",
+        received_at: "2026-09-12T08:59:00+05:00",
+        kind: "voice",
+        duration_seconds: 4,
+        analysis_kind: "about_me",
+      },
     });
 
     assert.ok(parsed);
     assert.equal(parsed.category, "car");
     assert.equal(parsed.status, "fact");
     assert.equal(parsed.source?.text, "у меня Toyota Camry");
-    assert.equal(parsed.source?.kind, "about_me");
+    assert.equal(parsed.source?.analysisKind, "about_me");
+    // Вид и длительность самого сообщения — те же поля, что у источника задачи.
+    assert.equal(parsed.source?.kind, "voice");
+    assert.equal(parsed.source?.durationSeconds, 4);
     assert.equal(parsed.source?.receivedAt.getTime(), new Date("2026-09-12T08:59:00+05:00").getTime());
   });
 
@@ -125,8 +134,20 @@ describe("factsSubtitle", () => {
 });
 
 describe("sourceCaption", () => {
-  const ownWords = { text: "у меня Camry", receivedAt: new Date(2026, 8, 12, 9, 0), kind: "about_me" };
-  const errand = { text: "забрать Мишу из садика", receivedAt: new Date(2026, 8, 24, 17, 40), kind: "task" };
+  const ownWords = {
+    text: "у меня Camry",
+    receivedAt: new Date(2026, 8, 12, 9, 0),
+    kind: "text" as const,
+    durationSeconds: null,
+    analysisKind: "about_me",
+  };
+  const errand = {
+    text: "забрать Мишу из садика",
+    receivedAt: new Date(2026, 8, 24, 17, 40),
+    kind: "text" as const,
+    durationSeconds: null,
+    analysisKind: "task",
+  };
 
   it("сказанное прямо — «с ваших слов», выведенное — «из сообщения», дата — записи", () => {
     assert.equal(sourceCaption(fact({ source: ownWords })), "с ваших слов · 12 сентября");

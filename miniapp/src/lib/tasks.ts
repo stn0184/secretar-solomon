@@ -39,10 +39,19 @@ export interface Task {
   createdAt: Date;
 }
 
-/** Исходное сообщение задачи — целиком, как его читал помощник. */
+/** Вид исходного сообщения (`techspec/03-schema.md` §3.2): текст, голосовое, кружок. */
+export type MessageKind = "text" | "voice" | "video_note";
+
+/**
+ * Исходное сообщение задачи — целиком, как его читал помощник. У голосового
+ * и кружка `text` — расшифровка, а `durationSeconds` — длина звука: по
+ * подписи «Голосовое · 0:32» видно, откуда ошибки в словах (§9.4).
+ */
 export interface SourceMessage {
   text: string;
   receivedAt: Date;
+  kind: MessageKind;
+  durationSeconds: number | null;
 }
 
 export interface Reminder {
@@ -94,7 +103,8 @@ export function parseTask(row: unknown): Task | null {
   };
 }
 
-function parseMessage(row: unknown): SourceMessage | null {
+/** Строка `messages` → исходное сообщение. Не годится (нет текста или даты) — `null`. */
+export function parseSourceMessage(row: unknown): SourceMessage | null {
   const r = recordOf(row);
   if (!r) {
     return null;
@@ -103,7 +113,41 @@ function parseMessage(row: unknown): SourceMessage | null {
   if (typeof r.text !== "string" || !receivedAt) {
     return null;
   }
-  return { text: r.text, receivedAt };
+  const duration = r.duration_seconds;
+  return {
+    text: r.text,
+    receivedAt,
+    // Незнакомый вид читается как текст: подписи не будет, но цитата останется.
+    kind: oneOf<MessageKind>(r.kind, ["text", "voice", "video_note"], "text"),
+    durationSeconds: typeof duration === "number" && Number.isFinite(duration) ? duration : null,
+  };
+}
+
+/* ------------------------------------------------------------------ голос */
+
+/** «0:32», «1:35», «62:05» — минуты и секунды, часов нет: кружок и голосовое короткие. */
+export function formatDuration(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
+const VOICE_WORD: Record<Exclude<MessageKind, "text">, string> = {
+  voice: "Голосовое",
+  video_note: "Кружок",
+};
+
+/**
+ * Подпись над расшифровкой: «Голосовое · 0:32», «Кружок · 0:15»; у текста
+ * подписи нет — `null`. Без длительности остаётся одно слово.
+ */
+export function voiceCaption(message: SourceMessage): string | null {
+  if (message.kind === "text") {
+    return null;
+  }
+  const word = VOICE_WORD[message.kind];
+  return message.durationSeconds === null ? word : `${word} · ${formatDuration(message.durationSeconds)}`;
 }
 
 function parseReminder(row: unknown): Reminder | null {
@@ -251,7 +295,11 @@ export async function loadTaskDetails(db: Db, task: Task): Promise<DetailsResult
   const [messageResult, remindersResult] = await Promise.all([
     messageId
       ? query(db, (client: SupabaseClient) =>
-          client.from("messages").select("text, received_at").eq("id", messageId).limit(1),
+          client
+            .from("messages")
+            .select("text, received_at, kind, duration_seconds")
+            .eq("id", messageId)
+            .limit(1),
         )
       : Promise.resolve({ ok: true as const, data: null }),
     query(db, (client: SupabaseClient) =>
@@ -275,7 +323,7 @@ export async function loadTaskDetails(db: Db, task: Task): Promise<DetailsResult
   return {
     ok: true,
     details: {
-      message: parseMessage(messageResult.data?.[0]),
+      message: parseSourceMessage(messageResult.data?.[0]),
       reminders: (remindersResult.data ?? []).flatMap((row) => parseReminder(row) ?? []),
     },
   };

@@ -7,10 +7,11 @@
  * запросы под той же политикой, функций не нужно (`techspec/08-memory.md` §8.4).
  *
  * Источник записи читается тем же запросом вложенной строкой `messages`:
- * приложению нужен и текст сообщения (раскрытие записи), и его вид — по нему
- * подпись «с ваших слов» (сказано прямо) или «из сообщения» (выведено).
- * Подпись зависит от вида сообщения, а не от статуса: подтверждённое
- * предположение остаётся «из сообщения».
+ * приложению нужен и текст сообщения (раскрытие записи), и вид разбора — по
+ * нему подпись «с ваших слов» (сказано прямо) или «из сообщения» (выведено).
+ * Подпись зависит от вида разбора, а не от статуса: подтверждённое
+ * предположение остаётся «из сообщения». Вид самого сообщения (текст или
+ * голос) и длительность — те же поля, что у источника задачи (`tasks.ts`).
  *
  * Отказ — это текст на экране, а не исключение (`supabase.ts`); действие
  * считается сделанным только когда база вернула строку (инвариант 4).
@@ -22,16 +23,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { formatDate, plural } from "./format.ts";
 import { dateOrNull, oneOf, recordOf } from "./parse.ts";
 import { type ActionResult, type Db, failed, query } from "./supabase.ts";
+import { type SourceMessage, parseSourceMessage } from "./tasks.ts";
 
 export type FactCategory = "family" | "home" | "car" | "work" | "habit" | "preference" | "other";
 export type FactStatus = "fact" | "guess";
 
-/** Сообщение, из которого взялась запись: текст, когда пришло и как разобрано. */
-export interface FactSource {
-  text: string;
-  receivedAt: Date;
+/** Сообщение, из которого взялась запись: то же, что у задачи, плюс как разобрано. */
+export interface FactSource extends SourceMessage {
   /** `kind` разбора (`about_me`, `task`, …); пусто, если разбора не было. */
-  kind: string | null;
+  analysisKind: string | null;
 }
 
 export interface Fact {
@@ -69,20 +69,19 @@ export type FactsResult = { ok: true; facts: Fact[] } | { ok: false; message: st
 /* ----------------------------------------------------------------- разбор */
 
 // Источник — вложенная строка `messages` по внешнему ключу `source_message_id`;
-// вид сообщения берётся прямо из jsonb разбора, чтобы не тащить его целиком.
+// вид разбора берётся прямо из jsonb, чтобы не тащить его целиком, и под
+// своим именем: `kind` — это вид самого сообщения (текст, голосовое, кружок).
 const COLUMNS =
-  "id, category, text, status, created_at, source:messages(text, received_at, kind:analysis->>kind)";
+  "id, category, text, status, created_at, " +
+  "source:messages(text, received_at, kind, duration_seconds, analysis_kind:analysis->>kind)";
 
 function parseSource(row: unknown): FactSource | null {
+  const message = parseSourceMessage(row);
   const r = recordOf(row);
-  if (!r) {
+  if (!message || !r) {
     return null;
   }
-  const receivedAt = dateOrNull(r.received_at);
-  if (typeof r.text !== "string" || !receivedAt) {
-    return null;
-  }
-  return { text: r.text, receivedAt, kind: typeof r.kind === "string" ? r.kind : null };
+  return { ...message, analysisKind: typeof r.analysis_kind === "string" ? r.analysis_kind : null };
 }
 
 /** Строка `facts` → запись. Не годится (нет id или текста) — `null`. */
@@ -147,9 +146,9 @@ export function factsSubtitle(facts: Fact[]): string {
   return guesses > 0 ? `${total} · ${countGuesses(guesses)}` : total;
 }
 
-/** Сказано прямо: источник — сообщение вида `about_me`. */
+/** Сказано прямо: источник разобран как `about_me`. */
 export function isOwnWords(fact: Fact): boolean {
-  return fact.source?.kind === "about_me";
+  return fact.source?.analysisKind === "about_me";
 }
 
 /** «с ваших слов · 12 сентября» / «из сообщения · 24 сентября» — дата записи. */

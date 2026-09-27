@@ -9,7 +9,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { type Task, groupOf, groupTasks, parseTask } from "./tasks.ts";
+import {
+  type Task,
+  formatDuration,
+  groupOf,
+  groupTasks,
+  parseSourceMessage,
+  parseTask,
+  voiceCaption,
+} from "./tasks.ts";
 
 // Среда, 30 сентября 2026, 12:00.
 const now = new Date(2026, 8, 30, 12, 0);
@@ -128,5 +136,67 @@ describe("parseTask", () => {
     assert.equal(parseTask({ ...row, title: 5 }), null);
     assert.equal(parseTask(null), null);
     assert.equal(parseTask({ ...row, id: undefined }), null);
+  });
+});
+
+describe("formatDuration", () => {
+  it("минуты и секунды через двоеточие, секунды двумя цифрами", () => {
+    assert.equal(formatDuration(0), "0:00");
+    assert.equal(formatDuration(5), "0:05");
+    assert.equal(formatDuration(32), "0:32");
+    assert.equal(formatDuration(61), "1:01");
+    assert.equal(formatDuration(600), "10:00");
+  });
+
+  it("длиннее часа — минуты растут, часов нет", () => {
+    assert.equal(formatDuration(3725), "62:05");
+  });
+});
+
+describe("parseSourceMessage", () => {
+  const row = { text: "в пятницу отправить расчёт", received_at: "2026-09-28T05:02:00+00:00" };
+
+  it("текст без вида читается как текст без длительности", () => {
+    const parsed = parseSourceMessage(row);
+    assert.ok(parsed);
+    assert.equal(parsed.kind, "text");
+    assert.equal(parsed.durationSeconds, null);
+  });
+
+  it("голосовое и кружок несут вид и длительность", () => {
+    const voice = parseSourceMessage({ ...row, kind: "voice", duration_seconds: 32 });
+    assert.equal(voice?.kind, "voice");
+    assert.equal(voice?.durationSeconds, 32);
+    const note = parseSourceMessage({ ...row, kind: "video_note", duration_seconds: 15 });
+    assert.equal(note?.kind, "video_note");
+  });
+
+  it("незнакомый вид — текст, негодная длительность — пусто", () => {
+    const parsed = parseSourceMessage({ ...row, kind: "photo", duration_seconds: "long" });
+    assert.equal(parsed?.kind, "text");
+    assert.equal(parsed?.durationSeconds, null);
+  });
+
+  it("без текста или даты строка не годится", () => {
+    assert.equal(parseSourceMessage({ text: 5, received_at: row.received_at }), null);
+    assert.equal(parseSourceMessage({ text: "x" }), null);
+    assert.equal(parseSourceMessage(null), null);
+  });
+});
+
+describe("voiceCaption", () => {
+  const at = new Date(2026, 8, 28, 10, 2);
+
+  it("голосовое — «Голосовое · 0:32», кружок — «Кружок · 0:32»", () => {
+    assert.equal(voiceCaption({ text: "", receivedAt: at, kind: "voice", durationSeconds: 32 }), "Голосовое · 0:32");
+    assert.equal(voiceCaption({ text: "", receivedAt: at, kind: "video_note", durationSeconds: 95 }), "Кружок · 1:35");
+  });
+
+  it("у текста подписи нет", () => {
+    assert.equal(voiceCaption({ text: "x", receivedAt: at, kind: "text", durationSeconds: null }), null);
+  });
+
+  it("без длительности — только слово", () => {
+    assert.equal(voiceCaption({ text: "", receivedAt: at, kind: "voice", durationSeconds: null }), "Голосовое");
   });
 });
