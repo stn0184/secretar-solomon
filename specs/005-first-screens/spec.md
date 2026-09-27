@@ -122,7 +122,7 @@
       переключение экранов, `BackButton`.
 - [x] `styles.css` по `design.md` §1: тема из Telegram, плотность и
       типографика прототипа.
-- [ ] Публикация: `vite.config.ts` (`base` из `VITE_BASE_PATH`),
+- [x] Публикация: `vite.config.ts` (`base` из `VITE_BASE_PATH`),
       `.github/workflows/pages.yml` (сборка, grep секретов, deploy),
       `README.md` — как настроить секреты и кнопку меню.
 - [ ] `CLAUDE.md` §«Сдача изменения» — правило push по §7.2;

@@ -33,8 +33,41 @@ Supabase. Первое подключение проекта — по чек-л�
 
 Жива ли база — `uv run --directory bot solomon-health`.
 Проверки перед коммитом — `node scripts/gate.mjs` (см. `CLAUDE.md`
-§«Сдача изменения»).
+§«Сдача изменения»); чистые функции Mini App отдельно —
+`npm --prefix miniapp test`.
 
 Как помощник понимает поручения — `uv run --directory bot pytest -m live`:
 десять русских примеров уходят в Claude по-настоящему и сверяются с
 ожидаемым разбором. Нужен ключ, стоит денег, в воротах не участвует.
+
+## Публикация Mini App
+
+Приложение живёт на GitHub Pages репозитория (`techspec/07-deploy.md`):
+push в `main` собирает его workflow `.github/workflows/pages.yml` и
+выкладывает по адресу `https://<user>.github.io/<repo>/`. Настраивается
+один раз:
+
+1. **Репозиторий на GitHub** — публичный: на бесплатном тарифе Pages
+   работает только для публичных репозиториев. Секретов в репозитории
+   нет (`.env` не коммитится), так что это безопасно.
+2. **Settings → Pages → Build and deployment → Source: GitHub Actions.**
+3. **Settings → Secrets and variables → Actions → New repository secret**,
+   два секрета с теми же значениями, что в `.env`: `VITE_SUPABASE_URL`
+   и `VITE_SUPABASE_ANON_KEY`. Оба публичные по замыслу Supabase; ключ
+   service-role и токен бота сюда не кладутся никогда.
+4. **Push в `main`** (по правилу `CLAUDE.md` §«Сдача изменения»). Вкладка
+   Actions → «pages» должна позеленеть; адрес — в шаге deploy. Сборка с
+   секретом внутри (`service_role`, токен бота, ключ Claude) падает до
+   публикации — так и задумано.
+5. **Миграция 005** должна быть применена к базе (`supabase db push`),
+   иначе кнопка «Сделано» в приложении будет отвечать отказом.
+6. **Кнопка меню в BotFather**: `/mybots` → бот → Bot Settings → Menu
+   Button → вставить адрес Pages, назвать «Задачи». После этого кнопка
+   слева от поля ввода в чате с ботом открывает приложение.
+7. **Проверить вживую**: открыть из Telegram — список задач в теме
+   мессенджера; `curl -sI https://<user>.github.io/<repo>/` отвечает 200.
+
+Репозиторий переименован — меняется адрес: workflow подхватит новое имя
+сам, а в BotFather адрес правится руками. Репозиторий вида
+`<user>.github.io` живёт в корне — тогда `VITE_BASE_PATH` в workflow
+ставится в `/`.

@@ -46,6 +46,8 @@ const CHECKS = [
   { name: "miniapp:tests", cmd: "npm --prefix miniapp test" },
   // Сборка Mini App — это и есть её тест: падает на ошибке типов или импорта.
   { name: "miniapp:build", cmd: "npm --prefix miniapp run build" },
+  // В сборке нет секретов (инвариант 1) — та же проверка, что в workflow до deploy.
+  { name: "miniapp:secrets", cmd: "node scripts/check-dist.mjs miniapp/dist" },
   { name: "supabase:types", cmd: "npm --prefix supabase run typecheck" },
   { name: "supabase:tests", cmd: "npm --prefix supabase test" },
 ];

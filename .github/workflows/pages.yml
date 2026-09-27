@@ -1,0 +1,73 @@
+# Публикация Mini App на GitHub Pages — techspec/07-deploy.md.
+#
+# Push в main собирает приложение и выкладывает dist/ в Pages. Секреты
+# сборки — в Settings → Secrets and variables → Actions: VITE_SUPABASE_URL
+# и VITE_SUPABASE_ANON_KEY, оба публичные по замыслу Supabase (инвариант 1).
+# Перед deploy сборка проверяется на секреты: нашлись — публикации нет.
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Две публикации подряд не гонятся: побеждает последняя.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+
+      - name: Секреты сборки заданы
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          test -n "$VITE_SUPABASE_URL" || { echo "::error::нет секрета VITE_SUPABASE_URL (README §Публикация)"; exit 1; }
+          test -n "$VITE_SUPABASE_ANON_KEY" || { echo "::error::нет секрета VITE_SUPABASE_ANON_KEY (README §Публикация)"; exit 1; }
+
+      - name: Зависимости
+        run: npm ci --prefix miniapp
+
+      - name: Сборка
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          # Адрес Pages — https://<user>.github.io/<repo>/, отсюда base.
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+        run: npm run build --prefix miniapp
+
+      - name: В сборке нет секретов
+        run: node scripts/check-dist.mjs miniapp/dist
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: miniapp/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
