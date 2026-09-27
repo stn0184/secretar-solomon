@@ -114,6 +114,40 @@ async def test_record_message_calls_rpc_with_whole_text() -> None:
             "chat_id": 42,
             "telegram_message_id": 7,
             "text": "купить лампочку",
+            "kind": "text",
+            "telegram_file_id": None,
+            "duration_seconds": None,
+        },
+    )
+
+
+async def test_record_message_sends_kind_file_and_duration_for_voice() -> None:
+    """Голос пишется до расшифровки: вид, файл и длительность, текст пустой (§9.3)."""
+    fake = FakeClient(data={**MESSAGE_ROW, "text": "", "kind": "voice"})
+
+    saved = await db_tasks.record_message(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        chat_id=42,
+        telegram_message_id=7,
+        text="",
+        kind="voice",
+        telegram_file_id="voice-1",
+        duration_seconds=32,
+    )
+
+    assert saved == SavedMessage(id="9a71", reply=None)
+    assert fake.calls[0] == (
+        "rpc",
+        "record_message",
+        {
+            "owner_telegram_id": OWNER_ID,
+            "chat_id": 42,
+            "telegram_message_id": 7,
+            "text": "",
+            "kind": "voice",
+            "telegram_file_id": "voice-1",
+            "duration_seconds": 32,
         },
     )
 
@@ -178,8 +212,35 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
             "task": TASK_FIELDS,
             "reminders": REMINDER_ROWS,
             "facts": FACT_ROWS,
+            "transcript": None,
+            "transcript_confidence": None,
         },
     )
+
+
+async def test_record_understanding_sends_the_transcript_and_its_confidence() -> None:
+    """Расшифровка ложится тем же вызовом, что разбор и задача (§9.3)."""
+    fake = FakeClient(data=ROW)
+
+    await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a71",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=45,
+        reply="Записал: купить лампочку",
+        task=TASK_FIELDS,
+        reminders=[],
+        facts=[],
+        transcript="купить лампочку",
+        transcript_confidence=0.93,
+    )
+
+    params = fake.calls[0][2]
+    assert params["transcript"] == "купить лампочку"
+    assert params["transcript_confidence"] == 0.93
 
 
 async def test_record_understanding_without_task_returns_nothing() -> None:

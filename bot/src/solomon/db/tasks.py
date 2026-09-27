@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from supabase import Client
 
@@ -23,6 +23,11 @@ RECORD_UNDERSTANDING_FUNCTION = "record_understanding"
 TASKS_TABLE = "tasks"
 ACTIVE_STATUS = "active"
 TASK_COLUMNS = "id, title, status"
+
+# Вид сообщения (`techspec/03-schema.md` §3.2, §9.1): текст, голосовое,
+# видео-кружок. Голосовые виды — те, у которых есть файл и длительность.
+SpeechKind = Literal["voice", "video_note"]
+MessageKind = Literal["text"] | SpeechKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +80,9 @@ async def record_message(
     chat_id: int,
     telegram_message_id: int,
     text: str,
+    kind: MessageKind = "text",
+    telegram_file_id: str | None = None,
+    duration_seconds: int | None = None,
 ) -> SavedMessage:
     """Шаг первый: сохранить сообщение до всякого разбора.
 
@@ -82,12 +90,18 @@ async def record_message(
     поручение лежит в базе с первой секунды (инвариант 5), даже если модель
     потом не ответит. Повтор того же обновления новой строки не пишет и
     возвращает прежнюю — вместе с ответом, который бот уже давал.
+
+    У голоса и кружка `text` пуст до расшифровки, а `telegram_file_id` и
+    `duration_seconds` заполнены (§9.3): по файлу звук можно скачать снова.
     """
     params = {
         "owner_telegram_id": owner_telegram_id,
         "chat_id": chat_id,
         "telegram_message_id": telegram_message_id,
         "text": text,
+        "kind": kind,
+        "telegram_file_id": telegram_file_id,
+        "duration_seconds": duration_seconds,
     }
     data = single_row(await ask(lambda: db.rpc(RECORD_MESSAGE_FUNCTION, params).execute().data))
     if data is None:
@@ -108,6 +122,8 @@ async def record_understanding(
     task: Mapping[str, Any] | None,
     reminders: Sequence[Mapping[str, Any]],
     facts: Sequence[Mapping[str, Any]],
+    transcript: str | None = None,
+    transcript_confidence: float | None = None,
 ) -> Task | None:
     """Шаг второй: разбор, ответ бота, задача, напоминания и память — одной транзакцией.
 
@@ -119,7 +135,9 @@ async def record_understanding(
     напоминания рождаются вместе с задачей, иначе отказ между двумя вставками
     оставил бы задачу, о которой некому напомнить. `facts` — список
     `{category, text, status}` (§3.7): статус уже проставлен ботом, повтор
-    по владельцу, категории и тексту база схлопывает сама.
+    по владельцу, категории и тексту база схлопывает сама. `transcript` —
+    расшифровка голоса (§9.3): она становится текстом сообщения; у текста и
+    у нерасслышанного голоса её нет, и текст не трогается.
     """
     params = {
         "message_id": message_id,
@@ -132,6 +150,8 @@ async def record_understanding(
         "task": task,
         "reminders": list(reminders),
         "facts": list(facts),
+        "transcript": transcript,
+        "transcript_confidence": transcript_confidence,
     }
     data = single_row(
         await ask(lambda: db.rpc(RECORD_UNDERSTANDING_FUNCTION, params).execute().data)
