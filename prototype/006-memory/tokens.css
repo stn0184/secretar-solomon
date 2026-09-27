@@ -1,0 +1,457 @@
+/* Соломон — визуальный язык прототипа 006 (tokens.css одобренного 005 без
+   изменений + §11–12: нижние вкладки и запись памяти).
+   Один источник токенов для всех артбордов: цвет только через переменные.
+   Продукт живёт внутри Telegram, поэтому токены названы по ролям —
+   на реализации они подставляются из темы Telegram (--tg-theme-*),
+   соответствие — в README.md рядом. */
+
+/* ─── 1. Токены: светлая тема ─────────────────────────────────────── */
+:root {
+  color-scheme: light dark;
+
+  /* полотно прототипа — это не продукт, это бумага под ним */
+  --ground: #e6eaf0;
+  --ground-line: #d5dbe4;
+  --chrome-ink: #3d4553;
+  --chrome-ink-2: #79828f;
+  --chrome-line: #c9d1dc;
+  --chrome-card: #fbfcfe;
+
+  /* поверхности приложения (=> --tg-theme-secondary-bg / bg / section-separator) */
+  --app-bg: #eff0f4;
+  --surface: #ffffff;
+  --surface-2: #f5f6f9;
+  --line: #e3e5ea;
+  --line-strong: #d3d6dd;
+
+  /* текст (=> --tg-theme-text / hint / subtitle-text) */
+  --ink: #0f1116;
+  --ink-2: #6b7280;
+  --ink-3: #a0a6b0;
+
+  /* действие (=> --tg-theme-button / button-text / link) */
+  --accent: #3390ec;
+  --accent-ink: #ffffff;
+  --accent-weak: #e7f1fc;
+
+  /* смысловые цвета: состояние задачи, а не украшение
+     (--urgent => --tg-theme-destructive-text) */
+  --urgent: #ce4238;
+  --urgent-weak: #fceceb;
+  --important: #b1741a;
+  --important-weak: #faf0dd;
+  --ok: #2f9a58;
+  --ok-weak: #e7f4ec;
+
+  /* сомнение помощника («перепроверьте») — отдельный смысл, не статус и не ошибка */
+  --guess: #6f57ac;
+  --guess-weak: #f1edfa;
+  --guess-line: #c3b5e3;
+
+  /* системный попап Telegram (showPopup) — контейнер, который мы не проектируем */
+  --dim: rgba(0, 0, 0, .34);
+  --popup-bg: rgba(250, 250, 252, .96);
+  --popup-line: rgba(60, 60, 67, .3);
+
+  /* типографика: продукт — системным шрифтом Telegram, подписи чертежа — моно */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-chrome: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --t-title: 600 22px/28px var(--font-ui);
+  --t-body: 400 16px/21px var(--font-ui);
+  --t-sub: 400 13px/17px var(--font-ui);
+  --t-cap: 500 11px/14px var(--font-ui);
+
+  /* шаг сетки: 4 */
+  --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px;
+  --r-sheet: 16px;
+  --r-card: 14px;
+  --r-btn: 12px;
+  --r-pill: 999px;
+}
+
+/* ─── 2. Токены: тёмная тема (Telegram Night) ─────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0d1117;
+    --ground-line: #191f28;
+    --chrome-ink: #9fabba;
+    --chrome-ink-2: #6b7786;
+    --chrome-line: #222a35;
+    --chrome-card: #131a23;
+
+    --app-bg: #17212b;
+    --surface: #232e3c;
+    --surface-2: #1c2734;
+    --line: #2c3a4a;
+    --line-strong: #35465a;
+
+    --ink: #ffffff;
+    --ink-2: #93a6b8;
+    --ink-3: #6d7f8f;
+
+    --accent: #6ab2f2;
+    --accent-ink: #0d1117;
+    --accent-weak: #1d3448;
+
+    --urgent: #ee7a72;
+    --urgent-weak: #3a2321;
+    --important: #dfa94f;
+    --important-weak: #362c1b;
+    --ok: #6cc38a;
+    --ok-weak: #1f3327;
+
+    --guess: #b49ae8;
+    --guess-weak: #2a2540;
+    --guess-line: #4b4070;
+
+    --dim: rgba(0, 0, 0, .5);
+    --popup-bg: rgba(38, 38, 42, .96);
+    --popup-line: rgba(140, 140, 150, .35);
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground: #0d1117;
+  --ground-line: #191f28;
+  --chrome-ink: #9fabba;
+  --chrome-ink-2: #6b7786;
+  --chrome-line: #222a35;
+  --chrome-card: #131a23;
+
+  --app-bg: #17212b;
+  --surface: #232e3c;
+  --surface-2: #1c2734;
+  --line: #2c3a4a;
+  --line-strong: #35465a;
+
+  --ink: #ffffff;
+  --ink-2: #93a6b8;
+  --ink-3: #6d7f8f;
+
+  --accent: #6ab2f2;
+  --accent-ink: #0d1117;
+  --accent-weak: #1d3448;
+
+  --urgent: #ee7a72;
+  --urgent-weak: #3a2321;
+  --important: #dfa94f;
+  --important-weak: #362c1b;
+  --ok: #6cc38a;
+  --ok-weak: #1f3327;
+
+  --guess: #b49ae8;
+  --guess-weak: #2a2540;
+  --guess-line: #4b4070;
+
+  --dim: rgba(0, 0, 0, .5);
+  --popup-bg: rgba(38, 38, 42, .96);
+  --popup-line: rgba(140, 140, 150, .35);
+}
+
+/* ─── 3. Полотно и подпись артборда (чертёж, а не продукт) ────────── */
+* { box-sizing: border-box; }
+
+body.dc {
+  margin: 0;
+  padding: 32px 24px;
+  background-color: var(--ground);
+  background-image:
+    linear-gradient(var(--ground-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--ground-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  color: var(--chrome-ink);
+  font-family: var(--font-chrome);
+  display: flex;
+  justify-content: center;
+}
+
+.board { display: flex; flex-direction: column; gap: var(--s3); }
+.board__head { display: flex; flex-direction: column; gap: 6px; width: 390px; max-width: 100%; }
+.board__no {
+  font: 500 11px/1 var(--font-chrome);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--chrome-ink-2);
+}
+.board__title { margin: 0; font: 600 15px/20px var(--font-chrome); color: var(--chrome-ink); }
+.board__note { margin: 0; font: 400 12px/17px var(--font-chrome); color: var(--chrome-ink-2); }
+.board__note b { color: var(--chrome-ink); font-weight: 600; }
+
+/* ─── 4. Телефон ──────────────────────────────────────────────────── */
+.device {
+  width: 390px;
+  height: 844px;
+  flex: none;
+  border-radius: 38px;
+  padding: 8px;
+  background: var(--chrome-card);
+  border: 1px solid var(--chrome-line);
+  box-shadow: 0 18px 40px -22px rgba(15, 23, 42, .5);
+}
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 30px;
+  overflow: hidden;
+  background: var(--app-bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  display: flex;
+  flex-direction: column;
+}
+
+.status {
+  flex: none;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px 0 30px;
+  font: 600 14px/1 var(--font-ui);
+  color: var(--ink);
+}
+.status__right { display: flex; align-items: center; gap: 5px; }
+.bars { display: flex; align-items: flex-end; gap: 2px; height: 11px; }
+.bars i { display: block; width: 3px; border-radius: 1px; background: currentColor; }
+.bars i:nth-child(1) { height: 4px; }
+.bars i:nth-child(2) { height: 6px; }
+.bars i:nth-child(3) { height: 9px; }
+.bars i:nth-child(4) { height: 11px; }
+.batt {
+  display: block;
+  width: 24px; height: 12px;
+  border-radius: 3px;
+  border: 1.2px solid currentColor;
+  padding: 1.5px;
+  opacity: .9;
+}
+.batt i { display: block; height: 100%; width: 72%; border-radius: 1px; background: currentColor; }
+
+/* ─── 5. Mini App: лист и шапка Telegram ──────────────────────────── */
+.sheet {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-bg);
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
+  overflow: hidden;
+}
+.grab { flex: none; padding: 7px 0 3px; display: flex; justify-content: center; }
+.grab i { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
+
+/* шапка — это шапка Telegram: название бота, «⋯», «✕» и его кнопка «назад» (BackButton) */
+.app-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4) var(--s3);
+}
+.app-head__tgback { color: var(--accent); font: 300 26px/20px var(--font-ui); margin: -3px 2px 0 -2px; }
+.app-head__title { font: 600 16px/20px var(--font-ui); color: var(--ink); }
+.app-head__tools { margin-left: auto; display: flex; align-items: center; gap: var(--s3); color: var(--ink-3); font: 400 16px/1 var(--font-ui); }
+
+.app-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 var(--s4) var(--s2);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.app-body > * { flex: 0 0 auto; }
+.app-body--center { justify-content: center; }
+
+/* своя стрелка «назад» — внутри приложения, над заголовком карточки */
+.back { display: inline-flex; align-items: center; gap: 2px; color: var(--accent); font: 400 15px/20px var(--font-ui); }
+.back i { font: 400 22px/20px var(--font-ui); margin-top: -2px; font-style: normal; }
+
+.page-title { margin: 0; font: var(--t-title); letter-spacing: -.01em; color: var(--ink); }
+.page-sub { margin: 4px 0 0; font: var(--t-sub); color: var(--ink-2); }
+
+/* ─── 6. Список: группы по сроку ──────────────────────────────────── */
+.sec { display: flex; flex-direction: column; gap: 6px; }
+.sec__h {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 0 var(--s1);
+  font: var(--t-cap);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.sec__h--overdue { color: var(--urgent); }
+.sec__h em { font: var(--t-sub); font-style: normal; letter-spacing: 0; text-transform: none; color: var(--ink-3); }
+
+.card { background: var(--surface); border-radius: var(--r-card); overflow: hidden; }
+
+.row { display: flex; gap: var(--s3); align-items: flex-start; padding: 9px var(--s4) 9px var(--s3); }
+.row + .row { border-top: 1px solid var(--line); }
+.row__mark { flex: none; width: 4px; align-self: stretch; border-radius: 2px; background: transparent; }
+.row__mark--high { background: var(--important); }
+.row__mark--overdue { background: var(--urgent); }
+.row__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.row__title { font: var(--t-body); letter-spacing: -.005em; color: var(--ink); }
+.row__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font: var(--t-sub); color: var(--ink-2); }
+.row__when--overdue { color: var(--urgent); font-weight: 500; }
+.row__when--today { color: var(--ink); font-weight: 500; }
+.row__chev { flex: none; color: var(--ink-3); font: 400 17px/21px var(--font-ui); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s2); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px;
+  border-radius: 7px;
+  font: var(--t-cap);
+  white-space: nowrap;
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+.chip--high { background: var(--important-weak); color: var(--important); }
+.chip--mine { background: var(--accent-weak); color: var(--accent); }
+.chip--theirs { background: var(--surface-2); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.chip--review { background: var(--guess-weak); color: var(--guess); }
+.chip--kind { background: transparent; color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line); }
+
+/* ─── 7. Карточка: поля, источник, напоминания ────────────────────── */
+.kv { display: flex; flex-direction: column; }
+.kv__row { display: flex; gap: var(--s3); align-items: flex-start; padding: 10px var(--s4); }
+.kv__row + .kv__row { border-top: 1px solid var(--line); }
+.kv__k { flex: none; width: 92px; padding-top: 2px; font: var(--t-sub); color: var(--ink-2); }
+.kv__v { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font: 400 15px/20px var(--font-ui); color: var(--ink); }
+.kv__v small { display: block; width: 100%; font: var(--t-sub); color: var(--ink-3); }
+
+.source { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--s4) var(--s4); }
+.source__top { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); font: var(--t-sub); color: var(--ink-2); }
+.source__box {
+  background: var(--surface-2);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+  padding: 9px 11px;
+}
+.source__text { font: 400 14px/19px var(--font-ui); color: var(--ink); }
+
+.rem { display: flex; flex-direction: column; }
+.rem__item { display: flex; gap: var(--s3); align-items: center; padding: 9px var(--s4); }
+.rem__item + .rem__item { border-top: 1px solid var(--line); }
+.rem__dot { flex: none; width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--ok); }
+.rem__dot--wait { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-3); }
+.rem__when { flex: 1; font: 400 15px/20px var(--font-ui); color: var(--ink); font-variant-numeric: tabular-nums; }
+.rem__stage { font: var(--t-sub); color: var(--ink-3); }
+.rem__state { flex: none; font: var(--t-sub); color: var(--ink-2); }
+.rem__state--sent { color: var(--ok); }
+
+.note { margin: 0; padding: 0 var(--s1); font: var(--t-sub); color: var(--ink-3); }
+
+/* ─── 8. Кнопки ───────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px;
+  padding: 0 var(--s5);
+  border-radius: var(--r-btn);
+  text-align: center;
+  font: 600 15px/20px var(--font-ui);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.btn--wide { width: 100%; }
+.btn--ghost { background: var(--surface); color: var(--accent); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.btn--danger { background: var(--surface); color: var(--urgent); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.actions { display: flex; gap: var(--s2); }
+.actions .btn { flex: 1; }
+.mainbtn { flex: none; padding: var(--s3) var(--s4) 22px; background: var(--app-bg); }
+
+/* ─── 9. Пусто ────────────────────────────────────────────────────── */
+.empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: var(--s3); padding: 0 var(--s2); }
+.empty__mark {
+  width: 64px; height: 64px;
+  margin-bottom: var(--s1);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+  display: flex; align-items: center; justify-content: center;
+}
+.empty__mark i { display: block; width: 26px; height: 26px; border-radius: var(--r-pill); border: 2px dashed var(--ink-3); }
+.empty__h { margin: 0; font: 600 19px/24px var(--font-ui); letter-spacing: -.01em; color: var(--ink); }
+.empty__p { margin: 0; max-width: 292px; font: 400 15px/21px var(--font-ui); color: var(--ink-2); }
+.hints { display: flex; flex-direction: column; gap: 6px; width: 100%; margin-top: var(--s1); }
+.hint {
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 9px var(--s3);
+  text-align: left;
+  font: 400 14px/19px var(--font-ui);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+/* ─── 10. Системный попап Telegram (showPopup) ────────────────────── */
+.dim {
+  position: absolute; inset: 0;
+  background: var(--dim);
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 var(--s6);
+}
+.popup {
+  width: 270px;
+  border-radius: 14px;
+  background: var(--popup-bg);
+  color: var(--ink);
+  backdrop-filter: blur(20px);
+  overflow: hidden;
+  text-align: center;
+}
+.popup__body { padding: 19px 16px 17px; display: flex; flex-direction: column; gap: 4px; }
+.popup__title { font: 600 17px/22px var(--font-ui); }
+.popup__text { font: 400 13px/17px var(--font-ui); }
+.popup__btns { display: flex; border-top: .5px solid var(--popup-line); }
+.popup__btn { flex: 1; min-height: 44px; display: flex; align-items: center; justify-content: center; font: 400 17px/22px var(--font-ui); color: var(--accent); }
+.popup__btn + .popup__btn { border-left: .5px solid var(--popup-line); }
+.popup__btn--destructive { color: var(--urgent); }
+
+/* ─── 11. Нижние вкладки «Задачи | О себе» ────────────────────────── */
+/* Корень приложения: BackButton Telegram здесь нет, он только в карточке задачи. */
+.tabs {
+  flex: none;
+  display: flex;
+  padding: 6px var(--s4) 22px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+.tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; color: var(--ink-3); }
+.tab span { font: var(--t-cap); }
+.tab svg { display: block; width: 22px; height: 22px; }
+.tab--on { color: var(--accent); }
+
+/* ─── 12. «О себе»: запись памяти ─────────────────────────────────── */
+/* Строка записи — та же .row, что у задачи: суть + подпись; без полоски приоритета.
+   Вместо «›» (переход) — «⌄» (раскрытие на месте). */
+.row--fact { padding-left: var(--s4); }
+.row__src { color: var(--ink-3); }
+.row__chev--down { display: flex; align-items: center; height: 21px; }
+.row__chev--down svg { display: block; width: 14px; height: 14px; }
+.row--open .row__chev--down { color: var(--ink-2); }
+.row--open .row__chev--down svg { transform: rotate(180deg); }
+
+/* метка «Предположение» — тот же цвет, что «Перепроверьте» у задачи: сомнение помощника */
+.chip--guess { background: var(--guess-weak); color: var(--guess); }
+
+/* раскрытая запись: исходное сообщение и действия внутри той же строки */
+.row--open { flex-wrap: wrap; }
+.row--open .row__chev { align-self: flex-start; }
+.row__more {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding-top: var(--s2);
+}
+.row__more .source__top { color: var(--ink-3); }
+.row__more .source__box { border-left-color: var(--guess); }
+.row--open.row--fact .row__more .source__box { border-left-color: var(--accent); }
+
+.btn--sm { min-height: 36px; padding: 0 var(--s4); border-radius: 10px; font: 600 14px/18px var(--font-ui); }
