@@ -583,6 +583,11 @@ button {
   width: 100%;
 }
 
+.empty__note {
+  margin-top: var(--s1);
+  text-align: center;
+}
+
 .hint {
   background: var(--surface);
   border-radius: 10px;
@@ -606,4 +611,124 @@ button {
   margin: 0;
   font: 400 15px/20px var(--font-ui);
   color: var(--ink);
+}
+
+/* ─── Нижние вкладки «Задачи | О себе» ──────────────────────────────── */
+/* Корень приложения: BackButton Telegram здесь нет, он только в карточке. */
+
+.screen--tabs {
+  /* место под вкладки, чтобы последняя строка списка не пряталась под ними */
+  padding-bottom: calc(64px + var(--s4) + env(safe-area-inset-bottom));
+}
+
+.tabs {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  padding: 6px var(--s4) calc(var(--s2) + env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+
+.tab {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  flex: 1;
+  max-width: 17rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.tab span {
+  font: var(--t-cap);
+}
+
+.tab svg {
+  display: block;
+  width: 22px;
+  height: 22px;
+}
+
+.tab--on {
+  color: var(--accent);
+}
+
+/* ─── «О себе»: запись памяти ───────────────────────────────────────── */
+/* Строка записи — та же .row, что у задачи: суть + подпись, без полоски
+   приоритета. Вместо «›» (переход) — шеврон вниз (раскрытие на месте). */
+
+.fact + .fact {
+  border-top: 1px solid var(--line);
+}
+
+.row--fact {
+  padding-left: var(--s4);
+}
+
+.row__src {
+  color: var(--ink-3);
+}
+
+.row__chev--down {
+  display: flex;
+  align-items: center;
+  height: 21px;
+}
+
+.row__chev--down svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  transition: transform 0.15s;
+}
+
+.fact--open .row__chev--down {
+  color: var(--ink-2);
+}
+
+.fact--open .row__chev--down svg {
+  transform: rotate(180deg);
+}
+
+/* раскрытая запись: исходное сообщение и действия внутри той же строки */
+.fact__more {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: 0 var(--s4) var(--s3);
+}
+
+.source--inline {
+  padding: 0;
+}
+
+.source--inline .source__top {
+  color: var(--ink-3);
+}
+
+.source__box--guess {
+  border-left-color: var(--guess);
+}
+
+.actions--inline {
+  position: static;
+  margin: 0;
+  padding: 0;
+  background: none;
+}
+
+.btn--sm {
+  min-height: 36px;
+  padding: 0 var(--s4);
+  border-radius: 10px;
+  font: 600 14px/18px var(--font-ui);
 }

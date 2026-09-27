@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import type { Fact } from "../lib/facts.ts";
 import type { Task } from "../lib/tasks.ts";
 
 /**
@@ -41,6 +42,11 @@ export function PromiseChip({ task, compact }: { task: Task; compact: boolean })
 /** Помощник не уверен в разборе — цветом предположения. */
 export function ReviewChip({ task }: { task: Task }) {
   return task.needsReview ? <Chip tone="review">Перепроверьте</Chip> : null;
+}
+
+/** Запись памяти выведена из поручения, а не сказана прямо — тот же цвет сомнения. */
+export function GuessChip({ fact }: { fact: Fact }) {
+  return fact.status === "guess" ? <Chip tone="review">Предположение</Chip> : null;
 }
 
 const KIND_LABEL: Record<Task["kind"], string | null> = {

@@ -16,6 +16,7 @@ import { ErrorNote } from "./ErrorNote.tsx";
 import { Field } from "./Field.tsx";
 import { Header } from "./Header.tsx";
 import { Reminders } from "./Reminders.tsx";
+import { Skeleton } from "./Skeleton.tsx";
 import { SourceMessage } from "./SourceMessage.tsx";
 
 type DetailsState =
@@ -129,12 +130,7 @@ export function TaskCard({
         </div>
       </div>
 
-      {details.kind === "loading" ? (
-        <div className="card skeleton" aria-busy="true" aria-label="Загружаем карточку">
-          <div className="skeleton__row" />
-          <div className="skeleton__row" />
-        </div>
-      ) : null}
+      {details.kind === "loading" ? <Skeleton rows={2} label="Загружаем карточку" /> : null}
       {details.kind === "failed" ? (
         <ErrorNote message={details.message} onRetry={reloadDetails} />
       ) : null}
@@ -154,7 +150,12 @@ export function TaskCard({
       <Actions
         busy={busy}
         error={actionError}
-        onDone={() => void run("done", () => completeTask(db, task.id))}
+        primary={{
+          kind: "done",
+          label: "Сделано",
+          busyLabel: "Закрываем…",
+          onClick: () => void run("done", () => completeTask(db, task.id)),
+        }}
         onDelete={() => void onDelete()}
       />
     </main>

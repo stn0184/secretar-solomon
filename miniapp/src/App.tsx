@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { type FactsState, FactList } from "./components/FactList.tsx";
 import { type ListState, TaskList } from "./components/TaskList.tsx";
 import { TaskCard } from "./components/TaskCard.tsx";
+import { type Tab, Tabs } from "./components/Tabs.tsx";
+import { type Fact, confirmFact, loadFacts, removeFact } from "./lib/facts.ts";
 import { createSession, readSupabaseEnv } from "./lib/session.ts";
-import { type Db, createDb } from "./lib/supabase.ts";
+import { type ActionResult, type Db, createDb } from "./lib/supabase.ts";
 import { type Task, loadActiveTasks } from "./lib/tasks.ts";
 import { closeApp, getInitData, initTelegram, showBackButton } from "./lib/telegram.ts";
 
-/** Два экрана переключаются состоянием: роутера нет, Telegram открывает всегда корень. */
-type Screen = { kind: "list" } | { kind: "card"; task: Task };
-
 /**
  * Собрать доступ к базе. Нет переменных сборки или приложение открыто не из
- * Telegram — база недоступна, и список сразу говорит почему.
+ * Telegram — база недоступна, и экран сразу говорит почему.
  */
 function bootstrap(): { db: Db } | { error: string } {
   const env = readSupabaseEnv();
@@ -26,13 +26,23 @@ function bootstrap(): { db: Db } | { error: string } {
   return { db: createDb(createSession(env, initData)) };
 }
 
+/**
+ * Роутера нет: два корневых экрана переключаются вкладкой, карточка задачи
+ * открывается поверх списка состоянием. Кнопка «назад» Telegram — только
+ * в карточке; на корневых экранах внизу вкладки.
+ */
 export default function App() {
   const [boot] = useState(bootstrap);
+  const [tab, setTab] = useState<Tab>("tasks");
+  const [card, setCard] = useState<Task | null>(null);
   const [list, setList] = useState<ListState>(() =>
     "error" in boot ? { kind: "failed", message: boot.error } : { kind: "loading" },
   );
-  const [screen, setScreen] = useState<Screen>({ kind: "list" });
+  const [facts, setFacts] = useState<FactsState>(() =>
+    "error" in boot ? { kind: "failed", message: boot.error } : { kind: "idle" },
+  );
   const [reloadKey, setReloadKey] = useState(0);
+  const [factsKey, setFactsKey] = useState(0);
   const [now, setNow] = useState(() => new Date());
 
   // Telegram — внешняя система: ей говорят, что приложение готово.
@@ -61,20 +71,51 @@ export default function App() {
     };
   }, [boot, reloadKey]);
 
+  // Память читается при первом открытии вкладки и по «Обновить».
+  useEffect(() => {
+    if ("error" in boot || factsKey === 0) {
+      return;
+    }
+    let cancelled = false;
+    void loadFacts(boot.db).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      setNow(new Date());
+      setFacts(
+        result.ok
+          ? { kind: "ready", facts: result.facts }
+          : { kind: "failed", message: result.message },
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [boot, factsKey]);
+
   const back = useCallback(() => {
     setNow(new Date());
-    setScreen({ kind: "list" });
+    setCard(null);
   }, []);
 
-  // На карточке видна кнопка «назад» Telegram; в списке её нет.
+  // В карточке видна кнопка «назад» Telegram; на корневых экранах её нет.
   useEffect(() => {
     window.scrollTo(0, 0);
-    return screen.kind === "card" ? showBackButton(back) : undefined;
-  }, [screen, back]);
+    return card !== null ? showBackButton(back) : undefined;
+  }, [card, tab, back]);
 
   function open(task: Task) {
     setNow(new Date());
-    setScreen({ kind: "card", task });
+    setCard(task);
+  }
+
+  function switchTab(next: Tab) {
+    setNow(new Date());
+    setTab(next);
+    if (next === "me" && facts.kind === "idle") {
+      setFacts({ kind: "loading" });
+      setFactsKey((k) => k + 1);
+    }
   }
 
   function reload() {
@@ -82,6 +123,13 @@ export default function App() {
       setList({ kind: "loading" });
     }
     setReloadKey((k) => k + 1);
+  }
+
+  function reloadFacts() {
+    if ("db" in boot) {
+      setFacts({ kind: "loading" });
+    }
+    setFactsKey((k) => k + 1);
   }
 
   /** База подтвердила действие: задача уходит из списка, экран — назад. */
@@ -94,19 +142,60 @@ export default function App() {
     back();
   }
 
-  if (screen.kind === "card" && "db" in boot) {
-    return (
-      <TaskCard db={boot.db} task={screen.task} now={now} onBack={back} onGone={gone} />
-    );
+  /** «Подтвердить»: после ответа базы запись становится фактом и теряет метку. */
+  async function confirm(fact: Fact): Promise<ActionResult> {
+    if ("error" in boot) {
+      return { ok: false, message: boot.error };
+    }
+    const result = await confirmFact(boot.db, fact.id);
+    if (result.ok) {
+      setFacts((current) =>
+        current.kind === "ready"
+          ? {
+              ...current,
+              facts: current.facts.map((f) => (f.id === fact.id ? { ...f, status: "fact" } : f)),
+            }
+          : current,
+      );
+    }
+    return result;
+  }
+
+  /** «Удалить»: после ответа базы запись исчезает; отказ — остаётся на месте. */
+  async function remove(fact: Fact): Promise<ActionResult> {
+    if ("error" in boot) {
+      return { ok: false, message: boot.error };
+    }
+    const result = await removeFact(boot.db, fact.id);
+    if (result.ok) {
+      setFacts((current) =>
+        current.kind === "ready"
+          ? { ...current, facts: current.facts.filter((f) => f.id !== fact.id) }
+          : current,
+      );
+    }
+    return result;
+  }
+
+  if (card !== null && "db" in boot) {
+    return <TaskCard db={boot.db} task={card} now={now} onBack={back} onGone={gone} />;
   }
 
   return (
-    <TaskList
-      state={list}
-      now={now}
-      onOpen={open}
-      onReload={reload}
-      onClose={closeApp}
-    />
+    <>
+      {tab === "tasks" ? (
+        <TaskList state={list} now={now} onOpen={open} onReload={reload} onClose={closeApp} />
+      ) : (
+        <FactList
+          state={facts}
+          now={now}
+          onReload={reloadFacts}
+          onClose={closeApp}
+          onConfirm={confirm}
+          onRemove={remove}
+        />
+      )}
+      <Tabs active={tab} onChange={switchTab} />
+    </>
   );
 }

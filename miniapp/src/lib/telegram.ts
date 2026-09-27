@@ -111,19 +111,19 @@ function shorten(text: string): string {
 }
 
 /**
- * Подтверждение удаления — системным окном Telegram (`showPopup`), не своим.
- * Вне Telegram и на SDK старше 6.2 — окно браузера, чтобы dev-прогон жил.
+ * Подтверждение необратимого действия — системным окном Telegram
+ * (`showPopup`), не своим. Вне Telegram и на SDK старше 6.2 — окно
+ * браузера, чтобы dev-прогон жил.
  */
-export function confirmDelete(title: string): Promise<boolean> {
-  const message = `«${shorten(title)}» исчезнет вместе с напоминаниями. Сообщение в переписке останется.`;
+function confirmDestructive(title: string, message: string): Promise<boolean> {
   const webApp = getWebApp();
   if (!webApp || !webApp.isVersionAtLeast("6.2")) {
-    return Promise.resolve(window.confirm(`Удалить задачу?\n\n${message}`));
+    return Promise.resolve(window.confirm(`${title}\n\n${message}`));
   }
   return new Promise((resolve) => {
     webApp.showPopup(
       {
-        title: "Удалить задачу?",
+        title,
         message,
         buttons: [
           { id: "cancel", type: "cancel" },
@@ -133,6 +133,22 @@ export function confirmDelete(title: string): Promise<boolean> {
       (buttonId) => resolve(buttonId === "delete"),
     );
   });
+}
+
+/** Удалить задачу: вместе с напоминаниями, сообщение в переписке остаётся. */
+export function confirmDelete(title: string): Promise<boolean> {
+  return confirmDestructive(
+    "Удалить задачу?",
+    `«${shorten(title)}» исчезнет вместе с напоминаниями. Сообщение в переписке останется.`,
+  );
+}
+
+/** Удалить запись памяти: помощник её забудет, сообщение в переписке остаётся. */
+export function confirmRemoveFact(text: string): Promise<boolean> {
+  return confirmDestructive(
+    "Удалить запись?",
+    `«${shorten(text)}» исчезнет из памяти помощника. Сообщение в переписке останется.`,
+  );
 }
 
 /** Закрыть приложение и вернуться в чат. Вне Telegram закрывать нечего. */
