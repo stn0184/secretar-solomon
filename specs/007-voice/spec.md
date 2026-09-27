@@ -105,7 +105,7 @@ Deepgram (`nova-3`, `ru`), расшифровка идёт тем же путё�
 - [x] `config.py`: `DEEPGRAM_API_KEY`; `.env.example`; `deepgram-sdk`
       в `pyproject.toml` с точной версией — `techspec/01-stack.md` §1.1;
       тест в `test_config.py`.
-- [ ] `services/transcription.py`: протокол `Transcriber`, результат
+- [x] `services/transcription.py`: протокол `Transcriber`, результат
       `Transcript(text, confidence) | NotTranscribed(reason)`, реализация
       на Deepgram (`nova-3`, `ru`, `smart_format`, таймаут 60 с),
       разбор отказов §9.3 в результат; клиент создаётся в `runner.py`.
