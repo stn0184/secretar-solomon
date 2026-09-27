@@ -114,7 +114,9 @@ record_understanding(message_id uuid, owner_telegram_id bigint,
                      analysis jsonb, ai_model text,
                      ai_input_tokens int, ai_output_tokens int,
                      reply text, task jsonb, reminders jsonb,
-                     facts jsonb)
+                     facts jsonb,
+                     transcript text default null,
+                     transcript_confidence numeric default null)
   returns tasks
 ```
 
