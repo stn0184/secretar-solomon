@@ -28,6 +28,8 @@ from pydantic import ValidationError
 
 from solomon.cli import load_environment
 from solomon.config import ConfigError, Settings
+from solomon.db.facts import Fact
+from solomon.db.rpc import DatabaseError
 from solomon.services.understanding import (
     Analysis,
     ModelAnswer,
@@ -38,8 +40,13 @@ from solomon.services.understanding import (
     build_system_prompt,
     build_user_message,
     create_anthropic_client,
+    fact_status,
+    format_known,
 )
 from tests.conftest import OWNER_TIMEZONE, make_settings, make_understanding
+
+CAMRY = Fact(id="f1", category="car", text="Машина — Toyota Camry", status="fact")
+WORK = Fact(id="f2", category="work", text="Работа заканчивается в 18:00", status="fact")
 
 NOW = datetime(2026, 9, 16, 10, 30, tzinfo=ZoneInfo(OWNER_TIMEZONE))
 
@@ -67,6 +74,57 @@ def test_prompt_says_the_message_is_data_not_a_command() -> None:
 
     assert "данные" in prompt
     assert "18:00" in prompt
+
+
+def test_fact_status_is_fact_only_when_said_directly() -> None:
+    """Статус ставит бот по виду сообщения (§8.2), а не модель."""
+    assert fact_status("about_me") == "fact"
+    for kind in ("task", "idea", "wish", "chat"):
+        assert fact_status(kind) == "guess"
+
+
+def test_known_block_lists_facts_and_forbids_repeating_them() -> None:
+    block = format_known([CAMRY, WORK])
+
+    assert "car: Машина — Toyota Camry" in block
+    assert "work: Работа заканчивается в 18:00" in block
+    # Правило «не повторять, противоречие — новой записью» стоит рядом с фактами.
+    assert "не повторяйте" in block.lower()
+    assert "противоречит" in block.lower()
+
+
+def test_no_known_facts_means_no_block() -> None:
+    assert format_known([]) == ""
+    assert "уже известно" not in build_system_prompt(NOW, ZoneInfo(OWNER_TIMEZONE)).lower()
+
+
+def test_prompt_with_known_facts_puts_them_after_the_moment() -> None:
+    prompt = build_system_prompt(NOW, ZoneInfo(OWNER_TIMEZONE), known=[CAMRY])
+
+    assert prompt.index("Контекст момента") < prompt.index("car: Машина — Toyota Camry")
+
+
+def test_prompt_names_the_categories_and_keeps_errands_out_of_facts() -> None:
+    prompt = build_system_prompt(NOW, ZoneInfo(OWNER_TIMEZONE))
+
+    for category in ("family", "home", "car", "work", "habit", "preference", "other"):
+        assert category in prompt
+    assert "facts" in prompt
+
+
+def test_understanding_carries_facts_by_category() -> None:
+    parsed = make_understanding(
+        kind="about_me", facts=[{"category": "car", "text": "Машина — Toyota Camry"}]
+    )
+
+    assert [(fact.category, fact.text) for fact in parsed.facts] == [
+        ("car", "Машина — Toyota Camry")
+    ]
+
+
+def test_unknown_category_does_not_pass_the_schema() -> None:
+    with pytest.raises(ValidationError):
+        make_understanding(facts=[{"category": "pets", "text": "Кот Барсик"}])
 
 
 def test_forwarded_message_carries_the_sender() -> None:
@@ -217,6 +275,50 @@ async def test_parsed_answer_carries_the_model_and_the_price() -> None:
     system, text = call.calls[0]
     assert "среда, 16 сентября 2026" in system
     assert text == "купить лампочку в коридор"
+
+
+class FakeKnown:
+    """Читатель известных фактов: список или отказ базы."""
+
+    def __init__(self, facts: list[Fact] | None = None, broken: bool = False) -> None:
+        self.facts = facts or []
+        self.broken = broken
+
+    async def __call__(self) -> list[Fact]:
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return self.facts
+
+
+async def test_known_facts_reach_the_prompt() -> None:
+    call = FakeCall(answer=FakeAnswer(parsed_output=make_understanding()))
+    service = UnderstandingService(
+        settings=make_settings(), call=call, clock=lambda: NOW, known=FakeKnown([CAMRY, WORK])
+    )
+
+    await service.analyze("у меня Camry")
+
+    system, _ = call.calls[0]
+    assert "car: Машина — Toyota Camry" in system
+    assert "work: Работа заканчивается в 18:00" in system
+
+
+async def test_known_facts_failure_goes_without_the_block_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Поручение важнее контекста (§8.2): база не ответила — разбор идёт без блока."""
+    call = FakeCall(answer=FakeAnswer(parsed_output=make_understanding()))
+    service = UnderstandingService(
+        settings=make_settings(), call=call, clock=lambda: NOW, known=FakeKnown(broken=True)
+    )
+
+    with caplog.at_level(logging.ERROR):
+        verdict = await service.analyze("у меня Camry")
+
+    assert isinstance(verdict, Analysis)
+    system, _ = call.calls[0]
+    assert "уже известно" not in system.lower()
+    assert "ConnectTimeout" in caplog.text
 
 
 async def test_forwarded_sender_reaches_the_call() -> None:

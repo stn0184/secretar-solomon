@@ -104,15 +104,15 @@
 - [x] Миграция: таблица `facts`, индексы, триггер, RLS;
       `record_understanding` с аргументом `facts jsonb` (§3.4, §3.7).
       Правка §3 в том же коммите.
-- [ ] `understanding.py`: поле `facts` в `Understanding`, категории,
+- [x] `understanding.py`: поле `facts` в `Understanding`, категории,
       блок известных фактов в промпте (§5.2), правило «не повторять»;
       `db/facts.py::list_facts(owner, status='fact', limit=50)`.
 Сбой чтения `list_facts` — разбор идёт без блока «что известно»,
       ошибка в лог; возможный повтор известного отсечёт `unique`
-- [ ] `services/tasks.py` + `db/tasks.py`: факты уходят в
+- [x] `services/tasks.py` + `db/tasks.py`: факты уходят в
       `record_understanding`; ветка `about_me` с непустым списком —
       ответ «Запомнил: …», без задачи; `texts.py`.
-- [ ] Тесты бота без сети: `about_me` → факты и ответ; поручение +
+- [x] Тесты бота без сети: `about_me` → факты и ответ; поручение +
       `guess`; пустой `facts` у `about_me` → прежний ответ; промпт
       содержит известные факты и не содержит `guess`; `db/facts.py` —
       владелец обязателен.

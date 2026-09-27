@@ -28,7 +28,7 @@ def build_tasks(settings: Settings, db: Client, client: AsyncAnthropic) -> TaskS
     (`techspec/05-ai.md` §5.1).
     """
     return TaskService.with_understanding(
-        settings, db, UnderstandingService.with_client(settings, client)
+        settings, db, UnderstandingService.with_client(settings, client, db)
     )
 
 

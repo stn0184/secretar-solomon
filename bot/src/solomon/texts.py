@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 WEEKDAYS = (
@@ -121,6 +122,17 @@ RECORDED_BY_KIND = {
 }
 
 NO_ERRAND = "Это не похоже на поручение — ничего не записал. Если это задача, скажите прямо."
+
+# Сведение о себе записано в память (`techspec/08-memory.md` §8.2). Текст
+# записи уходит человеку дословно от модели, как `review_reason` (§5.4):
+# по нему человек видит, что именно запомнено, и правит в приложении.
+REMEMBERED = "Запомнил: {facts}"
+
+
+def remembered(items: Sequence[str]) -> str:
+    """«Запомнил: Машина — Toyota Camry»; несколько записей — через «; »."""
+    return REMEMBERED.format(facts="; ".join(items))
+
 
 # Модель не ответила (`techspec/05-ai.md` §5.4): поручение не теряется, но и
 # делать вид, что оно разобрано, нельзя.

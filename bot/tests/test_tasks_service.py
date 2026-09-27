@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from solomon import texts
 from solomon.db.tasks import SavedMessage, Task
-from solomon.services.tasks import SUMMARY_LIMIT, TaskService, summarize
+from solomon.services.tasks import SUMMARY_LIMIT, TaskService, fact_rows, summarize
 from solomon.services.understanding import NotUnderstood
 from tests.conftest import (
     OWNER_ID,
@@ -61,6 +61,38 @@ def test_long_text_is_cut_to_the_limit_with_ellipsis() -> None:
 
     assert retold == "я" * SUMMARY_LIMIT + "…"
     assert len(retold) == SUMMARY_LIMIT + 1
+
+
+def test_fact_rows_are_facts_when_said_directly() -> None:
+    understanding = make_understanding(
+        kind="about_me",
+        title="о себе",
+        facts=[
+            {"category": "car", "text": "Машина — Toyota Camry"},
+            {"category": "work", "text": "Работа заканчивается в 18:00"},
+        ],
+    )
+
+    assert fact_rows(understanding) == [
+        {"category": "car", "text": "Машина — Toyota Camry", "status": "fact"},
+        {"category": "work", "text": "Работа заканчивается в 18:00", "status": "fact"},
+    ]
+
+
+def test_fact_rows_are_guesses_when_inferred_from_an_errand() -> None:
+    understanding = make_understanding(
+        kind="task",
+        title="забрать Мишу из садика",
+        facts=[{"category": "family", "text": "Сын Миша ходит в садик"}],
+    )
+
+    assert fact_rows(understanding) == [
+        {"category": "family", "text": "Сын Миша ходит в садик", "status": "guess"}
+    ]
+
+
+def test_fact_rows_are_empty_when_nothing_to_remember() -> None:
+    assert fact_rows(make_understanding()) == []
 
 
 async def test_urgent_task_names_its_priority() -> None:
@@ -149,6 +181,114 @@ async def test_idea_is_recorded_as_an_idea() -> None:
     assert task["kind"] == "idea"
 
 
+async def test_about_me_is_remembered_and_no_task_is_recorded() -> None:
+    """Сказано прямо: записи со статусом `fact`, задачи нет, ответ «Запомнил» (§8.2)."""
+    analyst = FakeAnalyst(
+        make_understanding(
+            kind="about_me",
+            title="машина",
+            facts=[{"category": "car", "text": "Машина — Toyota Camry"}],
+        )
+    )
+    service, _, understandings = build_service(
+        analyst, understandings=FakeUnderstandings(task=None)
+    )
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="у меня Toyota Camry"
+    )
+
+    assert outcome.ok
+    assert outcome.message == "Запомнил: Машина — Toyota Camry"
+    saved = understandings.calls[0]
+    assert saved["task"] is None
+    assert saved["facts"] == [
+        {"category": "car", "text": "Машина — Toyota Camry", "status": "fact"}
+    ]
+    assert saved["reply"] == outcome.message
+
+
+async def test_several_facts_are_listed_in_one_reply() -> None:
+    analyst = FakeAnalyst(
+        make_understanding(
+            kind="about_me",
+            title="о себе",
+            facts=[
+                {"category": "car", "text": "Машина — Toyota Camry"},
+                {"category": "work", "text": "Работа заканчивается в 18:00"},
+            ],
+        )
+    )
+    service, _, _ = build_service(analyst, understandings=FakeUnderstandings(task=None))
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="у меня Camry, работаю до шести"
+    )
+
+    assert outcome.message == "Запомнил: Машина — Toyota Camry; Работа заканчивается в 18:00"
+
+
+async def test_errand_with_a_guess_records_both_and_keeps_the_reply_short() -> None:
+    """Выведенное из поручения — `guess` мимоходом: в базу да, в ответ нет (§8.2)."""
+    analyst = FakeAnalyst(
+        make_understanding(
+            title="забрать Мишу из садика",
+            facts=[{"category": "family", "text": "Сын Миша ходит в садик"}],
+        )
+    )
+    service, _, understandings = build_service(analyst)
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="завтра забрать Мишу из садика"
+    )
+
+    assert outcome.message == "Записал: забрать Мишу из садика"
+    assert "Миша ходит" not in outcome.message
+    saved = understandings.calls[0]
+    assert isinstance(saved["task"], dict)
+    assert saved["facts"] == [
+        {"category": "family", "text": "Сын Миша ходит в садик", "status": "guess"}
+    ]
+
+
+async def test_about_me_without_facts_answers_as_before() -> None:
+    """Модель сочла сообщение сведением, но запоминать нечего — прежний ответ."""
+    analyst = FakeAnalyst(make_understanding(kind="about_me", title="о себе", facts=[]))
+    service, _, understandings = build_service(
+        analyst, understandings=FakeUnderstandings(task=None)
+    )
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="я вообще-то ничего"
+    )
+
+    assert outcome.message == texts.NO_ERRAND
+    assert understandings.calls[0]["facts"] == []
+    assert understandings.calls[0]["task"] is None
+
+
+async def test_chat_with_facts_saves_guesses_and_answers_as_chat() -> None:
+    analyst = FakeAnalyst(
+        make_understanding(
+            kind="chat",
+            title="разговор",
+            facts=[{"category": "habit", "text": "Пьёт кофе по утрам"}],
+        )
+    )
+    service, _, understandings = build_service(
+        analyst, understandings=FakeUnderstandings(task=None)
+    )
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="утро без кофе не утро, да?"
+    )
+
+    assert outcome.message == texts.NO_ERRAND
+    assert understandings.calls[0]["facts"] == [
+        {"category": "habit", "text": "Пьёт кофе по утрам", "status": "guess"}
+    ]
+
+
 async def test_chat_records_the_analysis_but_no_task() -> None:
     analyst = FakeAnalyst(make_understanding(kind="chat", title="приветствие"))
     service, _, understandings = build_service(
@@ -197,6 +337,8 @@ async def test_model_failure_records_the_message_literally() -> None:
     saved = understandings.calls[0]
     assert saved["analysis"] is None
     assert saved["ai_model"] is None
+    # Разбора не было — и запоминать нечего.
+    assert saved["facts"] == []
     task = saved["task"]
     assert isinstance(task, dict)
     assert task["title"] == "в пятницу отправить расчёт клиенту"

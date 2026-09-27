@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol
@@ -29,9 +29,12 @@ from anthropic import (
 )
 from anthropic.types import OutputConfigParam
 from pydantic import BaseModel, ValidationError
+from supabase import Client
 
 from solomon import texts
 from solomon.config import Settings
+from solomon.db import facts as db_facts
+from solomon.db.rpc import DatabaseError
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,24 @@ TIMEOUT_SECONDS = 30.0
 Kind = Literal["task", "idea", "wish", "chat", "about_me"]
 # Виды, которые заводят строку в `tasks`; разговор и сведение о себе — нет.
 TASK_KINDS: tuple[Kind, ...] = ("task", "idea", "wish")
+
+# Память о пользователе (`techspec/08-memory.md` §8.1): семь категорий для
+# группировки на экране, два статуса. Статус ставит бот по виду сообщения,
+# модель его не отдаёт (§8.2).
+Category = Literal["family", "home", "car", "work", "habit", "preference", "other"]
+FactStatus = Literal["fact", "guess"]
+
+
+def fact_status(kind: Kind) -> FactStatus:
+    """Сказано прямо (`about_me`) — факт; выведено из чего угодно другого — предположение."""
+    return "fact" if kind == "about_me" else "guess"
+
+
+class FactItem(BaseModel):
+    """Одно новое сведение о владельце: категория из списка и текст одной фразой."""
+
+    category: Category
+    text: str
 
 
 # Что модель поняла — она же схема структурированного вывода (§5.3). Поля без
@@ -65,6 +86,7 @@ class Understanding(BaseModel):
     needs_review: bool
     review_reason: str | None
     reply_hint: str | None
+    facts: list[FactItem]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +145,40 @@ promise — mine, если человек обещает сделать сам; 
 
 Не уверены или не хватает важного — needs_review = true и review_reason:
 одна фраза по-русски о том, что именно неясно. Срок, имя или суть не
-выдумывайте."""
+выдумывайте.
+
+В facts — новые сведения о самом человеке, каждое одной короткой фразой,
+как строка справочника: «Машина — Toyota Camry», «Сын Миша ходит в садик»,
+«Работа заканчивается в 18:00». Категория — только из списка: family
+(семья), home (дом, адрес), car (машина), work (работа и график), habit
+(привычки), preference (предпочтения), other (остальное о человеке).
+Сообщение about_me и есть такие сведения; в поручении они бывают
+мимоходом («забрать сына из садика» — есть сын, ходит в садик). Дела в
+facts не попадают: «купить лампочку» — задача, а не сведение. Нечего
+запоминать — пустой список."""
+
+
+class KnownFact(Protocol):
+    """Уже известная запись памяти — то, что нужно промпту (§5.2)."""
+
+    @property
+    def category(self) -> str: ...
+
+    @property
+    def text(self) -> str: ...
+
+
+def format_known(known: Sequence[KnownFact]) -> str:
+    """Блок «что уже известно» (§5.2, §8.2). Записей нет — блока нет: пустая строка."""
+    if not known:
+        return ""
+    lines = "\n".join(f"- {fact.category}: {fact.text}" for fact in known)
+    return (
+        "Что уже известно о владельце:\n"
+        f"{lines}\n"
+        "Не повторяйте известное в facts. Если новое противоречит известному — "
+        "отдайте новую запись с текстом о том, что изменилось."
+    )
 
 
 def format_moment(now: datetime, timezone: ZoneInfo) -> str:
@@ -137,9 +192,13 @@ def format_moment(now: datetime, timezone: ZoneInfo) -> str:
     )
 
 
-def build_system_prompt(now: datetime, timezone: ZoneInfo) -> str:
-    """Системный промпт: сначала роль и правила, потом момент (§5.2)."""
-    return f"{RULES}\n\n{format_moment(now, timezone)}"
+def build_system_prompt(now: datetime, timezone: ZoneInfo, known: Sequence[KnownFact] = ()) -> str:
+    """Системный промпт: роль и правила, момент, потом что уже известно (§5.2)."""
+    parts = [RULES, format_moment(now, timezone)]
+    block = format_known(known)
+    if block:
+        parts.append(block)
+    return "\n\n".join(parts)
 
 
 def build_user_message(text: str, forwarded_from: str | None) -> str:
@@ -190,6 +249,8 @@ class ModelCall(Protocol):
 
 
 Clock = Callable[[], datetime]
+# Читатель известных фактов владельца: подменяется в тестах, как вызов модели.
+KnownFacts = Callable[[], Awaitable[Sequence[KnownFact]]]
 
 
 def create_anthropic_client(settings: Settings) -> AsyncAnthropic:
@@ -224,15 +285,29 @@ def anthropic_call(client: AsyncAnthropic, model: str = MODEL) -> ModelCall:
 class UnderstandingService:
     """Разбор сообщения. Собирается один раз при запуске бота."""
 
-    def __init__(self, settings: Settings, call: ModelCall, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        call: ModelCall,
+        clock: Clock | None = None,
+        known: KnownFacts | None = None,
+    ) -> None:
         self._settings = settings
         self._call = call
         self._clock = clock or self._now
+        # Без читателя — разбор без блока «что известно»: так собираются тесты.
+        self._known = known
 
     @classmethod
-    def with_client(cls, settings: Settings, client: AsyncAnthropic) -> UnderstandingService:
-        """Обычная сборка: ходит в Claude по-настоящему."""
-        return cls(settings=settings, call=anthropic_call(client))
+    def with_client(
+        cls, settings: Settings, client: AsyncAnthropic, db: Client
+    ) -> UnderstandingService:
+        """Обычная сборка: ходит в Claude по-настоящему, известное читает из базы."""
+
+        async def known() -> Sequence[KnownFact]:
+            return await db_facts.list_facts(db, owner_telegram_id=settings.owner_telegram_id)
+
+        return cls(settings=settings, call=anthropic_call(client), known=known)
 
     def _now(self) -> datetime:
         return datetime.now(self._settings.owner_timezone)
@@ -243,7 +318,8 @@ class UnderstandingService:
         Ни один отказ наружу исключением не выходит: поручение не теряется
         (инвариант 5), слой выше записывает его буквально (§5.4).
         """
-        system = build_system_prompt(self._clock(), self._settings.owner_timezone)
+        known = await self._known_facts()
+        system = build_system_prompt(self._clock(), self._settings.owner_timezone, known)
         try:
             answer = await self._call(system=system, text=build_user_message(text, forwarded_from))
         except (APITimeoutError, APIConnectionError) as error:
@@ -268,9 +344,10 @@ class UnderstandingService:
             return self._not_understood("ответ не прошёл схему")
 
         logger.info(
-            "Разобрано: kind=%s, needs_review=%s, токенов %s/%s",
+            "Разобрано: kind=%s, needs_review=%s, сведений %s, токенов %s/%s",
             parsed.kind,
             parsed.needs_review,
+            len(parsed.facts),
             answer.usage.input_tokens,
             answer.usage.output_tokens,
         )
@@ -280,6 +357,21 @@ class UnderstandingService:
             input_tokens=answer.usage.input_tokens,
             output_tokens=answer.usage.output_tokens,
         )
+
+    async def _known_facts(self) -> Sequence[KnownFact]:
+        """Что уже известно — или ничего, если база не ответила.
+
+        Поручение важнее контекста (§8.2): отказ чтения не останавливает
+        разбор, а уходит в журнал; возможный повтор известного отсечёт
+        `unique` в базе.
+        """
+        if self._known is None:
+            return ()
+        try:
+            return await self._known()
+        except DatabaseError as error:
+            logger.error("Известные факты не прочитаны, разбор без них: %s", error)
+            return ()
 
     def _not_understood(self, reason: str) -> NotUnderstood:
         logger.warning("Модель не разобрала сообщение: %s", reason)

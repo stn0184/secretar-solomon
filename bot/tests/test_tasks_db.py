@@ -14,8 +14,10 @@ from zoneinfo import ZoneInfo
 import pytest
 from supabase import Client
 
+from solomon.db import facts as db_facts
 from solomon.db import reminders as db_reminders
 from solomon.db import tasks as db_tasks
+from solomon.db.facts import Fact
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import SavedMessage, Task
 from tests.conftest import OWNER_TIMEZONE
@@ -27,6 +29,8 @@ MESSAGE_ROW = {"id": "9a71", "text": "купить лампочку", "reply": N
 ANALYSIS = {"kind": "task", "title": "купить лампочку"}
 TASK_FIELDS = {"title": "купить лампочку", "kind": "task", "needs_review": False}
 REMINDER_ROWS = [{"stage": "before", "fire_at": "2026-09-25T09:00:00+05:00"}]
+FACT_ROWS = [{"category": "car", "text": "Машина — Toyota Camry", "status": "fact"}]
+FACT_ROW = {"id": "f1", "category": "car", "text": "Машина — Toyota Camry", "status": "fact"}
 REMINDER_ROW = {
     "id": "b17c",
     "task_id": "0e2f",
@@ -156,6 +160,7 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
         reply="Записал: купить лампочку",
         task=TASK_FIELDS,
         reminders=REMINDER_ROWS,
+        facts=FACT_ROWS,
     )
 
     assert task == Task(id="0e2f", title="купить лампочку", status="active")
@@ -172,6 +177,7 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
             "reply": "Записал: купить лампочку",
             "task": TASK_FIELDS,
             "reminders": REMINDER_ROWS,
+            "facts": FACT_ROWS,
         },
     )
 
@@ -191,6 +197,7 @@ async def test_record_understanding_without_task_returns_nothing() -> None:
         reply="Это не похоже на поручение",
         task=None,
         reminders=[],
+        facts=[],
     )
 
     assert task is None
@@ -211,6 +218,7 @@ async def test_record_understanding_ignores_empty_composite_row() -> None:
         reply="Это не похоже на поручение",
         task=None,
         reminders=[],
+        facts=[],
     )
 
     assert task is None
@@ -332,6 +340,33 @@ async def test_mark_task_done_returns_nothing_for_a_foreign_task() -> None:
     assert task is None
 
 
+async def test_known_facts_are_asked_for_this_owner_and_status_only() -> None:
+    """В промпт уходят только факты владельца (§8.2): предположений там нет."""
+    fake = FakeClient(data=[FACT_ROW])
+
+    found = await db_facts.list_facts(as_client(fake), owner_telegram_id=OWNER_ID)
+
+    assert found == [Fact(id="f1", category="car", text="Машина — Toyota Camry", status="fact")]
+    assert ("table", "facts") in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("eq", "status", "fact") in fake.calls
+    assert ("order", "created_at", False) in fake.calls
+    assert ("limit", 50) in fake.calls
+
+
+async def test_list_facts_without_rows_is_empty() -> None:
+    fake = FakeClient(data=[])
+
+    assert await db_facts.list_facts(as_client(fake), owner_telegram_id=OWNER_ID) == []
+
+
+async def test_broken_fact_row_is_a_failure() -> None:
+    fake = FakeClient(data=[{"id": "f1", "category": "car"}])
+
+    with pytest.raises(DatabaseError):
+        await db_facts.list_facts(as_client(fake), owner_telegram_id=OWNER_ID)
+
+
 def test_owner_is_required_by_every_query() -> None:
     """Инвариант 2 держится сигнатурой: владельца не забыть и не подставить."""
     for query in (
@@ -341,6 +376,7 @@ def test_owner_is_required_by_every_query() -> None:
         db_reminders.due_reminders,
         db_reminders.mark_sent,
         db_reminders.mark_task_done,
+        db_facts.list_facts,
     ):
         parameter = inspect.signature(query).parameters["owner_telegram_id"]
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY

@@ -38,6 +38,7 @@ from solomon.services.understanding import (
     Understanding,
     UnderstandingService,
     Verdict,
+    fact_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class UnderstandingRecorder(Protocol):
         reply: str,
         task: Mapping[str, Any] | None,
         reminders: Sequence[Mapping[str, Any]],
+        facts: Sequence[Mapping[str, Any]],
     ) -> Task | None: ...
 
 
@@ -106,6 +108,20 @@ def task_fields(understanding: Understanding) -> dict[str, Any]:
         "people": understanding.people,
         "needs_review": understanding.needs_review,
     }
+
+
+def fact_rows(understanding: Understanding) -> list[dict[str, Any]]:
+    """Записи памяти для `record_understanding` (§3.7): статус — по виду сообщения.
+
+    Модель отдаёт только категорию и текст; факт это или предположение,
+    решает бот по `kind` (`techspec/08-memory.md` §8.2), и решение
+    проверяется кодом, а не моделью.
+    """
+    status = fact_status(understanding.kind)
+    return [
+        {"category": item.category, "text": item.text, "status": status}
+        for item in understanding.facts
+    ]
 
 
 def literal_fields(text: str) -> dict[str, Any]:
@@ -174,6 +190,7 @@ class TaskService:
             reply: str,
             task: Mapping[str, Any] | None,
             reminders: Sequence[Mapping[str, Any]],
+            facts: Sequence[Mapping[str, Any]],
         ) -> Task | None:
             return await db_tasks.record_understanding(
                 db,
@@ -186,6 +203,7 @@ class TaskService:
                 reply=reply,
                 task=task,
                 reminders=reminders,
+                facts=facts,
             )
 
         return cls(
@@ -244,6 +262,7 @@ class TaskService:
             task: Mapping[str, Any] | None = (
                 task_fields(understanding) if understanding.kind in TASK_KINDS else None
             )
+            facts = fact_rows(understanding)
             ai_model: str | None = verdict.model
             input_tokens: int | None = verdict.input_tokens
             output_tokens: int | None = verdict.output_tokens
@@ -254,6 +273,7 @@ class TaskService:
             reply = texts.RECORDED_AS_IS.format(text=summarize(text))
             analysis = None
             task = literal_fields(text)
+            facts = []
             ai_model = None
             input_tokens = None
             output_tokens = None
@@ -269,10 +289,14 @@ class TaskService:
                 reply=reply,
                 task=task,
                 reminders=[item.as_row() for item in planned],
+                facts=facts,
             )
         except DatabaseError as error:
             logger.warning("Разбор не записан: %s", error)
             return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+
+        if facts:
+            logger.info("Записано сведений о владельце: %s", len(facts))
 
         if recorded is not None:
             logger.info("Записана задача %s", recorded.id)
@@ -283,12 +307,16 @@ class TaskService:
     def _reply_for(
         self, understanding: Understanding, planned: list[Planned], now: datetime
     ) -> str:
-        """Ответ человеку по видам. Дословно из модели — только причина.
+        """Ответ человеку по видам. Дословно из модели — причина и текст записи.
 
         Строка «Напомню» берётся из того же плана, который уходит в базу
         (§6.4): бот обещает ровно то, что записал, — и ничего сверх того
-        (инвариант 4).
+        (инвариант 4). Сведение о себе подтверждается словами «Запомнил: …»
+        (`techspec/08-memory.md` §8.2); предположения из поручения в ответ
+        не попадают — они видны в приложении.
         """
+        if understanding.kind == "about_me" and understanding.facts:
+            return texts.remembered([item.text for item in understanding.facts])
         if understanding.kind not in TASK_KINDS:
             return texts.NO_ERRAND
         timezone = self._settings.owner_timezone

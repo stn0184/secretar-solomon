@@ -107,8 +107,9 @@ async def record_understanding(
     reply: str,
     task: Mapping[str, Any] | None,
     reminders: Sequence[Mapping[str, Any]],
+    facts: Sequence[Mapping[str, Any]],
 ) -> Task | None:
-    """Шаг второй: разбор, ответ бота, задача и её напоминания — одной транзакцией.
+    """Шаг второй: разбор, ответ бота, задача, напоминания и память — одной транзакцией.
 
     Возвращает заведённую задачу; `None` — когда задачи и не должно быть
     (разговор, сведение о себе). Владелец передаётся явно и сверяется с
@@ -116,7 +117,9 @@ async def record_understanding(
 
     `reminders` — список `{stage, fire_at}` от `services/reminders.py` (§3.5):
     напоминания рождаются вместе с задачей, иначе отказ между двумя вставками
-    оставил бы задачу, о которой некому напомнить.
+    оставил бы задачу, о которой некому напомнить. `facts` — список
+    `{category, text, status}` (§3.7): статус уже проставлен ботом, повтор
+    по владельцу, категории и тексту база схлопывает сама.
     """
     params = {
         "message_id": message_id,
@@ -128,6 +131,7 @@ async def record_understanding(
         "reply": reply,
         "task": task,
         "reminders": list(reminders),
+        "facts": list(facts),
     }
     data = single_row(
         await ask(lambda: db.rpc(RECORD_UNDERSTANDING_FUNCTION, params).execute().data)

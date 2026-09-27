@@ -150,6 +150,7 @@ class FakeUnderstandings:
         reply: str,
         task: Mapping[str, Any] | None,
         reminders: Sequence[Mapping[str, Any]],
+        facts: Sequence[Mapping[str, Any]],
     ) -> Task | None:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -164,6 +165,7 @@ class FakeUnderstandings:
                 "reply": reply,
                 "task": task,
                 "reminders": list(reminders),
+                "facts": list(facts),
             }
         )
         return self.task
@@ -182,6 +184,7 @@ def make_understanding(**fields: Any) -> Understanding:
         "needs_review": False,
         "review_reason": None,
         "reply_hint": None,
+        "facts": [],
     }
     return Understanding.model_validate({**base, **fields})
 
