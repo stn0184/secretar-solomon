@@ -111,7 +111,7 @@ Deepgram (`nova-3`, `ru`), расшифровка идёт тем же путё�
       разбор отказов §9.3 в результат; клиент создаётся в `runner.py`.
 - [x] `db/tasks.py`: `record_message` с `kind`/`file_id`/`duration`,
       `record_understanding` с `transcript`/`confidence`.
-- [ ] `services/tasks.py`: `record_from_voice(chat_id, message_id, kind,
+- [x] `services/tasks.py`: `record_from_voice(chat_id, message_id, kind,
       file_id, duration, audio_bytes_loader, forwarded_from)` — порядок
       §9.3, ветка «не расслышал»; `understanding.py` — строка
       «Распознано с голоса» в промпте по флагу; `texts.py` — новые

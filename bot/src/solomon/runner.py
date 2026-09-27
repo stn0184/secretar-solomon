@@ -8,6 +8,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from anthropic import AsyncAnthropic
+from deepgram import AsyncDeepgramClient
 from supabase import Client
 
 from solomon import handlers
@@ -15,20 +16,26 @@ from solomon.config import Settings
 from solomon.middlewares import OwnerOnlyMiddleware
 from solomon.services.reminders import ReminderService
 from solomon.services.tasks import TaskService
+from solomon.services.transcription import DeepgramTranscriber, create_deepgram_client
 from solomon.services.understanding import UnderstandingService, create_anthropic_client
 
 logger = logging.getLogger(__name__)
 
 
-def build_tasks(settings: Settings, db: Client, client: AsyncAnthropic) -> TaskService:
-    """Приём поручений целиком: база и модель на своих местах.
+def build_tasks(
+    settings: Settings, db: Client, client: AsyncAnthropic, speech: AsyncDeepgramClient
+) -> TaskService:
+    """Приём поручений целиком: база, модель и распознавание на своих местах.
 
-    Клиент Claude приходит снаружи — он живёт столько же, сколько бот, и
-    создавать его на каждое сообщение значило бы поднимать соединение заново
-    (`techspec/05-ai.md` §5.1).
+    Клиенты Claude и Deepgram приходят снаружи — они живут столько же,
+    сколько бот, и создавать их на каждое сообщение значило бы поднимать
+    соединение заново (`techspec/05-ai.md` §5.1, `techspec/09-voice.md` §9.2).
     """
     return TaskService.with_understanding(
-        settings, db, UnderstandingService.with_client(settings, client, db)
+        settings,
+        db,
+        UnderstandingService.with_client(settings, client, db),
+        DeepgramTranscriber.with_client(speech),
     )
 
 
@@ -74,7 +81,8 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     """Запустить опрос Telegram и работать, пока не остановят."""
     bot = Bot(token=settings.telegram_bot_token)
     client = create_anthropic_client(settings)
-    tasks = build_tasks(settings, db, client) if db is not None else None
+    speech = create_deepgram_client(settings)
+    tasks = build_tasks(settings, db, client, speech) if db is not None else None
     reminders = build_reminders(settings, db, bot) if db is not None else None
     dispatcher = build_dispatcher(settings, db=db, tasks=tasks, reminders=reminders)
     # Цикл напоминаний живёт рядом с polling, в том же процессе

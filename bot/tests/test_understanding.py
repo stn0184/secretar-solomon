@@ -138,6 +138,32 @@ def test_plain_message_goes_as_is() -> None:
     assert build_user_message("купить лампочку", forwarded_from=None) == "купить лампочку"
 
 
+def test_spoken_message_is_marked_as_recognised_from_voice() -> None:
+    """Расшифровка помечается перед текстом (§5.2): модель терпимее к опискам."""
+    assert build_user_message("купить лампочку", forwarded_from=None, spoken="fine") == (
+        "Распознано с голоса\nкупить лампочку"
+    )
+
+
+def test_low_confidence_is_said_in_the_same_line() -> None:
+    assert build_user_message("купить лампочку", forwarded_from=None, spoken="low") == (
+        "Распознано с голоса, качество низкое\nкупить лампочку"
+    )
+
+
+def test_forwarded_voice_carries_both_the_sender_and_the_voice_mark() -> None:
+    assert build_user_message("пришлю смету завтра", forwarded_from="Аня", spoken="fine") == (
+        "Переслано от: Аня\nРаспознано с голоса\nпришлю смету завтра"
+    )
+
+
+def test_rules_tell_the_model_what_the_voice_mark_means() -> None:
+    prompt = build_system_prompt(NOW, ZoneInfo(OWNER_TIMEZONE))
+
+    assert "Распознано с голоса" in prompt
+    assert "плохо расслышал" in prompt
+
+
 @dataclass(frozen=True, slots=True)
 class FakeUsage:
     """Счётчик токенов, как его отдаёт SDK."""
@@ -328,6 +354,18 @@ async def test_forwarded_sender_reaches_the_call() -> None:
     await service.analyze("пришлю смету завтра", forwarded_from="Аня")
 
     assert call.calls[0][1] == "Переслано от: Аня\nпришлю смету завтра"
+
+
+async def test_forwarded_low_quality_voice_reaches_the_call_with_both_marks() -> None:
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze("пришлю смету завтра", forwarded_from="Аня", spoken="low")
+
+    _, text = call.calls[0]
+    assert "Переслано от: Аня" in text
+    assert "Распознано с голоса" in text
+    assert "качество низкое" in text
+    assert text.endswith("пришлю смету завтра")
 
 
 async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:

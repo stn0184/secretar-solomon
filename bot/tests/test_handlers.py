@@ -13,6 +13,7 @@ from tests.conftest import (
     STRANGER_ID,
     FakeAnalyst,
     FakeMessages,
+    FakeTranscriber,
     FakeUnderstandings,
     RecordingSession,
     make_forwarded_update,
@@ -37,6 +38,7 @@ def build_tasks(
         record_message=record_message,
         record_understanding=FakeUnderstandings(),
         analyst=analyst,
+        transcriber=FakeTranscriber(),
     )
     return service, record_message, analyst
 
@@ -88,6 +90,9 @@ async def test_text_is_recorded_and_confirmed(
             "chat_id": OWNER_ID,
             "telegram_message_id": 5,
             "text": "купить лампочку в коридор",
+            "kind": "text",
+            "telegram_file_id": None,
+            "duration_seconds": None,
         }
     ]
 
@@ -170,4 +175,4 @@ async def test_forwarded_message_is_an_errand_with_a_named_sender(
     # в разбор отдельно: чьё это обещание (`spec.md` §3.3).
     assert session.texts == ["Записал: принять смету от Ани"]
     assert messages.calls[0]["text"] == "пришлю смету завтра"
-    assert analyst.calls == [("пришлю смету завтра", "Аня")]
+    assert analyst.calls == [("пришлю смету завтра", "Аня", None)]

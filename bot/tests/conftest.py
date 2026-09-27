@@ -29,8 +29,14 @@ from aiogram.types import (
 
 from solomon.config import Settings
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import SavedMessage, Task
-from solomon.services.understanding import Analysis, Understanding, Verdict
+from solomon.db.tasks import MessageKind, SavedMessage, Task
+from solomon.services.transcription import Transcript, TranscriptionResult
+from solomon.services.understanding import (
+    Analysis,
+    SpeechQuality,
+    Understanding,
+    Verdict,
+)
 
 OWNER_ID = 777
 STRANGER_ID = 999
@@ -41,6 +47,9 @@ OWNER_TIMEZONE = "Asia/Yekaterinburg"
 TEST_TOKEN = "123456789:test-token"
 
 _DEFAULT_TASK = Task(id="0e2f", title="купить лампочку", status="active")
+# Что «слышит» подменённый транскрайбер, если тест не сказал иного.
+SPOKEN = "в пятницу отправить расчёт клиенту"
+AUDIO = b"OggS\x00fake-opus"
 
 
 class RecordingSession(BaseSession):
@@ -115,7 +124,15 @@ class FakeMessages:
         self.broken = broken
 
     async def __call__(
-        self, *, owner_telegram_id: int, chat_id: int, telegram_message_id: int, text: str
+        self,
+        *,
+        owner_telegram_id: int,
+        chat_id: int,
+        telegram_message_id: int,
+        text: str,
+        kind: MessageKind = "text",
+        telegram_file_id: str | None = None,
+        duration_seconds: int | None = None,
     ) -> SavedMessage:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -125,6 +142,9 @@ class FakeMessages:
                 "chat_id": chat_id,
                 "telegram_message_id": telegram_message_id,
                 "text": text,
+                "kind": kind,
+                "telegram_file_id": telegram_file_id,
+                "duration_seconds": duration_seconds,
             }
         )
         return self.message
@@ -151,6 +171,8 @@ class FakeUnderstandings:
         task: Mapping[str, Any] | None,
         reminders: Sequence[Mapping[str, Any]],
         facts: Sequence[Mapping[str, Any]],
+        transcript: str | None = None,
+        transcript_confidence: float | None = None,
     ) -> Task | None:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -166,6 +188,8 @@ class FakeUnderstandings:
                 "task": task,
                 "reminders": list(reminders),
                 "facts": list(facts),
+                "transcript": transcript,
+                "transcript_confidence": transcript_confidence,
             }
         )
         return self.task
@@ -203,11 +227,34 @@ class FakeAnalyst:
             if isinstance(verdict, Understanding)
             else verdict
         )
-        self.calls: list[tuple[str, str | None]] = []
+        self.calls: list[tuple[str, str | None, SpeechQuality | None]] = []
 
-    async def analyze(self, text: str, *, forwarded_from: str | None = None) -> Verdict:
-        self.calls.append((text, forwarded_from))
+    async def analyze(
+        self,
+        text: str,
+        *,
+        forwarded_from: str | None = None,
+        spoken: SpeechQuality | None = None,
+    ) -> Verdict:
+        self.calls.append((text, forwarded_from, spoken))
         return self.verdict
+
+
+class FakeTranscriber:
+    """Вместо Deepgram — заранее решённый результат и список того, что прислали."""
+
+    def __init__(self, result: TranscriptionResult | None = None) -> None:
+        self.result: TranscriptionResult = result or Transcript(text=SPOKEN, confidence=0.93)
+        self.calls: list[bytes] = []
+
+    async def transcribe(self, audio: bytes) -> TranscriptionResult:
+        self.calls.append(audio)
+        return self.result
+
+
+async def load_audio() -> bytes:
+    """Скачивание из Telegram без сети: те же байты каждый раз."""
+    return AUDIO
 
 
 def make_settings() -> Settings:

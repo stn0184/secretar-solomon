@@ -34,6 +34,7 @@ from tests.conftest import (
     STRANGER_ID,
     FakeAnalyst,
     FakeMessages,
+    FakeTranscriber,
     FakeUnderstandings,
     RecordingSession,
     make_callback_update,
@@ -145,6 +146,7 @@ def build_service(
         record_message=FakeMessages(),
         record_understanding=understandings,
         analyst=FakeAnalyst(understanding),
+        transcriber=FakeTranscriber(),
         clock=lambda: now,
     )
     return service, understandings

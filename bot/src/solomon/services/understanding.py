@@ -50,6 +50,11 @@ Kind = Literal["task", "idea", "wish", "chat", "about_me"]
 # Виды, которые заводят строку в `tasks`; разговор и сведение о себе — нет.
 TASK_KINDS: tuple[Kind, ...] = ("task", "idea", "wish")
 
+# Откуда текст (`techspec/05-ai.md` §5.2, §9.4): `None` — набран; иначе
+# распознан с голоса, и модели говорится, каким было качество. Порог «low»
+# живёт в `services/transcription.py`, не здесь.
+SpeechQuality = Literal["fine", "low"]
+
 # Память о пользователе (`techspec/08-memory.md` §8.1): семь категорий для
 # группировки на экране, два статуса. Статус ставит бот по виду сообщения,
 # модель его не отдаёт (§8.2).
@@ -155,7 +160,13 @@ promise — mine, если человек обещает сделать сам; 
 Сообщение about_me и есть такие сведения; в поручении они бывают
 мимоходом («забрать сына из садика» — есть сын, ходит в садик). Дела в
 facts не попадают: «купить лампочку» — задача, а не сведение. Нечего
-запоминать — пустой список."""
+запоминать — пустой список.
+
+Строка «Распознано с голоса» перед текстом значит, что это расшифровка
+речи: странное слово или имя — скорее ошибка распознавания, чем воля
+человека, будьте терпимее к опискам. Если добавлено «качество низкое» и
+нерасслышанное меняет смысл — needs_review = true, а в review_reason —
+«плохо расслышал: …» и то, что именно неясно."""
 
 
 class KnownFact(Protocol):
@@ -201,15 +212,25 @@ def build_system_prompt(now: datetime, timezone: ZoneInfo, known: Sequence[Known
     return "\n\n".join(parts)
 
 
-def build_user_message(text: str, forwarded_from: str | None) -> str:
-    """Сообщение владельца как есть; пересланное — с именем отправителя.
+def build_user_message(
+    text: str, forwarded_from: str | None, spoken: SpeechQuality | None = None
+) -> str:
+    """Сообщение владельца как есть; пересланное — с именем отправителя,
+    расшифровка — с пометкой «Распознано с голоса» (§5.2).
 
-    Имя — это данные о том, чьё обещание (`spec.md` §3.3), а не подпись:
-    в остальном текст не трогается.
+    Имя — это данные о том, чьё обещание (`spec.md` §3.3), а не подпись;
+    пометка голоса — данные о том, откуда берутся описки (§9.4). В остальном
+    текст не трогается.
     """
+    lines: list[str] = []
     if forwarded_from:
-        return f"Переслано от: {forwarded_from}\n{text}"
-    return text
+        lines.append(f"Переслано от: {forwarded_from}")
+    if spoken == "low":
+        lines.append("Распознано с голоса, качество низкое")
+    elif spoken == "fine":
+        lines.append("Распознано с голоса")
+    lines.append(text)
+    return "\n".join(lines)
 
 
 class ModelUsage(Protocol):
@@ -312,16 +333,24 @@ class UnderstandingService:
     def _now(self) -> datetime:
         return datetime.now(self._settings.owner_timezone)
 
-    async def analyze(self, text: str, *, forwarded_from: str | None = None) -> Verdict:
+    async def analyze(
+        self,
+        text: str,
+        *,
+        forwarded_from: str | None = None,
+        spoken: SpeechQuality | None = None,
+    ) -> Verdict:
         """Разобрать сообщение или честно сказать, что не вышло.
 
         Ни один отказ наружу исключением не выходит: поручение не теряется
-        (инвариант 5), слой выше записывает его буквально (§5.4).
+        (инвариант 5), слой выше записывает его буквально (§5.4). `spoken` —
+        текст распознан с голоса, и с каким качеством (§9.4).
         """
         known = await self._known_facts()
         system = build_system_prompt(self._clock(), self._settings.owner_timezone, known)
+        message = build_user_message(text, forwarded_from, spoken)
         try:
-            answer = await self._call(system=system, text=build_user_message(text, forwarded_from))
+            answer = await self._call(system=system, text=message)
         except (APITimeoutError, APIConnectionError) as error:
             return self._not_understood(f"модель недоступна: {type(error).__name__}")
         except AuthenticationError as error:

@@ -6,19 +6,31 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from solomon import texts
-from solomon.db.tasks import SavedMessage, Task
-from solomon.services.tasks import SUMMARY_LIMIT, TaskService, fact_rows, summarize
+from solomon.db.tasks import SavedMessage, SpeechKind, Task
+from solomon.services.tasks import (
+    SUMMARY_LIMIT,
+    RecordOutcome,
+    TaskService,
+    fact_rows,
+    summarize,
+)
+from solomon.services.transcription import NotTranscribed, Transcript
 from solomon.services.understanding import NotUnderstood
 from tests.conftest import (
+    AUDIO,
     OWNER_ID,
     OWNER_TIMEZONE,
+    SPOKEN,
     FakeAnalyst,
     FakeMessages,
+    FakeTranscriber,
     FakeUnderstandings,
+    load_audio,
     make_settings,
     make_understanding,
 )
@@ -31,6 +43,7 @@ def build_service(
     analyst: FakeAnalyst,
     messages: FakeMessages | None = None,
     understandings: FakeUnderstandings | None = None,
+    transcriber: FakeTranscriber | None = None,
 ) -> tuple[TaskService, FakeMessages, FakeUnderstandings]:
     """Сервис на подменённой базе: и запись сообщения, и запись разбора."""
     record_message = messages or FakeMessages()
@@ -40,6 +53,7 @@ def build_service(
         record_message=record_message,
         record_understanding=record_understanding,
         analyst=analyst,
+        transcriber=transcriber or FakeTranscriber(),
     )
     return service, record_message, record_understanding
 
@@ -396,7 +410,7 @@ async def test_forwarded_sender_reaches_the_model() -> None:
         chat_id=42, telegram_message_id=7, text="пришлю смету завтра", forwarded_from="Аня"
     )
 
-    assert analyst.calls[0] == ("пришлю смету завтра", "Аня")
+    assert analyst.calls[0] == ("пришлю смету завтра", "Аня", None)
 
 
 async def test_whole_text_goes_to_the_database() -> None:
@@ -413,6 +427,9 @@ async def test_whole_text_goes_to_the_database() -> None:
             "chat_id": 42,
             "telegram_message_id": 7,
             "text": long_text,
+            "kind": "text",
+            "telegram_file_id": None,
+            "duration_seconds": None,
         }
     ]
 
@@ -469,3 +486,213 @@ async def test_reply_is_built_from_the_analysis_not_from_the_database_row() -> N
     )
 
     assert outcome.message == "Записал: купить лампочку"
+
+
+# ---------------------------------------------------------------- голосовые
+
+RETOLD = "Записал: отправить расчёт клиенту. Срок: пятница, 18 сентября"
+
+
+def heard_analyst() -> FakeAnalyst:
+    """Модель, разобравшая расшифровку «в пятницу отправить расчёт клиенту»."""
+    return FakeAnalyst(
+        make_understanding(
+            title="отправить расчёт клиенту",
+            due_at=FRIDAY_EVENING.replace(hour=18, minute=0),
+            due_precision="day",
+        )
+    )
+
+
+async def record_voice(
+    service: TaskService,
+    load: Callable[[], Awaitable[bytes]] = load_audio,
+    kind: SpeechKind = "voice",
+    forwarded_from: str | None = None,
+) -> RecordOutcome:
+    """Одно голосовое на 32 секунды: меняется только то, что важно тесту."""
+    return await service.record_from_voice(
+        chat_id=42,
+        telegram_message_id=7,
+        kind=kind,
+        file_id="voice-1",
+        duration=32,
+        load_audio=load,
+        forwarded_from=forwarded_from,
+    )
+
+
+async def test_voice_is_saved_before_hearing_and_becomes_a_task() -> None:
+    """Порядок §9.3: сообщение с файлом → расшифровка → разбор → задача."""
+    analyst = heard_analyst()
+    transcriber = FakeTranscriber(Transcript(text=SPOKEN, confidence=0.93))
+    service, messages, understandings = build_service(analyst, transcriber=transcriber)
+
+    outcome = await record_voice(service)
+
+    assert outcome.ok
+    # Ответ — обычный пересказ, расшифровка целиком не показывается (§9.4).
+    assert outcome.message == RETOLD
+    assert SPOKEN not in outcome.message
+    # Строка в базе появляется до того, как кто-то расслышал: текст пуст.
+    assert messages.calls == [
+        {
+            "owner_telegram_id": OWNER_ID,
+            "chat_id": 42,
+            "telegram_message_id": 7,
+            "text": "",
+            "kind": "voice",
+            "telegram_file_id": "voice-1",
+            "duration_seconds": 32,
+        }
+    ]
+    assert transcriber.calls == [AUDIO]
+    assert analyst.calls == [(SPOKEN, None, "fine")]
+    saved = understandings.calls[0]
+    assert saved["transcript"] == SPOKEN
+    assert saved["transcript_confidence"] == 0.93
+    assert saved["reply"] == RETOLD
+    task = saved["task"]
+    assert isinstance(task, dict)
+    assert task["title"] == "отправить расчёт клиенту"
+
+
+async def test_video_note_goes_the_same_way_with_its_own_kind() -> None:
+    service, messages, understandings = build_service(heard_analyst())
+
+    outcome = await record_voice(service, kind="video_note")
+
+    assert outcome.message == RETOLD
+    assert messages.calls[0]["kind"] == "video_note"
+    assert messages.calls[0]["telegram_file_id"] == "voice-1"
+    assert messages.calls[0]["duration_seconds"] == 32
+    assert understandings.calls[0]["transcript"] == SPOKEN
+
+
+async def test_not_heard_keeps_the_message_and_records_no_task() -> None:
+    """Отказ распознавания — не потеря: файл в базе, ответ честный, задачи нет (§9.3)."""
+    analyst = heard_analyst()
+    transcriber = FakeTranscriber(NotTranscribed(reason="пустая расшифровка"))
+    service, messages, understandings = build_service(analyst, transcriber=transcriber)
+
+    outcome = await record_voice(service)
+
+    assert not outcome.ok
+    assert outcome.message == texts.NOT_HEARD
+    assert "Записал" not in outcome.message
+    assert messages.calls[0]["telegram_file_id"] == "voice-1"
+    # Модель не зовётся: разбирать нечего, и «Записал» не говорится (инвариант 4).
+    assert analyst.calls == []
+    # Ответ ложится в `reply`, чтобы повтор обновления вернул его же.
+    saved = understandings.calls[0]
+    assert saved["reply"] == texts.NOT_HEARD
+    assert saved["task"] is None
+    assert saved["analysis"] is None
+    assert saved["transcript"] is None
+    assert saved["facts"] == []
+
+
+async def test_download_failure_is_not_heard_and_deepgram_is_not_called() -> None:
+    async def broken_download() -> bytes:
+        raise OSError("file is too big")
+
+    transcriber = FakeTranscriber()
+    service, _, understandings = build_service(heard_analyst(), transcriber=transcriber)
+
+    outcome = await record_voice(service, load=broken_download)
+
+    assert outcome.message == texts.NOT_HEARD
+    assert transcriber.calls == []
+    assert understandings.calls[0]["reply"] == texts.NOT_HEARD
+
+
+class CountedDownload:
+    """Скачивание, которое считает, сколько раз его позвали."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self) -> bytes:
+        self.calls += 1
+        return AUDIO
+
+
+async def test_repeated_voice_update_answers_from_the_saved_reply() -> None:
+    """Повтор виден на первом шаге: файл не скачивается, Deepgram не зовётся."""
+    analyst = heard_analyst()
+    transcriber = FakeTranscriber()
+    download = CountedDownload()
+    messages = FakeMessages(message=SavedMessage(id="9a71", reply=RETOLD))
+    service, _, understandings = build_service(analyst, messages=messages, transcriber=transcriber)
+
+    outcome = await record_voice(service, load=download)
+
+    assert outcome.message == RETOLD
+    assert download.calls == 0
+    assert transcriber.calls == []
+    assert analyst.calls == []
+    assert understandings.calls == []
+
+
+async def test_database_failure_before_hearing_does_not_download() -> None:
+    transcriber = FakeTranscriber()
+    download = CountedDownload()
+    service, _, _ = build_service(
+        heard_analyst(), messages=FakeMessages(broken=True), transcriber=transcriber
+    )
+
+    outcome = await record_voice(service, load=download)
+
+    assert not outcome.ok
+    assert outcome.message == texts.NOT_SAVED
+    assert download.calls == 0
+    assert transcriber.calls == []
+
+
+async def test_forwarded_voice_names_the_sender_and_the_voice_to_the_model() -> None:
+    analyst = heard_analyst()
+    service, _, _ = build_service(analyst)
+
+    await record_voice(service, forwarded_from="Аня")
+
+    assert analyst.calls == [(SPOKEN, "Аня", "fine")]
+
+
+async def test_low_confidence_is_told_to_the_model() -> None:
+    analyst = heard_analyst()
+    transcriber = FakeTranscriber(Transcript(text=SPOKEN, confidence=0.42))
+    service, _, understandings = build_service(analyst, transcriber=transcriber)
+
+    await record_voice(service)
+
+    assert analyst.calls == [(SPOKEN, None, "low")]
+    assert understandings.calls[0]["transcript_confidence"] == 0.42
+
+
+async def test_model_failure_after_hearing_records_the_transcript_literally() -> None:
+    """Расшифровка удалась, модель отказала — как у текста (§5.4): буквально, needs_review."""
+    analyst = FakeAnalyst(NotUnderstood(reason="модель недоступна: APITimeoutError"))
+    service, _, understandings = build_service(analyst)
+
+    outcome = await record_voice(service)
+
+    assert outcome.ok
+    assert outcome.message == texts.RECORDED_AS_IS.format(text=SPOKEN)
+    saved = understandings.calls[0]
+    assert saved["transcript"] == SPOKEN
+    task = saved["task"]
+    assert isinstance(task, dict)
+    assert task["title"] == SPOKEN
+    assert task["needs_review"] is True
+
+
+async def test_not_heard_is_still_said_when_the_reply_cannot_be_saved() -> None:
+    """Файл уже в базе — «сохранил» правда; без `reply` повтор распознает заново."""
+    transcriber = FakeTranscriber(NotTranscribed(reason="таймаут"))
+    service, _, _ = build_service(
+        heard_analyst(), understandings=FakeUnderstandings(broken=True), transcriber=transcriber
+    )
+
+    outcome = await record_voice(service)
+
+    assert outcome.message == texts.NOT_HEARD
