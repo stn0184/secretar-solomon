@@ -44,6 +44,14 @@ export const REASON_TEXT: Record<DbReason, string> = {
   refused: "База ответила отказом. Попробуйте ещё раз.",
 };
 
+/** Итог действия («Сделано», «Подтвердить», «Удалить»): сделано или почему нет. */
+export type ActionResult = { ok: true } | { ok: false; message: string };
+
+/** Отказ словами: что делали и почему не вышло — одной фразой на экран. */
+export function failed(prefix: string, failure: DbFailure): { ok: false; message: string } {
+  return { ok: false, message: `${prefix}. ${failure.message}` };
+}
+
 /** Ответ PostgREST в том виде, в каком его отдаёт supabase-js. */
 interface RestResponse<T> {
   data: T | null;

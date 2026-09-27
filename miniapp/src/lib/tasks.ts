@@ -15,7 +15,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { sameDay } from "./format.ts";
-import { type Db, type DbFailure, query } from "./supabase.ts";
+import { dateOrNull, oneOf, recordOf } from "./parse.ts";
+import { type ActionResult, type Db, failed, query } from "./supabase.ts";
+
+export type { ActionResult } from "./supabase.ts";
 
 export type TaskKind = "task" | "idea" | "wish";
 export type Priority = "low" | "normal" | "high";
@@ -61,34 +64,16 @@ export type TasksResult =
   | { ok: true; tasks: Task[]; more: boolean }
   | { ok: false; message: string };
 export type DetailsResult = { ok: true; details: TaskDetails } | { ok: false; message: string };
-export type ActionResult = { ok: true } | { ok: false; message: string };
 
 /* ----------------------------------------------------------------- разбор */
 
 const COLUMNS =
   "id, title, kind, due_at, due_precision, priority, promise, people, needs_review, source_message_id, created_at";
 
-function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
-  return typeof value === "string" && (allowed as readonly string[]).includes(value)
-    ? (value as T)
-    : fallback;
-}
-
-function dateOrNull(value: unknown): Date | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
 /** Строка `tasks` → задача. Не годится (нет id или названия) — `null`. */
 export function parseTask(row: unknown): Task | null {
-  if (typeof row !== "object" || row === null) {
-    return null;
-  }
-  const r = row as Record<string, unknown>;
-  if (typeof r.id !== "string" || typeof r.title !== "string") {
+  const r = recordOf(row);
+  if (!r || typeof r.id !== "string" || typeof r.title !== "string") {
     return null;
   }
   const dueAt = dateOrNull(r.due_at);
@@ -110,10 +95,10 @@ export function parseTask(row: unknown): Task | null {
 }
 
 function parseMessage(row: unknown): SourceMessage | null {
-  if (typeof row !== "object" || row === null) {
+  const r = recordOf(row);
+  if (!r) {
     return null;
   }
-  const r = row as Record<string, unknown>;
   const receivedAt = dateOrNull(r.received_at);
   if (typeof r.text !== "string" || !receivedAt) {
     return null;
@@ -122,10 +107,10 @@ function parseMessage(row: unknown): SourceMessage | null {
 }
 
 function parseReminder(row: unknown): Reminder | null {
-  if (typeof row !== "object" || row === null) {
+  const r = recordOf(row);
+  if (!r) {
     return null;
   }
-  const r = row as Record<string, unknown>;
   const fireAt = dateOrNull(r.fire_at);
   if (typeof r.id !== "string" || !fireAt || (r.stage !== "before" && r.stage !== "due")) {
     return null;
@@ -223,10 +208,6 @@ export function groupTasks(tasks: Task[], now: Date): TaskGroup[] {
 }
 
 /* ------------------------------------------------------------------ база */
-
-function failed(prefix: string, failure: DbFailure): { ok: false; message: string } {
-  return { ok: false, message: `${prefix}. ${failure.message}` };
-}
 
 /**
  * Прочитать активные задачи, новые сверху.
