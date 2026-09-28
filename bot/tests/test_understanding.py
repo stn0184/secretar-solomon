@@ -483,19 +483,23 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 
 # --------------------------------------------------------------- живой прогон
 
-# Десять русских сообщений с ожидаемым разбором плюс три примера памяти:
-# этим владелец смотрит, как помощник понимает. Прогон ходит в модель
+# Десять русских сообщений с ожидаемым разбором, три примера памяти и три
+# примера диалога: этим владелец смотрит, как помощник понимает. Прогон ходит в модель
 # по-настоящему, поэтому в воротах не участвует — `pyproject.toml`,
 # маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 13
+FIXTURE_COUNT = 16
 # «Сейчас» для живого прогона: среда, 10:30. Даты в примерах посчитаны от
 # него, иначе «в пятницу» значило бы разное в разные дни.
 LIVE_MOMENT = (2026, 9, 16, 10, 30)
 # Из десяти обычных примеров двум разрешено разойтись: модель — не таблица.
-# Примеры памяти (поле `facts`) сходятся строго — по виду и по статусу.
+# Примеры памяти (поле `facts`) сходятся строго — по виду и по статусу,
+# примеры диалога (поле `dialog`) — по вопросу и признаку ответа.
 MIN_MATCHING_KINDS = 8
 MEMORY_EXPECTATIONS = ("fact", "guess", "none")
+# Диалог (`techspec/10-dialog.md`): бот спрашивает, сообщение отвечает на
+# открытый вопрос, сообщение — новое поручение при открытом вопросе.
+DIALOG_EXPECTATIONS = ("asks", "answers", "new")
 
 
 def load_fixtures() -> list[dict[str, Any]]:
@@ -533,6 +537,45 @@ def service_for(
     return UnderstandingService(settings, call, clock=lambda: now, known=read_known)
 
 
+def asked_for(case: dict[str, Any]) -> Asked | None:
+    """Открытый вопрос примера — как его прочитал бы бот из базы."""
+    raw = case.get("open_question")
+    if raw is None:
+        return None
+    due_at = raw.get("due_at")
+    return Asked(
+        question=raw["question"],
+        title=raw["title"],
+        due_at=None if due_at is None else datetime.fromisoformat(due_at),
+        due_precision=raw.get("due_precision"),
+        priority=raw.get("priority", "normal"),
+        people=tuple(raw.get("people", ())),
+    )
+
+
+def dialog_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
+    """Чем пример диалога разошёлся с ожиданием; `None` — сошёлся."""
+    expected = case["dialog"]
+    text = case["text"]
+    if expected == "asks":
+        if got.kind != "task" or not got.question:
+            return f"{text}: ждали задачу с вопросом, получили {got.kind}, {got.question!r}"
+        if got.answers_question:
+            return f"{text}: вопроса не было, а answers_question = true"
+        return None
+    if expected == "answers":
+        if not got.answers_question:
+            return f"{text}: ждали ответ на вопрос, answers_question = false"
+        if got.question is not None:
+            return f"{text}: второй вопрос не задаётся, получили {got.question!r}"
+        return None
+    if got.answers_question:
+        return f"{text}: это новое поручение, а answers_question = true"
+    if got.kind != case["kind"]:
+        return f"{text}: ждали {case['kind']}, получили {got.kind}"
+    return None
+
+
 def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     """Чем пример памяти разошёлся с ожиданием; `None` — сошёлся."""
     expected = case["facts"]
@@ -548,7 +591,7 @@ def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     return None if status == expected else f"{case['text']}: ждали {expected}, получили {status}"
 
 
-def test_fixtures_are_thirteen_examples_with_expected_fields() -> None:
+def test_fixtures_are_sixteen_examples_with_expected_fields() -> None:
     fixtures = load_fixtures()
 
     assert len(fixtures) == FIXTURE_COUNT
@@ -556,6 +599,30 @@ def test_fixtures_are_thirteen_examples_with_expected_fields() -> None:
     memory = [case for case in fixtures if "facts" in case]
     assert len(memory) == 3
     assert all(case["facts"] in MEMORY_EXPECTATIONS for case in memory)
+    dialog = [case for case in fixtures if "dialog" in case]
+    assert sorted(case["dialog"] for case in dialog) == sorted(DIALOG_EXPECTATIONS)
+    # Ответ и новое поручение приходят при открытом вопросе, вопрос — без него.
+    for case in dialog:
+        asked = asked_for(case)
+        assert (asked is None) == (case["dialog"] == "asks"), case["text"]
+    assert not any("open_question" in case for case in fixtures if "dialog" not in case)
+
+
+def test_dialog_mismatch_checks_the_question_and_the_answer_flag() -> None:
+    asks = {"text": "срочно отправить расчёт", "kind": "task", "dialog": "asks"}
+    answers = {"text": "в пятницу", "kind": "task", "dialog": "answers"}
+    new = {"text": "купить лампочку", "kind": "task", "dialog": "new"}
+
+    assert dialog_mismatch(asks, make_understanding(question="К какому сроку?")) is None
+    assert dialog_mismatch(asks, make_understanding()) is not None
+    assert dialog_mismatch(answers, make_understanding(answers_question=True)) is None
+    assert dialog_mismatch(answers, make_understanding()) is not None
+    assert (
+        dialog_mismatch(answers, make_understanding(answers_question=True, question="Когда?"))
+        is not None
+    )
+    assert dialog_mismatch(new, make_understanding()) is None
+    assert dialog_mismatch(new, make_understanding(answers_question=True)) is not None
 
 
 def test_memory_mismatch_checks_kind_and_status() -> None:
@@ -585,7 +652,8 @@ def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -
 @pytest.mark.live
 async def test_live_model_understands_the_fixtures() -> None:
     """Вживую: kind сходится хотя бы у восьми обычных примеров, даты — у всех,
-    примеры памяти — строго по виду и статусу записей."""
+    примеры памяти — строго по виду и статусу записей, диалога — по вопросу
+    и признаку ответа."""
     settings = live_settings()
     now = datetime(*LIVE_MOMENT, tzinfo=settings.owner_timezone)
     client = create_anthropic_client(settings)
@@ -596,7 +664,9 @@ async def test_live_model_understands_the_fixtures() -> None:
         verdicts = await asyncio.gather(
             *(
                 service_for(settings, call, now, case).analyze(
-                    case["text"], forwarded_from=case.get("forwarded_from")
+                    case["text"],
+                    forwarded_from=case.get("forwarded_from"),
+                    open_question=asked_for(case),
                 )
                 for case in fixtures
             )
@@ -607,6 +677,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     kinds: list[str] = []
     dates: list[str] = []
     memory: list[str] = []
+    dialog: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
@@ -615,6 +686,10 @@ async def test_live_model_understands_the_fixtures() -> None:
             mismatch = memory_mismatch(case, got)
             if mismatch:
                 memory.append(mismatch)
+        elif "dialog" in case:
+            mismatch = dialog_mismatch(case, got)
+            if mismatch:
+                dialog.append(mismatch)
         else:
             general += 1
             if got.kind != case["kind"]:
@@ -629,5 +704,6 @@ async def test_live_model_understands_the_fixtures() -> None:
 
     assert not dates, "Даты разошлись:\n" + "\n".join(dates)
     assert not memory, "Память разошлась:\n" + "\n".join(memory)
+    assert not dialog, "Диалог разошёлся:\n" + "\n".join(dialog)
     matched = general - len(kinds)
     assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)
