@@ -9,6 +9,7 @@
  * Базу с миграциями собираем один раз на процесс и снимаем с неё слепок;
  * каждый тест получает свою копию слепка — чистую и независимую от соседей.
  */
+import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 
 import { PGlite } from "@electric-sql/pglite";
@@ -52,17 +53,21 @@ export function migrationNames(): string[] {
     .sort();
 }
 
+async function applyMigrations(db: PGlite, names: string[]): Promise<void> {
+  for (const name of names) {
+    try {
+      await db.exec(readFileSync(new URL(name, MIGRATIONS), "utf8"));
+    } catch (error) {
+      throw new Error(`migration ${name} failed: ${(error as Error).message}`, { cause: error });
+    }
+  }
+}
+
 async function migratedSnapshot(): Promise<File | Blob> {
   const db = new PGlite();
   try {
     await db.exec(SUPABASE_STUBS);
-    for (const name of migrationNames()) {
-      try {
-        await db.exec(readFileSync(new URL(name, MIGRATIONS), "utf8"));
-      } catch (error) {
-        throw new Error(`migration ${name} failed: ${(error as Error).message}`, { cause: error });
-      }
-    }
+    await applyMigrations(db, migrationNames());
     return await db.dumpDataDir("none");
   } finally {
     await db.close();
@@ -84,6 +89,36 @@ export async function withDatabase(body: (db: PGlite) => Promise<void>): Promise
   const db = await freshDatabase();
   try {
     await body(db);
+  } finally {
+    await db.close();
+  }
+}
+
+/**
+ * Тест того, что миграция делает со строками, записанными до неё: база
+ * собирается миграциями строго раньше `name`, тест заводит в ней старые
+ * строки и зовёт `migrate` — оставшиеся миграции, начиная с `name`,
+ * применяются к ним, как `supabase db push` к живой базе.
+ */
+export async function withDatabaseBefore(
+  name: string,
+  body: (db: PGlite, migrate: () => Promise<void>) => Promise<void>,
+): Promise<void> {
+  const names = migrationNames();
+  assert.ok(names.includes(name), `нет миграции ${name}`);
+  const db = new PGlite();
+  try {
+    await db.exec(SUPABASE_STUBS);
+    await applyMigrations(
+      db,
+      names.filter((each) => each < name),
+    );
+    await body(db, () =>
+      applyMigrations(
+        db,
+        names.filter((each) => each >= name),
+      ),
+    );
   } finally {
     await db.close();
   }

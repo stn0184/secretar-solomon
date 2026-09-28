@@ -515,3 +515,16 @@ test("ответ по уже закрытой задаче — отказ: на�
     assert.equal(untouched.due_at, null);
     assert.deepEqual(await remindersOf(db, closed.id!), []);
   }));
+
+test("ответ по убранной задаче — отказ: её больше не надо делать", () =>
+  withDatabase(async (db) => {
+    const cancelled = await askedTask(db);
+    await db.query("update public.tasks set status = 'cancelled' where id = $1", [cancelled.id]);
+
+    await assertAmendRefused(db, cancelled.id!);
+
+    const untouched = await taskById(db, cancelled.id!);
+    assert.equal(untouched.status, "cancelled");
+    assert.equal(untouched.due_at, null);
+    assert.deepEqual(await remindersOf(db, cancelled.id!), []);
+  }));

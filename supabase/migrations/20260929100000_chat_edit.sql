@@ -334,15 +334,6 @@ begin
 
   asked := nullif(btrim(edit_from_chat.edit ->> 'question'), '');
   if asked is not null then
-    -- У владельца открыт не больше одного вопроса (§10.1): новый снимает
-    -- прежние, даже если его ставит нажатие кнопки, а не запись сообщения.
-    update public.tasks t
-       set open_question = null,
-           question_asked_at = null
-     where t.owner_telegram_id = edit_from_chat.owner_telegram_id
-       and t.id <> target_id
-       and (t.open_question is not null or t.question_asked_at is not null);
-
     update public.tasks t
        set needs_review = true,
            open_question = asked,
@@ -355,6 +346,17 @@ begin
     if not found then
       return null;
     end if;
+
+    -- У владельца открыт не больше одного вопроса (§10.1): новый снимает
+    -- прежние, даже если его ставит нажатие кнопки, а не запись сообщения.
+    -- Только после того, как вопрос встал: задачи нет — не тронуто ничего.
+    update public.tasks t
+       set open_question = null,
+           question_asked_at = null
+     where t.owner_telegram_id = edit_from_chat.owner_telegram_id
+       and t.id <> target_id
+       and (t.open_question is not null or t.question_asked_at is not null);
+
     return saved;
   end if;
 
