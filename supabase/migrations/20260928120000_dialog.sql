@@ -68,6 +68,12 @@ begin
 
   -- Память пишется для любого вида сообщения — и для тех, где задачи нет
   -- (`about_me`, `chat`), поэтому раньше ранних выходов (§8.2, §8.3).
+  --
+  -- Цель конфликта названа ограничением, а не списком колонок: в plpgsql
+  -- `on conflict (owner_telegram_id, …)` совпадает с именем параметра, и
+  -- Postgres отказывает «column reference is ambiguous» на каждом вызове —
+  -- так было в версиях 006 и 007. Имя — то, что Postgres дал безымянному
+  -- `unique (owner_telegram_id, category, text)` миграции 006.
   if jsonb_typeof(record_understanding.facts) = 'array' then
     insert into public.facts (owner_telegram_id, category, text, status, source_message_id)
     select record_understanding.owner_telegram_id,
@@ -77,7 +83,7 @@ begin
            record_understanding.message_id
       from jsonb_array_elements(record_understanding.facts) as item(value)
      where coalesce(item.value ->> 'text', '') <> ''
-    on conflict (owner_telegram_id, category, text) do update
+    on conflict on constraint facts_owner_telegram_id_category_text_key do update
        set status = 'fact',
            source_message_id = excluded.source_message_id
      where excluded.status = 'fact'
