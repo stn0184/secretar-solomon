@@ -93,7 +93,7 @@
 
 ## Задачи
 
-- [ ] Миграция: `tasks.open_question`, `tasks.question_asked_at`;
+- [x] Миграция: `tasks.open_question`, `tasks.question_asked_at`;
       `record_understanding` — снятие открытых вопросов владельца при
       **любом** разборе (после проверки на повтор, отдельного аргумента
       нет — решение владельца), ключ `open_question` в `task` и аргумент
