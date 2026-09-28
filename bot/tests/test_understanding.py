@@ -659,12 +659,13 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 
 # --------------------------------------------------------------- живой прогон
 
-# Десять русских сообщений с ожидаемым разбором, три примера памяти и три
-# примера диалога: этим владелец смотрит, как помощник понимает. Прогон ходит в модель
-# по-настоящему, поэтому в воротах не участвует — `pyproject.toml`,
-# маркер `live`.
+# Десять русских сообщений с ожидаемым разбором, три примера памяти, три
+# примера диалога и восемь примеров правки словом: этим владелец смотрит, как
+# помощник понимает. Прогон ходит в модель по-настоящему, поэтому в воротах
+# не участвует — `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 16
+FIXTURE_COUNT = 24
+EDIT_COUNT = 8
 # «Сейчас» для живого прогона: среда, 10:30. Даты в примерах посчитаны от
 # него, иначе «в пятницу» значило бы разное в разные дни.
 LIVE_MOMENT = (2026, 9, 16, 10, 30)
@@ -729,6 +730,44 @@ def asked_for(case: dict[str, Any]) -> Asked | None:
     )
 
 
+def tasks_for(case: dict[str, Any]) -> list[TaskDetails] | None:
+    """Блок 5 примера — как его собрал бы бот: пересланному блока нет (§12.2),
+    остальным — список примера по порядку, а без списка — пустой."""
+    if case.get("forwarded_from"):
+        return None
+    tasks: list[TaskDetails] = []
+    for index, raw in enumerate(case.get("open_tasks", [])):
+        due_at = raw.get("due_at")
+        tasks.append(
+            open_task(
+                id=f"00000000-0000-4000-8000-{index:012d}",
+                title=raw["title"],
+                due_at=None if due_at is None else datetime.fromisoformat(due_at),
+                due_precision=raw.get("due_precision"),
+                priority=raw.get("priority", "normal"),
+                people=tuple(raw.get("people", ())),
+            )
+        )
+    return tasks
+
+
+def model_edit(**fields: Any) -> dict[str, Any]:
+    """Правка в ответе модели (§5.3): пустое — «не менял»."""
+    base: dict[str, Any] = {
+        "action": "change",
+        "task": None,
+        "candidates": [],
+        "title": None,
+        "due_at": None,
+        "due_precision": None,
+        "due_removed": False,
+        "priority": None,
+        "promise": None,
+        "people": None,
+    }
+    return {**base, **fields}
+
+
 def dialog_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     """Чем пример диалога разошёлся с ожиданием; `None` — сошёлся."""
     expected = case["dialog"]
@@ -752,6 +791,41 @@ def dialog_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     return None
 
 
+def edit_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) -> str | None:
+    """Чем пример правки разошёлся с ожиданием; `None` — сошёлся.
+
+    Ожидание `null` — правки быть не должно (пересланное, обычное поручение).
+    Иначе сходятся действие и номер задачи; `candidates` — как множество;
+    `due_date` — день нового срока в поясе владельца; `question` — вопрос
+    задан, а новый срок не угадан.
+    """
+    expected = case["edit"]
+    text = case["text"]
+    edit = got.edit
+    if expected is None:
+        return None if edit is None else f"{text}: правки не ждали, получили {edit.action}"
+    if edit is None:
+        return f"{text}: ждали правку {expected['action']}, edit = null"
+    if edit.action != expected["action"]:
+        return f"{text}: ждали {expected['action']}, получили {edit.action}"
+    if edit.task != expected["task"]:
+        return f"{text}: ждали задачу {expected['task']}, получили {edit.task}"
+    candidates = expected.get("candidates")
+    if candidates is not None and sorted(edit.candidates) != sorted(candidates):
+        return f"{text}: ждали кандидатов {candidates}, получили {edit.candidates}"
+    due_date = expected.get("due_date")
+    if due_date is not None:
+        actual = edit.due_at.astimezone(timezone).date().isoformat() if edit.due_at else None
+        if actual != due_date:
+            return f"{text}: ждали срок {due_date}, получили {actual}"
+    if expected.get("question"):
+        if not got.question:
+            return f"{text}: ждали вопрос, question пуст"
+        if edit.due_at is not None:
+            return f"{text}: время не разобрать, а срок угадан: {edit.due_at}"
+    return None
+
+
 def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     """Чем пример памяти разошёлся с ожиданием; `None` — сошёлся."""
     expected = case["facts"]
@@ -767,7 +841,7 @@ def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     return None if status == expected else f"{case['text']}: ждали {expected}, получили {status}"
 
 
-def test_fixtures_are_sixteen_examples_with_expected_fields() -> None:
+def test_fixtures_are_twenty_four_examples_with_expected_fields() -> None:
     fixtures = load_fixtures()
 
     assert len(fixtures) == FIXTURE_COUNT
@@ -782,6 +856,84 @@ def test_fixtures_are_sixteen_examples_with_expected_fields() -> None:
         asked = asked_for(case)
         assert (asked is None) == (case["dialog"] == "asks"), case["text"]
     assert not any("open_question" in case for case in fixtures if "dialog" not in case)
+
+
+def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
+    """Правка (`techspec/12-chat-edit.md`): перенос, «сделал», «отменилась»,
+    свайп, несколько похожих, задачи нет, непонятное время, пересланное."""
+    fixtures = load_fixtures()
+    edits = [case for case in fixtures if "edit" in case]
+
+    assert len(edits) == EDIT_COUNT
+    assert all(case.get("open_tasks") for case in edits)
+    assert not any("open_tasks" in case for case in fixtures if "edit" not in case)
+    assert not any({"facts", "dialog"} & set(case) for case in edits)
+    expected = [case["edit"] for case in edits if case["edit"] is not None]
+    assert {edit["action"] for edit in expected} == {"change", "done", "cancel"}
+    assert any(edit.get("due_date") and edit["task"] for edit in expected)
+    assert any(len(edit.get("candidates", [])) > 1 for edit in expected)
+    assert any(edit.get("candidates") == [] for edit in expected)
+    assert any(edit.get("question") for edit in expected)
+    assert any("swipe" in case for case in edits)
+    assert any("last_task" in case for case in edits)
+    forwarded = [case for case in edits if "forwarded_from" in case]
+    assert [case["edit"] for case in forwarded] == [None]
+    for case in edits:
+        tasks = tasks_for(case)
+        assert (tasks is None) == ("forwarded_from" in case), case["text"]
+        assert tasks is None or all(task.status == "active" for task in tasks)
+
+
+def test_edit_mismatch_checks_action_task_and_due() -> None:
+    move = {
+        "text": "встреча перенеслась на завтра",
+        "edit": {"action": "change", "task": 1, "due_date": "2026-09-17"},
+    }
+    tomorrow = datetime(2026, 9, 17, 17, 0, tzinfo=TZ)
+    moved = make_understanding(edit=model_edit(task=1, due_at=tomorrow, due_precision="time"))
+
+    assert edit_mismatch(move, moved, TZ) is None
+    assert edit_mismatch(move, make_understanding(), TZ) is not None
+    assert edit_mismatch(move, make_understanding(edit=model_edit(task=2)), TZ) is not None
+    assert (
+        edit_mismatch(move, make_understanding(edit=model_edit(task=1, action="done")), TZ)
+        is not None
+    )
+    friday = datetime(2026, 9, 18, 17, 0, tzinfo=TZ)
+    assert (
+        edit_mismatch(move, make_understanding(edit=model_edit(task=1, due_at=friday)), TZ)
+        is not None
+    )
+
+    none = {"text": "встречу переносим", "edit": None}
+    assert edit_mismatch(none, make_understanding(), TZ) is None
+    assert edit_mismatch(none, moved, TZ) is not None
+
+    pick = {
+        "text": "перенеси звонок",
+        "edit": {"action": "change", "task": None, "candidates": [1, 2]},
+    }
+    assert edit_mismatch(pick, make_understanding(edit=model_edit(candidates=[2, 1])), TZ) is None
+    assert edit_mismatch(pick, make_understanding(edit=model_edit(candidates=[1])), TZ) is not None
+
+    unclear = {"text": "на 1 1 700", "edit": {"action": "change", "task": 1, "question": True}}
+    asked = make_understanding(question="На какое время?", edit=model_edit(task=1))
+    assert edit_mismatch(unclear, asked, TZ) is None
+    assert edit_mismatch(unclear, make_understanding(edit=model_edit(task=1)), TZ) is not None
+    guessed = make_understanding(
+        question="На какое время?", edit=model_edit(task=1, due_at=tomorrow)
+    )
+    assert edit_mismatch(unclear, guessed, TZ) is not None
+
+
+def test_stray_edit_is_a_mismatch_of_a_plain_errand() -> None:
+    """У обычного поручения правки быть не должно: с ней бот не записал бы его."""
+    case = {"text": "купить лампочку", "kind": "task"}
+
+    assert edit_mismatch({**case, "edit": None}, make_understanding(), TZ) is None
+    assert (
+        edit_mismatch({**case, "edit": None}, make_understanding(edit=model_edit()), TZ) is not None
+    )
 
 
 def test_dialog_mismatch_checks_the_question_and_the_answer_flag() -> None:
@@ -829,7 +981,9 @@ def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -
 async def test_live_model_understands_the_fixtures() -> None:
     """Вживую: kind сходится хотя бы у восьми обычных примеров, даты — у всех,
     примеры памяти — строго по виду и статусу записей, диалога — по вопросу
-    и признаку ответа."""
+    и признаку ответа, правки — по действию, задаче и сроку. Блок открытых
+    задач — как у бота: пустой список, если пример своего не дал, и никакого
+    у пересланного; правки там, где её не ждали, быть не должно."""
     settings = live_settings()
     now = datetime(*LIVE_MOMENT, tzinfo=settings.owner_timezone)
     client = create_anthropic_client(settings)
@@ -843,6 +997,9 @@ async def test_live_model_understands_the_fixtures() -> None:
                     case["text"],
                     forwarded_from=case.get("forwarded_from"),
                     open_question=asked_for(case),
+                    tasks=tasks_for(case),
+                    last_task=case.get("last_task"),
+                    swipe=case.get("swipe"),
                 )
                 for case in fixtures
             )
@@ -854,10 +1011,16 @@ async def test_live_model_understands_the_fixtures() -> None:
     dates: list[str] = []
     memory: list[str] = []
     dialog: list[str] = []
+    edits: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
         got = verdict.understanding
+        mismatch = edit_mismatch({"edit": None, **case}, got, settings.owner_timezone)
+        if mismatch:
+            edits.append(mismatch)
+        if "edit" in case:
+            continue
         if "facts" in case:
             mismatch = memory_mismatch(case, got)
             if mismatch:
@@ -881,5 +1044,6 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not dates, "Даты разошлись:\n" + "\n".join(dates)
     assert not memory, "Память разошлась:\n" + "\n".join(memory)
     assert not dialog, "Диалог разошёлся:\n" + "\n".join(dialog)
+    assert not edits, "Правка разошлась:\n" + "\n".join(edits)
     matched = general - len(kinds)
     assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)
