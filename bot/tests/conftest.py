@@ -346,6 +346,7 @@ def make_understanding(**fields: Any) -> Understanding:
         "reply_hint": None,
         "question": None,
         "answers_question": False,
+        "edit": None,
         "facts": [],
     }
     return Understanding.model_validate({**base, **fields})

@@ -30,11 +30,14 @@ from solomon.cli import load_environment
 from solomon.config import ConfigError, Settings
 from solomon.db.facts import Fact
 from solomon.db.rpc import DatabaseError
+from solomon.db.tasks import TaskDetails
 from solomon.services.understanding import (
+    RULES,
     Analysis,
     ModelAnswer,
     ModelCall,
     NotUnderstood,
+    TaskEdit,
     Understanding,
     UnderstandingService,
     anthropic_call,
@@ -44,6 +47,7 @@ from solomon.services.understanding import (
     fact_status,
     format_known,
     format_open_question,
+    format_open_tasks,
 )
 from tests.conftest import OWNER_TIMEZONE, make_settings, make_understanding
 
@@ -237,6 +241,143 @@ def test_understanding_carries_the_question_and_the_answer_flag() -> None:
     # Схема требует оба поля: модель отдаёт их явно, пустое — `null` и `false`.
     required = set(Understanding.model_json_schema()["required"])
     assert {"question", "answers_question"} <= required
+
+
+# ------------------------------------------------------- открытые задачи
+
+
+def open_task(**fields: Any) -> TaskDetails:
+    """Открытая задача для блока 5: без срока, людей и срочности, если не сказано."""
+    base: dict[str, Any] = {
+        "id": "5b0c7a52-8f3e-4c1d-9a6b-2e4f1d3c8b90",
+        "title": "купить лампочку",
+        "kind": "task",
+        "status": "active",
+        "due_at": None,
+        "due_precision": None,
+        "priority": "normal",
+        "promise": None,
+        "people": (),
+        "created_at": datetime(2026, 9, 15, 10, 0, tzinfo=TZ),
+    }
+    return TaskDetails(**{**base, **fields})
+
+
+MEETING = open_task(
+    title="встреча с Ренатой",
+    due_at=datetime(2026, 10, 2, 17, 0, tzinfo=TZ),
+    due_precision="time",
+    priority="high",
+    people=("Рената",),
+)
+REPORT = open_task(
+    title="отправить отчёт",
+    due_at=datetime(2026, 10, 2, 18, 0, tzinfo=TZ),
+    due_precision="day",
+    people=("Кузнецов", "Петров"),
+)
+CAFE = open_task(title="открыть кофейню", kind="idea")
+SEA = open_task(title="съездить на море", kind="wish", priority="low")
+
+
+def test_open_tasks_block_numbers_the_tasks_with_their_details() -> None:
+    """Строка задачи (§5.2, блок 5): суть, срок, люди, «срочно», вид идеи и желания."""
+    block = format_open_tasks([MEETING, REPORT, CAFE, SEA, open_task()], None, TZ)
+
+    lines = block.splitlines()
+    assert lines[0] == "Открытые задачи:"
+    assert lines[1:6] == [
+        "1. встреча с Ренатой (срок: пятница, 2 октября, 17:00; люди: Рената; срочно)",
+        "2. отправить отчёт (срок: пятница, 2 октября; люди: Кузнецов, Петров)",
+        "3. открыть кофейню (идея)",
+        "4. съездить на море (желание)",
+        "5. купить лампочку",
+    ]
+    assert not any(line.startswith("Последняя задача в разговоре") for line in lines)
+
+
+def test_open_tasks_block_names_the_last_task_after_the_list() -> None:
+    block = format_open_tasks([MEETING, REPORT], 2, TZ)
+
+    lines = block.splitlines()
+    assert lines[3] == "Последняя задача в разговоре: №2"
+
+
+def test_open_tasks_block_carries_the_edit_rules() -> None:
+    """Правила §12.1–12.2 — рядом со списком: когда `edit`, номер, кандидаты, нет задачи."""
+    block = format_open_tasks([MEETING], None, TZ)
+
+    for phrase in (
+        "action = change",
+        "action = done",
+        "action = cancel",
+        "candidates",
+        "task = null",
+        "due_removed = true",
+        "целиком",
+        "Ответ на напоминание о задаче №N",
+        "Последняя задача в разговоре",
+        "edit = null",
+    ):
+        assert phrase in block, phrase
+
+
+def test_empty_task_list_is_a_line_and_the_same_rules() -> None:
+    """Задач нет — «Открытых задач нет.» и те же правила: «перенеси встречу» — случай §12.3."""
+    block = format_open_tasks([], None, TZ)
+
+    assert block.splitlines()[0] == "Открытых задач нет."
+    assert "Открытые задачи:" not in block
+    assert block.endswith(format_open_tasks([MEETING], None, TZ).split("\n", 2)[2])
+
+
+def test_no_task_list_means_no_block() -> None:
+    """Пересланное и сбой чтения (§12.2): блока 5 нет вовсе."""
+    assert format_open_tasks(None, None, TZ) == ""
+    prompt = build_system_prompt(NOW, TZ)
+    assert "Открытые задачи:" not in prompt
+    assert "Открытых задач нет." not in prompt
+
+
+def test_open_tasks_go_after_the_open_question() -> None:
+    prompt = build_system_prompt(NOW, TZ, known=[CAMRY], open_question=Asked(), tasks=[MEETING])
+
+    assert prompt.index("Открытый вопрос:") < prompt.index("Открытые задачи:")
+    assert prompt.endswith(format_open_tasks([MEETING], None, TZ))
+
+
+def test_rules_keep_edit_to_the_task_block_and_let_the_answer_win() -> None:
+    """`edit` — только при блоке 5; ответ на открытый вопрос — `answers_question`, не правка."""
+    assert "блок с\nоткрытыми задачами" in RULES
+    assert "edit = null" in RULES
+    assert "answers_question = true, а не правка" in RULES
+
+
+def test_understanding_requires_the_edit_and_all_its_fields() -> None:
+    """Схема требует `edit` и каждое его поле: пустое модель отдаёт явным `null`."""
+    assert "edit" in set(Understanding.model_json_schema()["required"])
+    assert set(TaskEdit.model_json_schema()["required"]) == {
+        "action",
+        "task",
+        "candidates",
+        "title",
+        "due_at",
+        "due_precision",
+        "due_removed",
+        "priority",
+        "promise",
+        "people",
+    }
+
+
+def test_swipe_line_goes_right_before_the_text() -> None:
+    """Строка свайпа — после «Переслано от» и «Распознано с голоса», перед текстом (§5.2)."""
+    assert build_user_message(
+        "сделал", forwarded_from=None, swipe="Ответ на напоминание о задаче №2"
+    ) == ("Ответ на напоминание о задаче №2\nсделал")
+    assert build_user_message(
+        "перенеси на пять", forwarded_from=None, spoken="fine", swipe="Ответ на сообщение бота: «…»"
+    ) == ("Распознано с голоса\nОтвет на сообщение бота: «…»\nперенеси на пять")
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,6 +582,41 @@ async def test_without_open_question_the_prompt_has_no_block() -> None:
 
     system, _ = call.calls[0]
     assert "Открытый вопрос:" not in system
+
+
+async def test_open_tasks_and_the_swipe_reach_the_call() -> None:
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze(
+        "сделал",
+        tasks=[MEETING, REPORT],
+        last_task=1,
+        swipe="Ответ на напоминание о задаче №2",
+    )
+
+    system, text = call.calls[0]
+    assert "1. встреча с Ренатой" in system
+    assert "Последняя задача в разговоре: №1" in system
+    assert text == "Ответ на напоминание о задаче №2\nсделал"
+
+
+async def test_empty_open_tasks_reach_the_call_as_a_line() -> None:
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze("перенеси встречу на пять", tasks=[])
+
+    system, _ = call.calls[0]
+    assert "Открытых задач нет." in system
+
+
+async def test_without_tasks_the_prompt_has_no_task_block() -> None:
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze("пришлю смету завтра", forwarded_from="Аня")
+
+    system, _ = call.calls[0]
+    assert "Открытые задачи:" not in system
+    assert "Открытых задач нет." not in system
 
 
 async def test_forwarded_sender_reaches_the_call() -> None:

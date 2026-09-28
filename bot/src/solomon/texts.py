@@ -37,6 +37,35 @@ MONTHS = (
 )
 
 
+# «Перенести на …» (`techspec/12-chat-edit.md` §12.6): день недели в
+# винительном падеже.
+WEEKDAYS_ACCUSATIVE = (
+    "понедельник",
+    "вторник",
+    "среду",
+    "четверг",
+    "пятницу",
+    "субботу",
+    "воскресенье",
+)
+
+# Короткий срок на кнопке кандидата (§12.6): «2 окт».
+MONTHS_SHORT = (
+    "янв",
+    "фев",
+    "мар",
+    "апр",
+    "мая",
+    "июн",
+    "июл",
+    "авг",
+    "сен",
+    "окт",
+    "ноя",
+    "дек",
+)
+
+
 def format_day(moment: datetime) -> str:
     """«пятница, 20 сентября» — как человек называет день вслух."""
     return f"{WEEKDAYS[moment.weekday()]}, {moment.day} {MONTHS[moment.month - 1]}"
@@ -73,6 +102,35 @@ def format_remind_at(fire_at: datetime, now: datetime) -> str:
     """
     day = "сегодня" if fire_at.date() == now.date() else format_date(fire_at)
     return f"{day} в {format_time(fire_at)}"
+
+
+def format_short_due(due_at: datetime, precision: str | None) -> str:
+    """Короткий срок на кнопке: «2 окт», со временем — «2 окт, 17:00» (§12.6).
+
+    Час — только когда его назвал человек, как у `format_due`.
+    """
+    day = f"{due_at.day} {MONTHS_SHORT[due_at.month - 1]}"
+    if precision == "time":
+        return f"{day}, {format_time(due_at)}"
+    return day
+
+
+def format_move_target(due_at: datetime, precision: str | None, now: datetime) -> str:
+    """Новый срок в вопросе «Какую задачу перенести …?» (§12.6).
+
+    «на пятницу, 2 октября», «на сегодня в 17:00», «на среду, 30 сентября,
+    в 09:00». Оба момента ждутся в поясе владельца.
+    """
+    if due_at.date() == now.date():
+        day = "на сегодня"
+        joint = " "
+    else:
+        weekday = WEEKDAYS_ACCUSATIVE[due_at.weekday()]
+        day = f"на {weekday}, {due_at.day} {MONTHS[due_at.month - 1]}"
+        joint = ", "
+    if precision == "time":
+        return f"{day}{joint}в {format_time(due_at)}"
+    return day
 
 
 def format_due_moment(due_at: datetime, now: datetime) -> str:
@@ -241,6 +299,72 @@ def moved_reply(title: str, due: str | None, remind_at: str | None) -> str:
     if not due:
         return DUE_REMOVED.format(title=title)
     return _retold(MOVED.format(title=title), due, remind_at, "normal", None)
+
+
+# Правка задачи словом (`techspec/12-chat-edit.md` §12.5): одной строкой,
+# тем же видом, что запись и «Перенёс» из приложения. Суть — из задачи после
+# правки, срок и «Напомню» — из того, что записано.
+MOVED_BY_WORD = "Перенёс: {title}"
+FIXED = "Поправил: {title}"
+REOPENED = "Вернул в работу: {title}"
+CLOSED = "Закрыл: {title}."
+CANCELLED = "Убрал из списка: {title}."
+UNCLEAR_EDIT = "Не понял, как поправить: {title}. {question}"
+NOTHING_TO_CHANGE = "Не понял, что поменять в задаче «{title}» — ничего не менял."
+NOT_FOUND_RECORDED = "Не нашёл открытой задачи — записал новую: {title}"
+NOT_FOUND = "Не нашёл открытой задачи «{title}» — ничего не менял."
+
+# Кнопки правки (§12.6): вопрос «какую задачу» называет действие.
+PICK_MOVE = "Какую задачу перенести {target}?"
+PICK_REMOVE_DUE = "С какой задачи снять срок?"
+PICK_DONE = "Какую задачу закрыть?"
+PICK_CANCEL = "Какую задачу убрать из списка?"
+PICK_CHANGE = "Какую задачу поправить?"
+REOPEN_BUTTON = "Вернуть"
+PICKED_GONE = "Задачу уже закрыли или удалили — ничего не менял."
+# Нажатие не записалось: вопрос с кнопками остаётся, и сказать об этом надо
+# прямо (инвариант 4) — как «Сделано», когда база не ответила.
+NOT_PICKED = "Не смог записать правку: база не ответила. Попробуйте ещё раз."
+NOT_REOPENED = "Не смог вернуть задачу: база не ответила. Попробуйте ещё раз."
+# Людей в правке не осталось: «Люди: …» с пустым списком читается как обрыв.
+NOBODY = "никого"
+
+
+def edited_reply(
+    head: str,
+    due: str | None,
+    remind_at: str | None = None,
+    priority: str | None = None,
+    people: Sequence[str] | None = None,
+) -> str:
+    """Ответ на правку словом: «Перенёс: …», «Поправил: …», «Вернул в работу: …».
+
+    `priority` и `people` — только когда правка их сменила: срочность
+    звучит словом и тогда, когда она вернулась к обычной, люди — списком
+    целиком (§12.5). «Напомню» — только о напоминании, которое вправду
+    впереди (§6.4).
+    """
+    parts = [head]
+    if due:
+        parts.append(f"Срок: {due}")
+    if remind_at:
+        parts.append(f"Напомню: {remind_at}")
+    if priority is not None:
+        parts.append(f"Приоритет: {PRIORITY_NAMES.get(priority, priority)}")
+    if people is not None:
+        parts.append(f"Люди: {', '.join(people) if people else NOBODY}")
+    return ". ".join(parts)
+
+
+def not_found_reply(
+    title: str,
+    due: str | None = None,
+    review_reason: str | None = None,
+    priority: str = "normal",
+    remind_at: str | None = None,
+) -> str:
+    """Перенос задачи, которой нет в списке, записан новой задачей (§12.3)."""
+    return _retold(NOT_FOUND_RECORDED.format(title=title), due, remind_at, priority, review_reason)
 
 
 # Напоминание и кнопка под ним (`techspec/06-reminders.md` §6.2, §6.3).

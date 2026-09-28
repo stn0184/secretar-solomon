@@ -9,7 +9,9 @@
 Расписание считает база (`techspec/11-edit.md` §11.3): одно правило на бота
 и на правку из приложения. Здесь же зеркало пояса владельца — его читает
 `edit_task`, которой окружение бота не видно, — и отметка «срок перенесён»,
-по которой минутный цикл пишет строку «Перенёс» (§11.4).
+по которой минутный цикл пишет строку «Перенёс» (§11.4). И кнопка «Вернуть»
+под «Закрыл» и «Убрал из списка» (`techspec/12-chat-edit.md` §12.6) — она
+возвращает задачу в работу вместе с новым планом напоминаний.
 """
 
 from __future__ import annotations
@@ -22,11 +24,12 @@ from typing import Any, Literal, get_args
 from supabase import Client
 
 from solomon.db.rpc import DatabaseError, ask, moment, single_row
-from solomon.db.tasks import Task, task_from_row
+from solomon.db.tasks import Task, TaskDetails, task_details_from_row, task_from_row
 
 DUE_REMINDERS_FUNCTION = "due_reminders"
 MARK_REMINDERS_SENT_FUNCTION = "mark_reminders_sent"
 MARK_TASK_DONE_FUNCTION = "mark_task_done"
+REOPEN_TASK_FUNCTION = "reopen_task"
 REMINDER_PLAN_FUNCTION = "reminder_plan"
 SAVE_OWNER_TIMEZONE_FUNCTION = "save_owner_timezone"
 MOVED_TASKS_FUNCTION = "moved_tasks"
@@ -248,3 +251,28 @@ async def mark_task_done(db: Client, *, owner_telegram_id: int, task_id: str) ->
     if data is None or (isinstance(data, Mapping) and data.get("id") is None):
         return None
     return task_from_row(data)
+
+
+async def reopen_task(
+    db: Client,
+    *,
+    owner_telegram_id: int,
+    task_id: str,
+    schedule: Sequence[Planned],
+) -> TaskDetails | None:
+    """Вернуть закрытую или убранную задачу в работу (§12.6).
+
+    `schedule` — план на момент нажатия от `reminder_plan`: база заменяет им
+    неотправленные напоминания и взводит заново ушедшую ступень, так что
+    строка «Напомню» называет ровно записанное. Уже активная задача
+    возвращается как есть, без записи; чужая или удалённая — `None`.
+    """
+    params = {
+        "owner_telegram_id": owner_telegram_id,
+        "task_id": task_id,
+        "schedule": [item.as_row() for item in schedule],
+    }
+    data = single_row(await ask(lambda: db.rpc(REOPEN_TASK_FUNCTION, params).execute().data))
+    if data is None or (isinstance(data, Mapping) and data.get("id") is None):
+        return None
+    return task_details_from_row(data)

@@ -18,8 +18,17 @@ from solomon.db import facts as db_facts
 from solomon.db import reminders as db_reminders
 from solomon.db import tasks as db_tasks
 from solomon.db.facts import Fact
+from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import OpenQuestion, SavedMessage, Task
+from solomon.db.tasks import (
+    OpenQuestion,
+    PickedMessage,
+    SavedMessage,
+    StoredMessage,
+    Task,
+    TaskDetails,
+    TaskEvent,
+)
 from tests.conftest import OWNER_TIMEZONE
 
 OWNER_ID = 777
@@ -61,6 +70,46 @@ MOVED_ROW = {
     "due_moved_at": "2026-09-28T07:15:42.123456+00:00",
     "next_fire_at": "2026-10-02T04:00:00+00:00",
 }
+TASK_ID = "5b0c7a52-8f3e-4c1d-9a6b-2e4f1d3c8b90"
+DETAIL_ROW = {
+    "id": TASK_ID,
+    "title": "встреча с Ренатой",
+    "kind": "task",
+    "status": "active",
+    "due_at": "2026-10-02T17:00:00+05:00",
+    "due_precision": "time",
+    "priority": "high",
+    "promise": None,
+    "people": ["Рената"],
+    "created_at": "2026-09-28T10:00:00+05:00",
+}
+DETAILS = TaskDetails(
+    id=TASK_ID,
+    title="встреча с Ренатой",
+    kind="task",
+    status="active",
+    due_at=datetime(2026, 10, 2, 17, 0, tzinfo=TZ),
+    due_precision="time",
+    priority="high",
+    promise=None,
+    people=("Рената",),
+    created_at=datetime(2026, 9, 28, 10, 0, tzinfo=TZ),
+)
+EDIT = {
+    "task_id": TASK_ID,
+    "action": "change",
+    "changes": {"due_date": "2026-10-02"},
+    "schedule": REMINDER_ROWS,
+    "question": None,
+}
+STORED_ROW: dict[str, Any] = {
+    "id": "9a71",
+    "text": "перенеси встречу на пятницу",
+    "task_id": None,
+    "analysis": {"kind": "chat", "edit": {"action": "change", "candidates": [1, 2]}},
+    "reply": "Какую задачу перенести на пятницу, 2 октября?",
+}
+SINCE = datetime(2026, 9, 29, 11, 0, tzinfo=TZ)
 REMINDER_ROW = {
     "id": "b17c",
     "task_id": "0e2f",
@@ -82,6 +131,7 @@ class FakeQuery:
 
     def __init__(self, client: FakeClient) -> None:
         self.client = client
+        self.negate = False
 
     def select(self, *columns: str) -> FakeQuery:
         self.client.calls.append(("select", columns))
@@ -91,8 +141,23 @@ class FakeQuery:
         self.client.calls.append(("eq", column, value))
         return self
 
-    def order(self, column: str, *, desc: bool = False) -> FakeQuery:
-        self.client.calls.append(("order", column, desc))
+    def order(
+        self, column: str, *, desc: bool = False, nullsfirst: bool | None = None
+    ) -> FakeQuery:
+        if nullsfirst is None:
+            self.client.calls.append(("order", column, desc))
+        else:
+            self.client.calls.append(("order", column, desc, nullsfirst))
+        return self
+
+    @property
+    def not_(self) -> FakeQuery:
+        self.negate = True
+        return self
+
+    def is_(self, column: str, value: Any) -> FakeQuery:
+        self.client.calls.append(("not.is" if self.negate else "is", column, value))
+        self.negate = False
         return self
 
     def gte(self, column: str, value: Any) -> FakeQuery:
@@ -249,8 +314,35 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
             "transcript": None,
             "transcript_confidence": None,
             "amend": None,
+            "edit": None,
         },
     )
+
+
+async def test_record_understanding_sends_the_edit_instead_of_a_task() -> None:
+    """Правка словом (§12.4): ни новой задачи, ни поправки по вопросу."""
+    fake = FakeClient(data=ROW)
+
+    task = await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a72",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=45,
+        reply="Перенёс: встреча с Ренатой",
+        task=None,
+        reminders=[],
+        facts=[],
+        edit=EDIT,
+    )
+
+    assert task == Task(id="0e2f", title="купить лампочку", status="active")
+    params = fake.calls[0][2]
+    assert params["task"] is None
+    assert params["amend"] is None
+    assert params["edit"] == EDIT
 
 
 async def test_record_understanding_sends_the_amendment_instead_of_a_task() -> None:
@@ -641,6 +733,280 @@ async def test_broken_question_row_is_a_failure(row: Any) -> None:
         await read_question(fake)
 
 
+async def test_open_tasks_are_asked_for_this_owner_in_prompt_order() -> None:
+    """Список для промпта (§12.2): свои активные, со сроком раньше, новые выше."""
+    fake = FakeClient(data=[DETAIL_ROW])
+
+    found = await db_tasks.list_open_tasks(as_client(fake), owner_telegram_id=OWNER_ID, limit=50)
+
+    assert found == [DETAILS]
+    assert ("table", "tasks") in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("eq", "status", "active") in fake.calls
+    orders = [call for call in fake.calls if call[0] == "order"]
+    assert orders == [("order", "due_at", False, False), ("order", "created_at", True)]
+    assert ("limit", 50) in fake.calls
+
+
+async def test_open_task_without_due_has_none() -> None:
+    fake = FakeClient(data=[{**DETAIL_ROW, "due_at": None, "due_precision": None}])
+
+    found = await db_tasks.list_open_tasks(as_client(fake), owner_telegram_id=OWNER_ID, limit=50)
+
+    assert found[0].due_at is None
+    assert found[0].due_precision is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {key: value for key, value in DETAIL_ROW.items() if key != "created_at"},
+        {**DETAIL_ROW, "people": "Рената"},
+        {**DETAIL_ROW, "due_at": "в пятницу"},
+        "не строка",
+    ],
+)
+async def test_broken_open_task_row_is_a_failure(row: Any) -> None:
+    """Неполная строка — отказ: номер в промпте указал бы на задачу вслепую."""
+    fake = FakeClient(data=[row])
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.list_open_tasks(as_client(fake), owner_telegram_id=OWNER_ID, limit=50)
+
+
+async def test_task_details_are_asked_by_owner_and_id_in_any_status() -> None:
+    """Кнопки приносят id снаружи (§12.6): фильтр по владельцу обязателен."""
+    fake = FakeClient(data=[{**DETAIL_ROW, "status": "cancelled"}])
+
+    found = await db_tasks.task_details(
+        as_client(fake), owner_telegram_id=OWNER_ID, task_id=TASK_ID
+    )
+
+    assert found is not None
+    assert found.status == "cancelled"
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("eq", "id", TASK_ID) in fake.calls
+    assert not any(call[:2] == ("eq", "status") for call in fake.calls)
+    assert ("limit", 1) in fake.calls
+
+
+async def test_missing_task_details_are_none() -> None:
+    fake = FakeClient(data=[])
+
+    assert (
+        await db_tasks.task_details(as_client(fake), owner_telegram_id=OWNER_ID, task_id=TASK_ID)
+        is None
+    )
+
+
+async def test_last_message_task_is_the_newest_message_about_a_task() -> None:
+    """Событие разговора (§12.2): своё сообщение с задачей, не раньше `since`."""
+    fake = FakeClient(data=[{"task_id": TASK_ID, "received_at": "2026-09-29T11:40:00+05:00"}])
+
+    found = await db_tasks.last_message_task(
+        as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE
+    )
+
+    assert found == TaskEvent(task_id=TASK_ID, at=datetime(2026, 9, 29, 11, 40, tzinfo=TZ))
+    assert ("table", "messages") in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("not.is", "task_id", "null") in fake.calls
+    assert ("gte", "received_at", SINCE.isoformat()) in fake.calls
+    assert ("order", "received_at", True) in fake.calls
+    assert ("limit", 1) in fake.calls
+
+
+async def test_last_reminder_task_is_the_newest_sent_reminder() -> None:
+    fake = FakeClient(data=[{"task_id": TASK_ID, "sent_at": "2026-09-29T11:50:00+05:00"}])
+
+    found = await db_tasks.last_reminder_task(
+        as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE
+    )
+
+    assert found == TaskEvent(task_id=TASK_ID, at=datetime(2026, 9, 29, 11, 50, tzinfo=TZ))
+    assert ("table", "reminders") in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("gte", "sent_at", SINCE.isoformat()) in fake.calls
+    assert ("order", "sent_at", True) in fake.calls
+    assert ("limit", 1) in fake.calls
+
+
+async def test_no_events_in_the_window_are_none() -> None:
+    fake = FakeClient(data=[])
+
+    assert (
+        await db_tasks.last_message_task(as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE)
+        is None
+    )
+    assert (
+        await db_tasks.last_reminder_task(as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE)
+        is None
+    )
+
+
+async def test_broken_event_row_is_a_failure() -> None:
+    fake = FakeClient(data=[{"task_id": TASK_ID}])
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.last_reminder_task(as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE)
+
+
+async def test_reminder_task_is_found_by_the_telegram_message() -> None:
+    """Свайп на напоминание (§12.2): его сообщение в Telegram — ключ к задаче."""
+    fake = FakeClient(data=[{"task_id": TASK_ID}])
+
+    found = await db_tasks.reminder_task_id(
+        as_client(fake), owner_telegram_id=OWNER_ID, telegram_message_id=51
+    )
+
+    assert found == TASK_ID
+    assert ("table", "reminders") in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("eq", "telegram_message_id", 51) in fake.calls
+
+
+async def test_other_bot_message_is_no_reminder() -> None:
+    fake = FakeClient(data=[])
+
+    assert (
+        await db_tasks.reminder_task_id(
+            as_client(fake), owner_telegram_id=OWNER_ID, telegram_message_id=51
+        )
+        is None
+    )
+
+
+async def test_stored_message_is_found_by_owner_chat_and_telegram_id() -> None:
+    fake = FakeClient(data=[STORED_ROW])
+
+    found = await db_tasks.message_by_telegram_id(
+        as_client(fake), owner_telegram_id=OWNER_ID, chat_id=OWNER_ID, telegram_message_id=7
+    )
+
+    assert found == StoredMessage(
+        id="9a71",
+        text="перенеси встречу на пятницу",
+        task_id=None,
+        analysis=STORED_ROW["analysis"],
+        reply="Какую задачу перенести на пятницу, 2 октября?",
+    )
+    assert ("table", "messages") in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("eq", "chat_id", OWNER_ID) in fake.calls
+    assert ("eq", "telegram_message_id", 7) in fake.calls
+
+
+async def test_unknown_stored_message_is_none() -> None:
+    fake = FakeClient(data=[])
+
+    assert (
+        await db_tasks.message_by_telegram_id(
+            as_client(fake), owner_telegram_id=OWNER_ID, chat_id=OWNER_ID, telegram_message_id=7
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {**STORED_ROW, "analysis": "перенос"},
+        {key: value for key, value in STORED_ROW.items() if key != "task_id"},
+    ],
+)
+async def test_broken_stored_message_is_a_failure(row: Any) -> None:
+    fake = FakeClient(data=[row])
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.message_by_telegram_id(
+            as_client(fake), owner_telegram_id=OWNER_ID, chat_id=OWNER_ID, telegram_message_id=7
+        )
+
+
+async def test_pick_task_sends_the_edit_and_the_reply() -> None:
+    """Кнопка кандидата (§12.6): правка, задача сообщения и ответ — одним вызовом."""
+    fake = FakeClient(data={"id": "9a71", "task_id": TASK_ID, "reply": "Перенёс: встреча"})
+
+    picked = await db_tasks.pick_task(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        message_id="9a71",
+        edit=EDIT,
+        reply="Перенёс: встреча",
+    )
+
+    assert picked == PickedMessage(id="9a71", task_id=TASK_ID, reply="Перенёс: встреча")
+    assert fake.calls[0] == (
+        "rpc",
+        "pick_task",
+        {
+            "owner_telegram_id": OWNER_ID,
+            "message_id": "9a71",
+            "edit": EDIT,
+            "reply": "Перенёс: встреча",
+        },
+    )
+
+
+async def test_pick_task_reports_a_gone_task_as_empty() -> None:
+    fake = FakeClient(data={"id": "9a71", "task_id": None, "reply": "Какую задачу закрыть?"})
+
+    picked = await db_tasks.pick_task(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        message_id="9a71",
+        edit=EDIT,
+        reply="Закрыл: встреча.",
+    )
+
+    assert picked.task_id is None
+
+
+async def test_pick_task_without_a_row_is_a_failure() -> None:
+    fake = FakeClient(data={"id": None, "task_id": None, "reply": None})
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.pick_task(
+            as_client(fake),
+            owner_telegram_id=OWNER_ID,
+            message_id="9a71",
+            edit=EDIT,
+            reply="Закрыл: встреча.",
+        )
+
+
+async def test_reopen_task_sends_the_plan_and_returns_the_task() -> None:
+    """«Вернуть» (§12.6): план на момент нажатия уходит в базу тем же вызовом."""
+    fake = FakeClient(data=DETAIL_ROW)
+    plan = [Planned(stage="due", fire_at=datetime(2026, 10, 2, 17, 0, tzinfo=TZ))]
+
+    task = await db_reminders.reopen_task(
+        as_client(fake), owner_telegram_id=OWNER_ID, task_id=TASK_ID, schedule=plan
+    )
+
+    assert task == DETAILS
+    assert fake.calls[0] == (
+        "rpc",
+        "reopen_task",
+        {
+            "owner_telegram_id": OWNER_ID,
+            "task_id": TASK_ID,
+            "schedule": [{"stage": "due", "fire_at": "2026-10-02T17:00:00+05:00"}],
+        },
+    )
+
+
+async def test_reopen_task_of_a_deleted_task_is_none() -> None:
+    fake = FakeClient(data={key: None for key in DETAIL_ROW})
+
+    assert (
+        await db_reminders.reopen_task(
+            as_client(fake), owner_telegram_id=OWNER_ID, task_id=TASK_ID, schedule=[]
+        )
+        is None
+    )
+
+
 def test_owner_is_required_by_every_query() -> None:
     """Инвариант 2 держится сигнатурой: владельца не забыть и не подставить."""
     for query in (
@@ -648,6 +1014,14 @@ def test_owner_is_required_by_every_query() -> None:
         db_tasks.record_understanding,
         db_tasks.list_active_tasks,
         db_tasks.open_question,
+        db_tasks.list_open_tasks,
+        db_tasks.task_details,
+        db_tasks.last_message_task,
+        db_tasks.last_reminder_task,
+        db_tasks.reminder_task_id,
+        db_tasks.message_by_telegram_id,
+        db_tasks.pick_task,
+        db_reminders.reopen_task,
         db_reminders.due_reminders,
         db_reminders.mark_sent,
         db_reminders.mark_task_done,
