@@ -6,10 +6,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from solomon import texts
 from solomon.db.tasks import OpenQuestion, SavedMessage, SpeechKind, Task
@@ -30,6 +33,7 @@ from tests.conftest import (
     SPOKEN,
     FakeAnalyst,
     FakeMessages,
+    FakeQuestions,
     FakeTranscriber,
     FakeUnderstandings,
     load_audio,
@@ -793,3 +797,303 @@ async def test_not_heard_is_still_said_when_the_reply_cannot_be_saved() -> None:
     outcome = await record_voice(service)
 
     assert outcome.message == texts.NOT_HEARD
+
+
+# --- Уточняющий вопрос (`techspec/10-dialog.md`) ---------------------------
+
+# Час спустя после вопроса: он открыт, и до пятничного срока ещё сутки.
+THURSDAY_AFTERNOON = ASKED.asked_at + timedelta(hours=1)
+ASKED_FOR_DUE = "К какому сроку?"
+
+
+def build_dialog_service(
+    analyst: FakeAnalyst,
+    questions: FakeQuestions | None = None,
+    transcriber: FakeTranscriber | None = None,
+) -> tuple[TaskService, FakeQuestions, FakeUnderstandings]:
+    """Сервис с открытым вопросом `ASKED` и часами на четверг, 13:00."""
+    reader = questions or FakeQuestions(ASKED)
+    understandings = FakeUnderstandings()
+    service = TaskService(
+        settings=SETTINGS,
+        record_message=FakeMessages(),
+        record_understanding=understandings,
+        analyst=analyst,
+        transcriber=transcriber or FakeTranscriber(),
+        clock=lambda: THURSDAY_AFTERNOON,
+        open_question=reader,
+    )
+    return service, reader, understandings
+
+
+async def say(service: TaskService, text: str) -> RecordOutcome:
+    return await service.record_from_message(chat_id=42, telegram_message_id=8, text=text)
+
+
+async def test_question_records_the_task_at_once_and_asks_it() -> None:
+    """§10.1: задача уже в базе, с пометкой и вопросом; вопрос — вторая фраза."""
+    analyst = FakeAnalyst(
+        make_understanding(
+            title="отправить расчёт клиенту",
+            priority="high",
+            needs_review=True,
+            review_reason="Не назван срок.",
+            question=ASKED_FOR_DUE,
+        )
+    )
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions())
+
+    outcome = await say(service, "срочно отправить расчёт клиенту")
+
+    assert outcome.ok
+    assert outcome.message == "Записал: отправить расчёт клиенту. К какому сроку?"
+    assert "Напомню" not in outcome.message
+    saved = understandings.calls[0]
+    assert saved["reply"] == outcome.message
+    assert saved["reminders"] == []
+    assert saved["amend"] is None
+    task = saved["task"]
+    assert isinstance(task, dict)
+    assert task["title"] == "отправить расчёт клиенту"
+    assert task["priority"] == "high"
+    assert task["needs_review"] is True
+    assert task["open_question"] == ASKED_FOR_DUE
+
+
+async def test_question_marks_the_task_for_review_even_if_the_model_did_not() -> None:
+    analyst = FakeAnalyst(make_understanding(title="позвонить", question="Кому позвонить?"))
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions())
+
+    outcome = await say(service, "позвонить завтра")
+
+    assert outcome.message == "Записал: позвонить. Кому позвонить?"
+    task = understandings.calls[0]["task"]
+    assert isinstance(task, dict)
+    assert task["needs_review"] is True
+
+
+async def test_question_with_a_due_names_the_due_and_the_reminder_first() -> None:
+    analyst = FakeAnalyst(
+        make_understanding(
+            title="позвонить",
+            due_at=FRIDAY_DUE,
+            due_precision="day",
+            needs_review=True,
+            question="Кому позвонить?",
+        )
+    )
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions())
+
+    outcome = await say(service, "в пятницу позвонить")
+
+    assert outcome.message == (
+        "Записал: позвонить. Срок: пятница, 18 сентября. "
+        "Напомню: 18 сентября в 09:00. Кому позвонить?"
+    )
+    reminders = understandings.calls[0]["reminders"]
+    assert isinstance(reminders, list)
+    assert [row["stage"] for row in reminders] == ["before", "due"]
+
+
+async def test_idea_gets_no_question_even_if_the_model_gave_one() -> None:
+    """Идеи, желания, разговор и память вопросов не получают (§10.1)."""
+    analyst = FakeAnalyst(
+        make_understanding(kind="idea", title="съездить на Байкал", question="Когда?")
+    )
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions())
+
+    outcome = await say(service, "было бы здорово съездить на Байкал")
+
+    assert outcome.message == "Записал идею: съездить на Байкал"
+    task = understandings.calls[0]["task"]
+    assert isinstance(task, dict)
+    assert "open_question" not in task
+
+
+async def test_blank_question_is_no_question() -> None:
+    analyst = FakeAnalyst(make_understanding(title="купить лампочку", question="  "))
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions())
+
+    outcome = await say(service, "купить лампочку")
+
+    assert outcome.message == "Записал: купить лампочку"
+    task = understandings.calls[0]["task"]
+    assert isinstance(task, dict)
+    assert "open_question" not in task
+
+
+async def test_task_without_question_is_recorded_as_before() -> None:
+    """`question = null` — всё как до этапа: ни ключа, ни второй фразы."""
+    analyst = FakeAnalyst(make_understanding(title="купить лампочку"))
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions())
+
+    outcome = await say(service, "купить лампочку")
+
+    assert outcome.message == "Записал: купить лампочку"
+    saved = understandings.calls[0]
+    assert saved["amend"] is None
+    task = saved["task"]
+    assert isinstance(task, dict)
+    assert "open_question" not in task
+    assert task["needs_review"] is False
+
+
+async def test_open_question_of_the_last_day_reaches_the_model() -> None:
+    analyst = FakeAnalyst(make_understanding(title="купить лампочку"))
+    service, questions, _ = build_dialog_service(analyst)
+
+    await say(service, "купить лампочку")
+
+    assert questions.calls == [(OWNER_ID, THURSDAY_AFTERNOON - timedelta(hours=24))]
+    assert analyst.questions == [ASKED]
+
+
+async def test_question_older_than_a_day_does_not_reach_the_model() -> None:
+    """§10.3: молчание дольше суток — блока в промпте нет."""
+    stale = replace(ASKED, asked_at=THURSDAY_AFTERNOON - timedelta(hours=25))
+    analyst = FakeAnalyst(make_understanding(title="в пятницу", answers_question=True))
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions(stale))
+
+    outcome = await say(service, "в пятницу")
+
+    assert analyst.questions == [None]
+    # «Ответ» без открытого вопроса отвечать не на что — обычная запись.
+    assert understandings.calls[0]["amend"] is None
+    assert outcome.message == "Записал: в пятницу"
+
+
+async def test_question_read_failure_is_logged_and_the_analysis_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    analyst = FakeAnalyst(make_understanding(title="купить лампочку"))
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions(broken=True))
+
+    with caplog.at_level(logging.ERROR):
+        outcome = await say(service, "купить лампочку")
+
+    assert outcome.ok
+    assert outcome.message == "Записал: купить лампочку"
+    assert analyst.questions == [None]
+    assert understandings.calls[0]["task"] is not None
+    assert "Открытый вопрос не прочитан" in caplog.text
+
+
+async def test_answer_amends_the_asked_task_and_says_understood() -> None:
+    """§10.2: новые поля и напоминания — в ту же задачу, новой задачи нет."""
+    analyst = FakeAnalyst(answer(due_at=FRIDAY_DUE, due_precision="day"))
+    service, _, understandings = build_dialog_service(analyst)
+
+    outcome = await say(service, "в пятницу")
+
+    assert outcome.ok
+    assert outcome.message == (
+        "Понял: отправить расчёт клиенту. Срок: пятница, 18 сентября. Напомню: 18 сентября в 09:00"
+    )
+    saved = understandings.calls[0]
+    assert saved["task"] is None
+    assert saved["reminders"] == []
+    assert saved["reply"] == outcome.message
+    assert saved["amend"] == {
+        "task_id": ASKED.task_id,
+        "fields": {
+            "due_at": FRIDAY_DUE.isoformat(),
+            "due_precision": "day",
+            "needs_review": False,
+        },
+        "reminders": [
+            {"stage": "before", "fire_at": FRIDAY_DUE.replace(hour=9).isoformat()},
+            {"stage": "due", "fire_at": FRIDAY_DUE.isoformat()},
+        ],
+    }
+
+
+async def test_unclear_answer_keeps_the_mark_and_asks_nothing_more() -> None:
+    """Второго вопроса нет (§10.4): причина вместо него, пометка остаётся."""
+    analyst = FakeAnalyst(
+        answer(needs_review=True, review_reason="Не понял, к какому дню.", question="Когда?")
+    )
+    service, _, understandings = build_dialog_service(analyst)
+
+    outcome = await say(service, "ну как обычно")
+
+    assert outcome.message == "Понял: отправить расчёт клиенту. Не понял, к какому дню."
+    amend = understandings.calls[0]["amend"]
+    assert isinstance(amend, dict)
+    assert amend["fields"] == {"needs_review": True}
+    assert amend["reminders"] == []
+    assert understandings.calls[0]["task"] is None
+
+
+async def test_answer_that_changes_the_priority_names_it() -> None:
+    analyst = FakeAnalyst(answer(priority="low"))
+    service, _, _ = build_dialog_service(analyst)
+
+    outcome = await say(service, "не горит")
+
+    assert outcome.message == "Понял: отправить расчёт клиенту. Приоритет: низкий"
+
+
+async def test_new_errand_while_asked_is_an_ordinary_task() -> None:
+    """`answers_question = false` — обычная запись; вопрос снимет база (§3.4)."""
+    analyst = FakeAnalyst(make_understanding(title="купить лампочку"))
+    service, _, understandings = build_dialog_service(analyst)
+
+    outcome = await say(service, "купить лампочку")
+
+    assert outcome.message == "Записал: купить лампочку"
+    saved = understandings.calls[0]
+    assert saved["amend"] is None
+    task = saved["task"]
+    assert isinstance(task, dict)
+    assert task["title"] == "купить лампочку"
+
+
+@pytest.mark.parametrize("kind", ["chat", "about_me"])
+async def test_chat_or_memory_while_asked_records_no_task(kind: str) -> None:
+    analyst = FakeAnalyst(make_understanding(kind=kind, title="спасибо"))
+    service, _, understandings = build_dialog_service(analyst)
+
+    await say(service, "спасибо")
+
+    saved = understandings.calls[0]
+    assert saved["task"] is None
+    assert saved["amend"] is None
+
+
+async def test_voice_answer_goes_the_same_way_as_text() -> None:
+    analyst = FakeAnalyst(answer(due_at=FRIDAY_DUE, due_precision="day"))
+    transcriber = FakeTranscriber(Transcript(text="в пятницу", confidence=0.95))
+    service, _, understandings = build_dialog_service(analyst, transcriber=transcriber)
+
+    outcome = await record_voice(service)
+
+    assert outcome.message.startswith("Понял: отправить расчёт клиенту. Срок: пятница")
+    assert analyst.calls == [("в пятницу", None, "fine")]
+    assert analyst.questions == [ASKED]
+    saved = understandings.calls[0]
+    assert saved["transcript"] == "в пятницу"
+    assert saved["task"] is None
+    amend = saved["amend"]
+    assert isinstance(amend, dict)
+    assert amend["task_id"] == ASKED.task_id
+
+
+async def test_repeated_update_does_not_read_the_question() -> None:
+    """Повтор отвечает сохранённым ответом: ни вопроса, ни модели."""
+    analyst = FakeAnalyst(answer(due_at=FRIDAY_DUE, due_precision="day"))
+    questions = FakeQuestions(ASKED)
+    service = TaskService(
+        settings=SETTINGS,
+        record_message=FakeMessages(SavedMessage(id="9a71", reply="Понял: …")),
+        record_understanding=FakeUnderstandings(),
+        analyst=analyst,
+        transcriber=FakeTranscriber(),
+        clock=lambda: THURSDAY_AFTERNOON,
+        open_question=questions,
+    )
+
+    outcome = await say(service, "в пятницу")
+
+    assert outcome.message == "Понял: …"
+    assert questions.calls == []
+    assert analyst.calls == []
