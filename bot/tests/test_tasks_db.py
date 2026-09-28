@@ -53,6 +53,14 @@ QUESTION_ROW = {
     "open_question": "К какому сроку?",
     "question_asked_at": "2026-09-24T12:00:00+05:00",
 }
+MOVED_ROW = {
+    "id": "0e2f",
+    "title": "отправить расчёт клиенту",
+    "due_at": "2026-10-02T13:00:00+00:00",
+    "due_precision": "day",
+    "due_moved_at": "2026-09-28T07:15:42.123456+00:00",
+    "next_fire_at": "2026-10-02T04:00:00+00:00",
+}
 REMINDER_ROW = {
     "id": "b17c",
     "task_id": "0e2f",
@@ -453,6 +461,88 @@ async def test_mark_task_done_returns_nothing_for_a_foreign_task() -> None:
     assert task is None
 
 
+async def test_moved_tasks_are_asked_for_this_owner() -> None:
+    """Строки «Перенёс»: владелец уходит в функцию явно (§11.4, инвариант 2)."""
+    fake = FakeClient(data=[MOVED_ROW])
+
+    moved = await db_reminders.moved_tasks(as_client(fake), owner_telegram_id=OWNER_ID)
+
+    assert fake.calls[0] == ("rpc", "moved_tasks", {"owner_telegram_id": OWNER_ID})
+    task = moved[0]
+    assert task.id == "0e2f"
+    assert task.title == "отправить расчёт клиенту"
+    assert task.due_at == datetime(2026, 10, 2, 18, 0, tzinfo=TZ)
+    assert task.due_precision == "day"
+    assert task.due_moved_at == datetime.fromisoformat("2026-09-28T07:15:42.123456+00:00")
+    assert task.next_fire_at == datetime(2026, 10, 2, 9, 0, tzinfo=TZ)
+
+
+async def test_moved_task_without_due_has_no_reminder() -> None:
+    """Срок снят: ни срока, ни ближайшего напоминания — и это не отказ."""
+    fake = FakeClient(
+        data=[{**MOVED_ROW, "due_at": None, "due_precision": None, "next_fire_at": None}]
+    )
+
+    moved = await db_reminders.moved_tasks(as_client(fake), owner_telegram_id=OWNER_ID)
+
+    assert moved[0].due_at is None
+    assert moved[0].due_precision is None
+    assert moved[0].next_fire_at is None
+
+
+async def test_no_moved_tasks_is_an_empty_list() -> None:
+    fake = FakeClient(data=None)
+
+    assert await db_reminders.moved_tasks(as_client(fake), owner_telegram_id=OWNER_ID) == []
+
+
+async def test_moved_row_without_the_mark_is_a_failure() -> None:
+    """Без отметки снимать нечего — отказ, а не строка, которую не погасить."""
+    row = {key: value for key, value in MOVED_ROW.items() if key != "due_moved_at"}
+    fake = FakeClient(data=[row])
+
+    with pytest.raises(DatabaseError):
+        await db_reminders.moved_tasks(as_client(fake), owner_telegram_id=OWNER_ID)
+
+
+async def test_clear_due_moved_sends_the_seen_mark_back() -> None:
+    """Снимается ровно прочитанная отметка: момент уходит обратно без потерь."""
+    fake = FakeClient(data=True)
+    seen = datetime.fromisoformat(MOVED_ROW["due_moved_at"])
+
+    cleared = await db_reminders.clear_due_moved(
+        as_client(fake), owner_telegram_id=OWNER_ID, task_id="0e2f", seen=seen
+    )
+
+    assert cleared is True
+    assert fake.calls[0] == (
+        "rpc",
+        "clear_due_moved",
+        {"owner_telegram_id": OWNER_ID, "task_id": "0e2f", "seen": seen.isoformat()},
+    )
+    assert datetime.fromisoformat(seen.isoformat()) == seen
+
+
+async def test_clear_due_moved_reports_a_changed_mark() -> None:
+    fake = FakeClient(data=False)
+
+    assert (
+        await db_reminders.clear_due_moved(
+            as_client(fake), owner_telegram_id=OWNER_ID, task_id="0e2f", seen=datetime.now(TZ)
+        )
+        is False
+    )
+
+
+async def test_clear_due_moved_without_an_answer_is_a_failure() -> None:
+    fake = FakeClient(data=None)
+
+    with pytest.raises(DatabaseError):
+        await db_reminders.clear_due_moved(
+            as_client(fake), owner_telegram_id=OWNER_ID, task_id="0e2f", seen=datetime.now(TZ)
+        )
+
+
 async def test_known_facts_are_asked_for_this_owner_and_status_only() -> None:
     """В промпт уходят только факты владельца (§8.2): предположений там нет."""
     fake = FakeClient(data=[FACT_ROW])
@@ -561,6 +651,9 @@ def test_owner_is_required_by_every_query() -> None:
         db_reminders.due_reminders,
         db_reminders.mark_sent,
         db_reminders.mark_task_done,
+        db_reminders.save_owner_timezone,
+        db_reminders.moved_tasks,
+        db_reminders.clear_due_moved,
         db_facts.list_facts,
     ):
         parameter = inspect.signature(query).parameters["owner_telegram_id"]

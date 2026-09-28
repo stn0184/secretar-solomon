@@ -225,6 +225,24 @@ def understood_reply(
     return _retold(UNDERSTOOD.format(title=title), due, remind_at, priority, review_reason)
 
 
+# Правка из приложения перенесла срок (`techspec/11-edit.md` §11.4): тот же
+# пересказ, что у ответа на вопрос, но словом «Перенёс». Срок сняли — одна
+# фраза, и обещаний больше нет.
+MOVED = "Перенёс: {title}"
+DUE_REMOVED = "Убрал срок: {title}. Напоминать не буду."
+
+
+def moved_reply(title: str, due: str | None, remind_at: str | None) -> str:
+    """«Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября. Напомню: …».
+
+    `due` пуст — срок снят, и строка «Убрал срок». «Напомню» только тогда,
+    когда напоминание вправду впереди (§6.4).
+    """
+    if not due:
+        return DUE_REMOVED.format(title=title)
+    return _retold(MOVED.format(title=title), due, remind_at, "normal", None)
+
+
 # Напоминание и кнопка под ним (`techspec/06-reminders.md` §6.2, §6.3).
 DONE_BUTTON = "Сделано"
 DONE_MARK = "✓ Сделано"

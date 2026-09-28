@@ -8,7 +8,8 @@
 
 Расписание считает база (`techspec/11-edit.md` §11.3): одно правило на бота
 и на правку из приложения. Здесь же зеркало пояса владельца — его читает
-`edit_task`, которой окружение бота не видно.
+`edit_task`, которой окружение бота не видно, — и отметка «срок перенесён»,
+по которой минутный цикл пишет строку «Перенёс» (§11.4).
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ MARK_REMINDERS_SENT_FUNCTION = "mark_reminders_sent"
 MARK_TASK_DONE_FUNCTION = "mark_task_done"
 REMINDER_PLAN_FUNCTION = "reminder_plan"
 SAVE_OWNER_TIMEZONE_FUNCTION = "save_owner_timezone"
+MOVED_TASKS_FUNCTION = "moved_tasks"
+CLEAR_DUE_MOVED_FUNCTION = "clear_due_moved"
 
 Stage = Literal["before", "due"]
 
@@ -95,6 +98,72 @@ async def save_owner_timezone(db: Client, *, owner_telegram_id: int, timezone: s
     """
     params = {"owner_telegram_id": owner_telegram_id, "timezone": timezone}
     await ask(lambda: db.rpc(SAVE_OWNER_TIMEZONE_FUNCTION, params).execute().data)
+
+
+@dataclass(frozen=True, slots=True)
+class MovedTask:
+    """Задача, которой правка из приложения перенесла срок (§11.4).
+
+    Всё, из чего строка «Перенёс» собирается в момент отправки: суть, срок,
+    каким он лежит в базе сейчас, и ближайшее неотправленное напоминание.
+    `due_moved_at` — прочитанная отметка: снимается ровно она.
+    """
+
+    id: str
+    title: str
+    due_at: datetime | None
+    due_precision: str | None
+    due_moved_at: datetime
+    next_fire_at: datetime | None
+
+
+def _moved_from_row(row: Any) -> MovedTask:
+    """Разобрать строку. Без отметки — отказ: такую строку не погасить."""
+    if not isinstance(row, Mapping):
+        raise DatabaseError("База вернула не строку переноса.")
+    try:
+        due_at = row["due_at"]
+        next_fire_at = row["next_fire_at"]
+        return MovedTask(
+            id=str(row["id"]),
+            title=str(row["title"]),
+            due_at=None if due_at is None else moment(due_at, "due_at"),
+            due_precision=None if row["due_precision"] is None else str(row["due_precision"]),
+            due_moved_at=moment(row["due_moved_at"], "due_moved_at"),
+            next_fire_at=None if next_fire_at is None else moment(next_fire_at, "next_fire_at"),
+        )
+    except KeyError as error:
+        raise DatabaseError(f"В ответе базы нет поля переноса: {error}.") from error
+
+
+async def moved_tasks(db: Client, *, owner_telegram_id: int) -> list[MovedTask]:
+    """Активные задачи владельца с отметкой «срок перенесён» (§11.4).
+
+    Закрытые и удалённые база не отдаёт: о них строки нет.
+    """
+    params = {"owner_telegram_id": owner_telegram_id}
+    rows = await ask(lambda: db.rpc(MOVED_TASKS_FUNCTION, params).execute().data)
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise DatabaseError("База вернула не список переносов.")
+    return [_moved_from_row(row) for row in rows]
+
+
+async def clear_due_moved(
+    db: Client, *, owner_telegram_id: int, task_id: str, seen: datetime
+) -> bool:
+    """Снять отметку после отправки строки — только если она всё ещё `seen`.
+
+    `False` — правка пришла между чтением и снятием: отметка остаётся, и
+    следующий тик скажет о последнем сроке. Порядок тот же, что у
+    напоминаний: сначала отправка, потом отметка (§6.2).
+    """
+    params = {"owner_telegram_id": owner_telegram_id, "task_id": task_id, "seen": seen.isoformat()}
+    data = await ask(lambda: db.rpc(CLEAR_DUE_MOVED_FUNCTION, params).execute().data)
+    if not isinstance(data, bool):
+        raise DatabaseError(f"База не ответила, снята ли отметка: {data!r}.")
+    return data
 
 
 @dataclass(frozen=True, slots=True)

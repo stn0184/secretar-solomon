@@ -45,7 +45,9 @@ def build_reminders(settings: Settings, db: Client, bot: Bot) -> ReminderService
     Отправка приходит в сервис замыканием, а не объектом aiogram: сервис
     остаётся без знания о Telegram, а кнопка собирается там же, где разбирается
     её нажатие (`handlers.py`). Чат — личный чат владельца: его id совпадает
-    с id пользователя, других чатов у помощника нет.
+    с id пользователя, других чатов у помощника нет. Строка «Перенёс»
+    (`techspec/11-edit.md` §11.4) уходит своим замыканием — без кнопки:
+    это не напоминание.
     """
 
     async def notify(*, text: str, task_id: str) -> int:
@@ -56,7 +58,11 @@ def build_reminders(settings: Settings, db: Client, bot: Bot) -> ReminderService
         )
         return message.message_id
 
-    return ReminderService.with_database(settings, db, notify)
+    async def announce(*, text: str) -> int:
+        message = await bot.send_message(chat_id=settings.owner_telegram_id, text=text)
+        return message.message_id
+
+    return ReminderService.with_database(settings, db, notify, announce)
 
 
 def build_dispatcher(

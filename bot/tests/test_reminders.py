@@ -19,7 +19,7 @@ from aiogram.types import InlineKeyboardMarkup
 from supabase import Client
 
 from solomon import texts
-from solomon.db.reminders import DueReminder, Planned
+from solomon.db.reminders import DueReminder, MovedTask, Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import Task
 from solomon.handlers import done_keyboard
@@ -361,15 +361,63 @@ class FakeMarks:
 class FakeNotifier:
     """Вместо Telegram — список отправленного; сломанный роняет отправку."""
 
-    def __init__(self, broken: bool = False) -> None:
+    def __init__(self, broken: bool = False, events: list[str] | None = None) -> None:
         self.broken = broken
         self.sent: list[tuple[str, str]] = []
+        self.events = events if events is not None else []
 
     async def __call__(self, *, text: str, task_id: str) -> int:
         if self.broken:
             raise RuntimeError("Telegram: Bad Gateway")
         self.sent.append((task_id, text))
+        self.events.append("reminder")
         return 40 + len(self.sent)
+
+
+class FakeMoved:
+    """`moved_tasks` без базы: что лежит с отметкой «срок перенесён»."""
+
+    def __init__(self, tasks: list[MovedTask] | None = None, broken: bool = False) -> None:
+        self.tasks = tasks or []
+        self.broken = broken
+        self.calls: list[int] = []
+
+    async def __call__(self, *, owner_telegram_id: int) -> list[MovedTask]:
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        self.calls.append(owner_telegram_id)
+        return list(self.tasks)
+
+
+class FakeClearMoved:
+    """`clear_due_moved` без базы: что снимали и сменилась ли отметка."""
+
+    def __init__(self, cleared: bool = True, broken: bool = False) -> None:
+        self.cleared = cleared
+        self.broken = broken
+        self.calls: list[tuple[int, str, datetime]] = []
+
+    async def __call__(self, *, owner_telegram_id: int, task_id: str, seen: datetime) -> bool:
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        self.calls.append((owner_telegram_id, task_id, seen))
+        return self.cleared
+
+
+class FakeAnnouncer:
+    """Строка в чат без кнопки: вместо Telegram — список текстов."""
+
+    def __init__(self, broken: bool = False, events: list[str] | None = None) -> None:
+        self.broken = broken
+        self.sent: list[str] = []
+        self.events = events if events is not None else []
+
+    async def __call__(self, *, text: str) -> int:
+        if self.broken:
+            raise RuntimeError("Telegram: Bad Gateway")
+        self.sent.append(text)
+        self.events.append("moved")
+        return 60 + len(self.sent)
 
 
 class FakeCloser:
@@ -392,6 +440,9 @@ def build_reminders(
     marks: FakeMarks | None = None,
     notifier: FakeNotifier | None = None,
     closer: FakeCloser | None = None,
+    moved: FakeMoved | None = None,
+    clear_moved: FakeClearMoved | None = None,
+    announcer: FakeAnnouncer | None = None,
 ) -> tuple[ReminderService, FakeDue, FakeMarks, FakeNotifier]:
     """Сервис напоминаний на подделках: ни базы, ни сети."""
     lister = due or FakeDue()
@@ -403,6 +454,9 @@ def build_reminders(
         mark_sent=marker,
         close_task=closer or FakeCloser(),
         notify=sender,
+        moved=moved or FakeMoved(),
+        clear_moved=clear_moved or FakeClearMoved(),
+        announce=announcer or FakeAnnouncer(),
         clock=lambda: FRIDAY_END_OF_DAY,
     )
     return service, lister, marker, sender
@@ -516,6 +570,9 @@ def build_dispatcher_with(closer: FakeCloser) -> Dispatcher:
         mark_sent=FakeMarks(),
         close_task=closer,
         notify=FakeNotifier(),
+        moved=FakeMoved(),
+        clear_moved=FakeClearMoved(),
+        announce=FakeAnnouncer(),
         clock=lambda: FRIDAY_END_OF_DAY,
     )
     return build_dispatcher(settings, reminders=service)
@@ -617,7 +674,7 @@ async def test_reminder_goes_to_the_owner_with_the_button(
     assert sent.text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
     assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
     assert sent.reply_markup.inline_keyboard[0][0].callback_data == "done:0e2f"
-    assert client.calls == ["due_reminders", "mark_reminders_sent"]
+    assert client.calls == ["due_reminders", "mark_reminders_sent", "moved_tasks"]
 
 
 async def test_late_reminder_does_not_age_the_due_date() -> None:
@@ -628,3 +685,222 @@ async def test_late_reminder_does_not_age_the_due_date() -> None:
     assert await service.tick(FRIDAY_END_OF_DAY.replace(hour=12)) == 1
     _, text = notifier.sent[0]
     assert text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
+
+
+# Строка «Перенёс» (`techspec/11-edit.md` §11.4). Срок сдвинули в приложении
+# в понедельник утром: с пятницы 25-го на пятницу 2 октября.
+NEXT_FRIDAY = datetime(2026, 10, 2, 18, 0, tzinfo=TZ)
+MOVED_AT = datetime(2026, 9, 21, 9, 55, 12, 345678, tzinfo=ZoneInfo("UTC"))
+
+
+def make_moved(**fields: object) -> MovedTask:
+    """Задача с отметкой «срок перенесён», как её приносит `moved_tasks`."""
+    base: dict[str, object] = {
+        "id": "0e2f",
+        "title": "отправить расчёт клиенту",
+        "due_at": NEXT_FRIDAY,
+        "due_precision": "day",
+        "due_moved_at": MOVED_AT,
+        # База отдаёт момент в UTC — строка называет его по часам владельца.
+        "next_fire_at": NEXT_FRIDAY.replace(hour=9).astimezone(ZoneInfo("UTC")),
+    }
+    return MovedTask(**{**base, **fields})  # type: ignore[arg-type]
+
+
+async def test_moved_due_is_announced_and_then_cleared() -> None:
+    """Правка перенесла срок: строка в чат, потом снятие прочитанной отметки."""
+    moved = FakeMoved([make_moved()])
+    clear = FakeClearMoved()
+    announcer = FakeAnnouncer()
+    service, _, _, notifier = build_reminders(moved=moved, clear_moved=clear, announcer=announcer)
+
+    assert await service.tick(MONDAY_MORNING) == 1
+    assert moved.calls == [OWNER_ID]
+    assert announcer.sent == [
+        "Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября. Напомню: 2 октября в 09:00"
+    ]
+    assert clear.calls == [(OWNER_ID, "0e2f", MOVED_AT)]
+    # Это не напоминание: кнопки «Сделано» под строкой нет.
+    assert notifier.sent == []
+
+
+async def test_due_with_an_hour_is_named_with_the_hour() -> None:
+    at_three = NEXT_FRIDAY.replace(hour=15)
+    announcer = FakeAnnouncer()
+    service, _, _, _ = build_reminders(
+        moved=FakeMoved(
+            [
+                make_moved(
+                    due_at=at_three,
+                    due_precision="time",
+                    next_fire_at=at_three.replace(hour=14),
+                )
+            ]
+        ),
+        announcer=announcer,
+    )
+
+    await service.tick(MONDAY_MORNING)
+
+    assert announcer.sent == [
+        "Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября, 15:00. "
+        "Напомню: 2 октября в 14:00"
+    ]
+
+
+async def test_reminders_go_first_then_moved_lines() -> None:
+    """Сначала созревшее, потом «Перенёс»: «Напомню» не назовёт ушедшую ступень."""
+    events: list[str] = []
+    service, _, _, _ = build_reminders(
+        due=FakeDue([make_due("due", FRIDAY_END_OF_DAY)]),
+        notifier=FakeNotifier(events=events),
+        moved=FakeMoved([make_moved()]),
+        announcer=FakeAnnouncer(events=events),
+    )
+
+    assert await service.tick(FRIDAY_END_OF_DAY) == 2
+    assert events == ["reminder", "moved"]
+
+
+async def test_edit_between_read_and_clear_is_not_lost(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Отметка сменилась до снятия — она остаётся, и следующий тик скажет о новом сроке."""
+    later = NEXT_FRIDAY.replace(day=9)
+    second_mark = MOVED_AT.replace(minute=58)
+    moved = FakeMoved([make_moved()])
+    clear = FakeClearMoved(cleared=False)
+    announcer = FakeAnnouncer()
+    service, _, _, _ = build_reminders(moved=moved, clear_moved=clear, announcer=announcer)
+
+    with caplog.at_level("INFO"):
+        assert await service.tick(MONDAY_MORNING) == 1
+    assert "сменилась" in caplog.text
+
+    moved.tasks = [
+        make_moved(
+            due_at=later,
+            due_moved_at=second_mark,
+            next_fire_at=later.replace(hour=9),
+        )
+    ]
+    clear.cleared = True
+    assert await service.tick(MONDAY_MORNING) == 1
+
+    assert announcer.sent[1] == (
+        "Перенёс: отправить расчёт клиенту. Срок: пятница, 9 октября. Напомню: 9 октября в 09:00"
+    )
+    assert [call[2] for call in clear.calls] == [MOVED_AT, second_mark]
+
+
+async def test_closed_task_gets_no_line() -> None:
+    """Закрытую и удалённую задачу база не отдаёт — строки нет и снимать нечего."""
+    clear = FakeClearMoved()
+    announcer = FakeAnnouncer()
+    service, _, _, _ = build_reminders(moved=FakeMoved([]), clear_moved=clear, announcer=announcer)
+
+    assert await service.tick(MONDAY_MORNING) == 0
+    assert announcer.sent == []
+    assert clear.calls == []
+
+
+async def test_past_due_has_no_remind_line() -> None:
+    """Срок перенесли в прошлое — «Напомню» не звучит (§6.4)."""
+    sunday = MONDAY_MORNING.replace(day=20, hour=18)
+    announcer = FakeAnnouncer()
+    service, _, _, _ = build_reminders(
+        moved=FakeMoved([make_moved(due_at=sunday, next_fire_at=None)]),
+        announcer=announcer,
+    )
+
+    await service.tick(MONDAY_MORNING)
+
+    assert announcer.sent == ["Перенёс: отправить расчёт клиенту. Срок: воскресенье, 20 сентября"]
+
+
+async def test_reminder_already_due_is_not_promised() -> None:
+    """Ближайшее напоминание в прошлом (бот лежал) — обещать его поздно."""
+    announcer = FakeAnnouncer()
+    service, _, _, _ = build_reminders(
+        moved=FakeMoved([make_moved(next_fire_at=MONDAY_MORNING.replace(hour=9))]),
+        announcer=announcer,
+    )
+
+    await service.tick(MONDAY_MORNING)
+
+    assert announcer.sent == ["Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября"]
+
+
+async def test_removed_due_says_so() -> None:
+    """Срок снят: «Убрал срок» и больше ничего не обещано."""
+    announcer = FakeAnnouncer()
+    service, _, _, _ = build_reminders(
+        moved=FakeMoved([make_moved(due_at=None, due_precision=None, next_fire_at=None)]),
+        announcer=announcer,
+    )
+
+    await service.tick(MONDAY_MORNING)
+
+    assert announcer.sent == ["Убрал срок: отправить расчёт клиенту. Напоминать не буду."]
+    assert texts.moved_reply(title="купить лампочку", due=None, remind_at=None) == (
+        "Убрал срок: купить лампочку. Напоминать не буду."
+    )
+
+
+async def test_failed_line_keeps_the_mark() -> None:
+    """Telegram не принял — отметка не снимается, следующий тик попробует снова."""
+    clear = FakeClearMoved()
+    service, _, _, _ = build_reminders(
+        moved=FakeMoved([make_moved()]),
+        clear_moved=clear,
+        announcer=FakeAnnouncer(broken=True),
+    )
+
+    assert await service.tick(MONDAY_MORNING) == 0
+    assert clear.calls == []
+
+
+async def test_failed_clear_is_logged_and_the_line_counts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ушло, но отметка не снята — строка в журнал: дубль лучше потери."""
+    announcer = FakeAnnouncer()
+    service, _, _, _ = build_reminders(
+        moved=FakeMoved([make_moved()]),
+        clear_moved=FakeClearMoved(broken=True),
+        announcer=announcer,
+    )
+
+    with caplog.at_level("WARNING"):
+        assert await service.tick(MONDAY_MORNING) == 1
+    assert len(announcer.sent) == 1
+    assert "отметка не снята" in caplog.text
+
+
+async def test_moved_line_goes_to_the_owner_without_a_button(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Сборка из `runner.py`: строка в чат владельца, без кнопки, и снятие отметки."""
+    row: dict[str, object] = {
+        "id": "0e2f",
+        "title": "отправить расчёт клиенту",
+        "due_at": NEXT_FRIDAY.isoformat(),
+        "due_precision": "day",
+        "due_moved_at": MOVED_AT.isoformat(),
+        "next_fire_at": NEXT_FRIDAY.replace(hour=9).isoformat(),
+    }
+    client = FakeRpcClient({"due_reminders": [], "moved_tasks": [row], "clear_due_moved": True})
+    service = build_reminders_service(make_settings(), cast(Client, client), bot)
+
+    assert await service.tick(MONDAY_MORNING) == 1
+    sent = session.sent[0]
+    assert isinstance(sent, SendMessage)
+    assert sent.chat_id == OWNER_ID
+    assert sent.text.startswith("Перенёс: отправить расчёт клиенту.")
+    assert sent.reply_markup is None
+    assert client.calls == ["due_reminders", "moved_tasks", "clear_due_moved"]
+    assert client.params[-1] == {
+        "owner_telegram_id": OWNER_ID,
+        "task_id": "0e2f",
+        "seen": MOVED_AT.isoformat(),
+    }

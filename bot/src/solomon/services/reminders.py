@@ -26,7 +26,7 @@ from supabase import Client
 from solomon import texts
 from solomon.config import Settings
 from solomon.db import reminders as db_reminders
-from solomon.db.reminders import DueReminder, Planned
+from solomon.db.reminders import DueReminder, MovedTask, Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import Task
 from solomon.services.understanding import Clock
@@ -132,6 +132,24 @@ class SentMarker(Protocol):
     ) -> None: ...
 
 
+class MovedLister(Protocol):
+    """Задачи с отметкой «срок перенесён» — у владельца, сейчас."""
+
+    async def __call__(self, *, owner_telegram_id: int) -> list[MovedTask]: ...
+
+
+class MovedClearer(Protocol):
+    """Снять прочитанную отметку. `False` — она сменилась и остаётся."""
+
+    async def __call__(self, *, owner_telegram_id: int, task_id: str, seen: datetime) -> bool: ...
+
+
+class Announcer(Protocol):
+    """Строка в чат владельца без кнопки. Возвращает id сообщения."""
+
+    async def __call__(self, *, text: str) -> int: ...
+
+
 class TaskCloser(Protocol):
     """Закрытие задачи по кнопке вместе с её неотправленными напоминаниями."""
 
@@ -156,6 +174,9 @@ class ReminderService:
         mark_sent: SentMarker,
         close_task: TaskCloser,
         notify: Notifier,
+        moved: MovedLister,
+        clear_moved: MovedClearer,
+        announce: Announcer,
         clock: Clock | None = None,
     ) -> None:
         self._settings = settings
@@ -163,13 +184,18 @@ class ReminderService:
         self._mark_sent = mark_sent
         self._close_task = close_task
         self._notify = notify
+        self._moved = moved
+        self._clear_moved = clear_moved
+        self._announce = announce
         self._clock = clock or self._now
 
     def _now(self) -> datetime:
         return datetime.now(self._settings.owner_timezone)
 
     @classmethod
-    def with_database(cls, settings: Settings, db: Client, notify: Notifier) -> ReminderService:
+    def with_database(
+        cls, settings: Settings, db: Client, notify: Notifier, announce: Announcer
+    ) -> ReminderService:
         """Обычная сборка: настоящая база и настоящая отправка в Telegram."""
 
         async def due(*, owner_telegram_id: int, now: datetime) -> list[DueReminder]:
@@ -192,20 +218,32 @@ class ReminderService:
                 db, owner_telegram_id=owner_telegram_id, task_id=task_id
             )
 
+        async def moved(*, owner_telegram_id: int) -> list[MovedTask]:
+            return await db_reminders.moved_tasks(db, owner_telegram_id=owner_telegram_id)
+
+        async def clear_moved(*, owner_telegram_id: int, task_id: str, seen: datetime) -> bool:
+            return await db_reminders.clear_due_moved(
+                db, owner_telegram_id=owner_telegram_id, task_id=task_id, seen=seen
+            )
+
         return cls(
             settings=settings,
             due=due,
             mark_sent=mark_sent,
             close_task=close_task,
             notify=notify,
+            moved=moved,
+            clear_moved=clear_moved,
+            announce=announce,
         )
 
     async def tick(self, now: datetime | None = None) -> int:
-        """Один заход: отправить созревшее и пометить отправленным (§6.2).
+        """Один заход: созревшее (§6.2), потом строки «Перенёс» (§11.4).
 
-        Возвращает число ушедших сообщений. Отказ базы на отборе выходит
-        наружу — цикл его ловит и живёт дальше; отказ на одной задаче не
-        мешает остальным.
+        Порядок нарочно такой: напоминание, ушедшее в этом тике, уже помечено,
+        и «Напомню» в строке о переносе его не назовёт. Возвращает число
+        ушедших сообщений. Отказ базы на отборе выходит наружу — цикл его
+        ловит и живёт дальше; отказ на одной задаче не мешает остальным.
         """
         moment = now or self._clock()
         owner = self._settings.owner_telegram_id
@@ -214,7 +252,53 @@ class ReminderService:
         for task_id, group in by_task(due).items():
             if await self._send_one(task_id, group, moment):
                 sent += 1
+        for task in await self._moved(owner_telegram_id=owner):
+            if await self._announce_one(task, moment):
+                sent += 1
         return sent
+
+    async def _announce_one(self, task: MovedTask, now: datetime) -> bool:
+        """Строка «Перенёс» и только потом снятие прочитанной отметки.
+
+        Не ушло — отметка остаётся до следующего тика. Ушло, а снять не
+        вышло — строка в журнал и, возможно, повтор: дубль лучше потери.
+        """
+        try:
+            await self._announce(text=self._moved_text(task, now))
+        except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
+            logger.warning("Строка о переносе задачи %s не ушла: %s", task.id, error)
+            return False
+        try:
+            cleared = await self._clear_moved(
+                owner_telegram_id=self._settings.owner_telegram_id,
+                task_id=task.id,
+                seen=task.due_moved_at,
+            )
+        except DatabaseError as error:
+            logger.warning(
+                "Строка о переносе задачи %s ушла, но отметка не снята: %s", task.id, error
+            )
+            return True
+        if not cleared:
+            logger.info("Отметка переноса задачи %s сменилась — скажу о новом сроке", task.id)
+        return True
+
+    def _moved_text(self, task: MovedTask, now: datetime) -> str:
+        """Строка из того, что лежит в базе сейчас, в поясе владельца (§11.4).
+
+        Срок в прошлом — без «Напомню» (§6.4); ближайшее напоминание, которое
+        уже должно было уйти (бот лежал), тоже не обещается.
+        """
+        if task.due_at is None:
+            return texts.moved_reply(title=task.title, due=None, remind_at=None)
+        timezone = self._settings.owner_timezone
+        due = texts.format_due(task.due_at.astimezone(timezone), task.due_precision)
+        remind_at = None
+        if task.due_at > now and task.next_fire_at is not None and task.next_fire_at > now:
+            remind_at = texts.format_remind_at(
+                task.next_fire_at.astimezone(timezone), now.astimezone(timezone)
+            )
+        return texts.moved_reply(title=task.title, due=due, remind_at=remind_at)
 
     async def _send_one(self, task_id: str, group: list[DueReminder], now: datetime) -> bool:
         """Одна задача — одно сообщение, и только потом отметка.
