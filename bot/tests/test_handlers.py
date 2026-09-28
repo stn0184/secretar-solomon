@@ -70,6 +70,8 @@ async def test_help_lists_working_commands(
 
     assert session.texts == [texts.HELP]
     assert "/start" in session.texts[0]
+    # Правка из приложения (`techspec/11-edit.md`): /help о ней знает.
+    assert "задачу можно закрыть, изменить или удалить" in session.texts[0]
 
 
 async def test_stranger_is_turned_away(
