@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 
-import { formatDay, formatDue, sameDay } from "../lib/format.ts";
+import { formatDay, formatDue, formatMoment, sameDay } from "../lib/format.ts";
 import type { Db } from "../lib/supabase.ts";
 import {
   type Task,
   type TaskDetails,
   completeTask,
   loadTaskDetails,
+  questionOf,
   removeTask,
 } from "../lib/tasks.ts";
 import { confirmDelete } from "../lib/telegram.ts";
@@ -18,6 +19,7 @@ import { Header } from "./Header.tsx";
 import { Reminders } from "./Reminders.tsx";
 import { Skeleton } from "./Skeleton.tsx";
 import { SourceMessage } from "./SourceMessage.tsx";
+import { TaskEdit } from "./TaskEdit.tsx";
 
 type DetailsState =
   | { kind: "loading" }
@@ -30,26 +32,56 @@ const KIND_WORD: Record<Task["kind"], string> = {
   wish: "Желание",
 };
 
+function PencilIcon() {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12.8 3.7l3.5 3.5L7.5 16H4v-3.5z" />
+      <path d="M11 5.5l3.5 3.5" />
+    </svg>
+  );
+}
+
 /**
- * Карточка задачи: поля как у бота в подтверждении, исходное сообщение
- * целиком, напоминания и два действия. Задача приходит из списка, сообщение
- * и напоминания докачиваются здесь.
+ * Карточка задачи: поля как у бота в подтверждении, строка «Изменить»,
+ * исходное сообщение целиком, напоминания и два действия. Задача приходит
+ * из списка, сообщение и напоминания докачиваются здесь.
  *
  * После подтверждённого действия `onGone` — список убирает задачу и
  * возвращается; отказ базы остаётся текстом под кнопками.
+ *
+ * `editing` — на месте карточки форма правки (`TaskEdit`). Карточка
+ * остаётся владельцем докачанного: форма берёт у неё исходное сообщение,
+ * а после «Сохранить» приходит новая задача — и напоминания читаются
+ * заново, их пересчитала база.
  */
 export function TaskCard({
   db,
   task,
   now,
+  editing,
   onBack,
   onGone,
+  onEdit,
+  onSaved,
+  onDirty,
 }: {
   db: Db;
   task: Task;
   now: Date;
+  editing: boolean;
   onBack: () => void;
   onGone: (taskId: string) => void;
+  onEdit: () => void;
+  onSaved: (task: Task) => void;
+  onDirty: (dirty: boolean) => void;
 }) {
   const [details, setDetails] = useState<DetailsState>({ kind: "loading" });
   const [reloadKey, setReloadKey] = useState(0);
@@ -98,7 +130,28 @@ export function TaskCard({
     setReloadKey((k) => k + 1);
   }
 
+  /** База записала правку: старые напоминания больше не правда — до ответа «загрузка». */
+  function saved(next: Task) {
+    setDetails({ kind: "loading" });
+    onSaved(next);
+  }
+
+  if (editing) {
+    return (
+      <TaskEdit
+        db={db}
+        task={task}
+        message={details.kind === "ready" ? details.details.message : undefined}
+        now={now}
+        onBack={onBack}
+        onSaved={saved}
+        onDirty={onDirty}
+      />
+    );
+  }
+
   const dueToday = task.dueAt !== null && sameDay(task.dueAt, now);
+  const question = questionOf(task, now);
 
   return (
     <main className="screen">
@@ -122,12 +175,21 @@ export function TaskCard({
             </Field>
           ) : null}
           {task.people.length > 0 ? <Field label="Люди">{task.people.join(", ")}</Field> : null}
-          {task.needsReview ? (
+          {task.needsReview || question ? (
             <Field label="Разбор">
               <ReviewChip task={task} />
+              {question?.askedAt ? (
+                <span className="kv__q">
+                  Бот спросил {formatMoment(question.askedAt, now)}: «{question.text}»
+                </span>
+              ) : null}
             </Field>
           ) : null}
         </div>
+        <button type="button" className="kv__edit" onClick={onEdit}>
+          <PencilIcon />
+          Изменить
+        </button>
       </div>
 
       {details.kind === "loading" ? <Skeleton rows={2} label="Загружаем карточку" /> : null}
@@ -144,8 +206,6 @@ export function TaskCard({
           />
         </>
       ) : null}
-
-      <p className="note">Изменить текст или срок пока можно только через бота.</p>
 
       <Actions
         busy={busy}
