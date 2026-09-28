@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from io import BytesIO
 
@@ -24,8 +25,9 @@ from aiogram.utils.chat_action import ChatActionSender
 
 from solomon import texts
 from solomon.db.tasks import SpeechKind
+from solomon.services import edits
 from solomon.services.reminders import ReminderService
-from solomon.services.tasks import TaskService
+from solomon.services.tasks import Button, PressOutcome, Swipe, TaskService
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,41 @@ def done_keyboard(task_id: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=texts.DONE_BUTTON, callback_data=f"{DONE_PREFIX}{task_id}")]
         ]
+    )
+
+
+def keyboard(buttons: Sequence[Button]) -> InlineKeyboardMarkup | None:
+    """Кнопки ответа (`techspec/12-chat-edit.md` §12.6) — по одной в ряд.
+
+    Кнопок нет — клавиатуры нет: при правке сообщения это убирает прежние
+    кнопки. Что в кнопке и её callback, решает слой операций.
+    """
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=button.text, callback_data=button.data)]
+            for button in buttons
+        ]
+    )
+
+
+def swipe_of(message: Message) -> Swipe | None:
+    """На что владелец ответил свайпом «ответить» (§12.2) — или ничего.
+
+    Ответ боту — напоминание или другое его сообщение, ответ себе — своё
+    прежнее сообщение: какая это задача, разбирает слой операций по базе.
+    У голосового текста в Telegram нет — его расшифровку сервис возьмёт из
+    базы. Пересланное задачу не правит, и его свайп не читается.
+    """
+    replied = message.reply_to_message
+    if replied is None or message.forward_origin is not None:
+        return None
+    author = replied.from_user
+    return Swipe(
+        telegram_message_id=replied.message_id,
+        from_bot=author is not None and author.is_bot,
+        text=replied.text or replied.caption,
     )
 
 
@@ -133,8 +170,9 @@ async def handle_text(message: Message, tasks: TaskService | None) -> None:
         telegram_message_id=message.message_id,
         text=message.text or "",
         forwarded_from=forwarded_sender(message),
+        swipe=swipe_of(message),
     )
-    await message.answer(outcome.message)
+    await message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
 
 
 async def handle_speech(
@@ -167,8 +205,9 @@ async def handle_speech(
             duration=speech.duration,
             load_audio=load_audio,
             forwarded_from=forwarded_sender(message),
+            swipe=swipe_of(message),
         )
-    await message.answer(outcome.message)
+    await message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
 
 
 async def handle_done(callback: CallbackQuery, reminders: ReminderService | None) -> None:
@@ -209,6 +248,78 @@ async def mark_done(message: MaybeInaccessibleMessage | None) -> None:
         logger.warning("Напоминание не отредактировано: %s", error)
 
 
+async def handle_pick(callback: CallbackQuery, tasks: TaskService | None) -> None:
+    """Нажата кнопка задачи под вопросом «Какую задачу…?» (§12.6).
+
+    Порядок тот же, что у «Сделано»: сначала база, потом сообщение — вопрос
+    сменяется ответом, только когда правка записана (инвариант 4). Отказ —
+    всплывающий ответ, а вопрос с кнопками остаётся: можно нажать ещё раз.
+    """
+    message = callback.message
+    if tasks is None or message is None:
+        logger.error("Кнопку задачи некому обработать: бот собран без базы")
+        await callback.answer(texts.NOT_PICKED)
+        return
+    parsed = edits.parse_pick(callback.data or "")
+    if parsed is None:
+        logger.warning("Кнопка задачи с непонятными данными: %r", callback.data)
+        await callback.answer(texts.DONE_UNKNOWN)
+        return
+    telegram_message_id, task_id = parsed
+    outcome = await tasks.pick(
+        chat_id=message.chat.id, telegram_message_id=telegram_message_id, task_id=task_id
+    )
+    await answer_press(callback, outcome)
+
+
+async def handle_reopen(callback: CallbackQuery, tasks: TaskService | None) -> None:
+    """Нажата «Вернуть» под «Закрыл» или «Убрал из списка» (§12.6).
+
+    Задача снова активна и с напоминаниями по сроку — и только после ответа
+    базы сообщение меняется на «Вернул в работу». Уже активная задача —
+    тот же ответ без записи: второе нажатие безвредно.
+    """
+    if tasks is None:
+        logger.error("Кнопку «Вернуть» некому обработать: бот собран без базы")
+        await callback.answer(texts.NOT_REOPENED)
+        return
+    task_id = edits.parse_reopen(callback.data or "")
+    if task_id is None:
+        logger.warning("Кнопка «Вернуть» с непонятными данными: %r", callback.data)
+        await callback.answer(texts.DONE_UNKNOWN)
+        return
+    outcome = await tasks.reopen(task_id=task_id)
+    await answer_press(callback, outcome)
+
+
+async def answer_press(callback: CallbackQuery, outcome: PressOutcome) -> None:
+    """Ответ на нажатие: сменить сообщение с кнопками или всплыть подсказкой.
+
+    Сообщение не сменилось (старое, уже с этим текстом) — ответ всплывает
+    подсказкой: база уже записала, и человек должен об этом узнать.
+    """
+    if outcome.replace and await replace_text(
+        callback.message, outcome.message, keyboard(outcome.buttons)
+    ):
+        await callback.answer()
+        return
+    await callback.answer(outcome.message)
+
+
+async def replace_text(
+    message: MaybeInaccessibleMessage | None, text: str, markup: InlineKeyboardMarkup | None
+) -> bool:
+    """Заменить текст и кнопки сообщения бота; `False` — Telegram не дал."""
+    if not isinstance(message, Message):
+        return False
+    try:
+        await message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as error:
+        logger.warning("Сообщение с кнопками не отредактировано: %s", error)
+        return False
+    return True
+
+
 async def handle_not_text(message: Message) -> None:
     """Ни текст, ни речь — вежливый отказ, и ничего не сохраняется."""
     logger.info("Сообщение не текстом и не голосом: %s", message.content_type)
@@ -230,4 +341,6 @@ def build_router() -> Router:
     router.message.register(handle_speech, speech_in)
     router.message.register(handle_not_text, is_not_text)
     router.callback_query.register(handle_done, F.data.startswith(DONE_PREFIX))
+    router.callback_query.register(handle_pick, F.data.startswith(edits.PICK_PREFIX))
+    router.callback_query.register(handle_reopen, F.data.startswith(edits.REOPEN_PREFIX))
     return router
