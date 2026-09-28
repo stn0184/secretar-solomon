@@ -357,6 +357,13 @@ describe("taskChanges", () => {
     assert.deepEqual(taskChanges(atNoon, { ...draftOf(atNoon), time: "" }), { due_date: "2026-10-05" });
   });
 
+  it("срок днём: колесо поставило 18:00, час убрали — не правка", () => {
+    // Живой случай 28.09: iPhone вписал час срока днём, в базу ушёл момент.
+    const filled = { ...draftOf(friday), time: "18:00" };
+    assert.deepEqual(Object.keys(taskChanges(friday, filled)), ["due_at"]);
+    assert.deepEqual(taskChanges(friday, { ...filled, time: "" }), {});
+  });
+
   it("«Без срока» снимает срок; у задачи без срока — не правка", () => {
     assert.deepEqual(taskChanges(friday, { ...draftOf(friday), noDue: true }), { due_at: null });
     assert.deepEqual(taskChanges(task(), draft({ day: "2026-10-05" })), {});
@@ -411,8 +418,8 @@ describe("dueHint", () => {
   });
 
   it("срок с часом: за час и в срок, а в последний час — только в срок", () => {
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "15:00" }), now), "Напомню за час и в срок.");
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "12:30" }), now), "Напомню в срок.");
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "15:00" }), now), "В 15:00 — напомню за час и в срок.");
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "12:30" }), now), "В 12:30 — напомню в срок.");
   });
 
   it("срок прошёл — напоминаний не будет", () => {

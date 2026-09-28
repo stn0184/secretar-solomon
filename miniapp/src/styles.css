@@ -544,6 +544,29 @@ button {
   flex: 1;
 }
 
+.form__opts {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+/* «Убрать час» — действие цветом, как «Изменить» в карточке */
+.form__clear {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: 500 15px/20px var(--font-ui);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.form__clear:disabled {
+  color: var(--ink-3);
+  cursor: default;
+}
+
 /* 16px — меньше iOS увеличивает страницу при фокусе */
 .input {
   appearance: none;

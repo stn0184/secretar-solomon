@@ -576,7 +576,8 @@ export function dueHint(draft: TaskDraft, now: Date): string {
   }
   if (withTime) {
     const before = withTime.getTime() - 60 * 60 * 1000;
-    return before > now.getTime() ? "Напомню за час и в срок." : "Напомню в срок.";
+    const reminders = before > now.getTime() ? "напомню за час и в срок." : "напомню в срок.";
+    return `В ${draft.time} — ${reminders}`;
   }
   const morning = momentFromInputs(draft.day, "09:00");
   return morning && morning.getTime() > now.getTime()

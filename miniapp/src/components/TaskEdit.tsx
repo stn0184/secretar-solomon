@@ -110,6 +110,7 @@ export function TaskEdit({
 
   const question = questionOf(task, now);
   const dayMissing = draft.day === "";
+  const hasTime = !draft.noDue && !dayMissing && draft.time !== "";
 
   return (
     <main className="screen">
@@ -166,15 +167,29 @@ export function TaskEdit({
               onChange={(e) => update({ time: e.target.value })}
             />
           </div>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={draft.noDue}
-              disabled={busy}
-              onChange={(e) => update({ noDue: e.target.checked })}
-            />
-            <span>Без срока</span>
-          </label>
+          <div className="form__opts">
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={draft.noDue}
+                disabled={busy}
+                onChange={(e) => update({ noDue: e.target.checked })}
+              />
+              <span>Без срока</span>
+            </label>
+            {/* Колесо iPhone ставит час от одного касания, а стереть его
+                своими средствами почти нельзя: час снимается здесь. */}
+            {hasTime ? (
+              <button
+                type="button"
+                className="form__clear"
+                disabled={busy}
+                onClick={() => update({ time: "" })}
+              >
+                Убрать час
+              </button>
+            ) : null}
+          </div>
           <p className="form__hint">{dueHint(draft, now)}</p>
         </div>
 
