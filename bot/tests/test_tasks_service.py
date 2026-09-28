@@ -25,7 +25,7 @@ from solomon.services.tasks import (
     summarize,
 )
 from solomon.services.transcription import NotTranscribed, Transcript
-from solomon.services.understanding import NotUnderstood, Understanding
+from solomon.services.understanding import NotUnderstood, Understanding, format_open_question
 from tests.conftest import (
     AUDIO,
     OWNER_ID,
@@ -811,9 +811,13 @@ def build_dialog_service(
     questions: FakeQuestions | None = None,
     transcriber: FakeTranscriber | None = None,
 ) -> tuple[TaskService, FakeQuestions, FakeUnderstandings]:
-    """Сервис с открытым вопросом `ASKED` и часами на четверг, 13:00."""
+    """Сервис с открытым вопросом `ASKED` и часами на четверг, 13:00.
+
+    Подменённая база ведёт вопрос, как настоящая (§3.4): запись снимает его
+    и ставит новый, и следующее сообщение видит то, что осталось.
+    """
     reader = questions or FakeQuestions(ASKED)
-    understandings = FakeUnderstandings()
+    understandings = FakeUnderstandings(questions=reader, clock=lambda: THURSDAY_AFTERNOON)
     service = TaskService(
         settings=SETTINGS,
         record_message=FakeMessages(),
@@ -841,7 +845,7 @@ async def test_question_records_the_task_at_once_and_asks_it() -> None:
             question=ASKED_FOR_DUE,
         )
     )
-    service, _, understandings = build_dialog_service(analyst, FakeQuestions())
+    service, questions, understandings = build_dialog_service(analyst, FakeQuestions())
 
     outcome = await say(service, "срочно отправить расчёт клиенту")
 
@@ -858,6 +862,9 @@ async def test_question_records_the_task_at_once_and_asks_it() -> None:
     assert task["priority"] == "high"
     assert task["needs_review"] is True
     assert task["open_question"] == ASKED_FOR_DUE
+    # Следующее сообщение придёт к модели уже с этим вопросом (§10.2).
+    assert questions.asked is not None
+    assert questions.asked.question == ASKED_FOR_DUE
 
 
 async def test_question_marks_the_task_for_review_even_if_the_model_did_not() -> None:
@@ -981,7 +988,7 @@ async def test_question_read_failure_is_logged_and_the_analysis_goes_on(
 async def test_answer_amends_the_asked_task_and_says_understood() -> None:
     """§10.2: новые поля и напоминания — в ту же задачу, новой задачи нет."""
     analyst = FakeAnalyst(answer(due_at=FRIDAY_DUE, due_precision="day"))
-    service, _, understandings = build_dialog_service(analyst)
+    service, questions, understandings = build_dialog_service(analyst)
 
     outcome = await say(service, "в пятницу")
 
@@ -1005,6 +1012,7 @@ async def test_answer_amends_the_asked_task_and_says_understood() -> None:
             {"stage": "due", "fire_at": FRIDAY_DUE.isoformat()},
         ],
     }
+    assert questions.asked is None
 
 
 async def test_unclear_answer_keeps_the_mark_and_asks_nothing_more() -> None:
@@ -1036,7 +1044,7 @@ async def test_answer_that_changes_the_priority_names_it() -> None:
 async def test_new_errand_while_asked_is_an_ordinary_task() -> None:
     """`answers_question = false` — обычная запись; вопрос снимет база (§3.4)."""
     analyst = FakeAnalyst(make_understanding(title="купить лампочку"))
-    service, _, understandings = build_dialog_service(analyst)
+    service, questions, understandings = build_dialog_service(analyst)
 
     outcome = await say(service, "купить лампочку")
 
@@ -1046,18 +1054,63 @@ async def test_new_errand_while_asked_is_an_ordinary_task() -> None:
     task = saved["task"]
     assert isinstance(task, dict)
     assert task["title"] == "купить лампочку"
+    assert questions.asked is None
 
 
 @pytest.mark.parametrize("kind", ["chat", "about_me"])
 async def test_chat_or_memory_while_asked_records_no_task(kind: str) -> None:
     analyst = FakeAnalyst(make_understanding(kind=kind, title="спасибо"))
-    service, _, understandings = build_dialog_service(analyst)
+    service, questions, understandings = build_dialog_service(analyst)
 
     await say(service, "спасибо")
 
     saved = understandings.calls[0]
     assert saved["task"] is None
     assert saved["amend"] is None
+    assert questions.asked is None
+
+
+async def test_model_failure_while_asked_records_as_is_and_lifts_the_question() -> None:
+    """Отказ модели — тоже запись: задача «как есть» заведена, вопрос снят (§10.3)."""
+    analyst = FakeAnalyst(NotUnderstood(reason="модель недоступна: APITimeoutError"))
+    service, questions, understandings = build_dialog_service(analyst)
+
+    outcome = await say(service, "в пятницу")
+
+    assert outcome.message == texts.RECORDED_AS_IS.format(text="в пятницу")
+    saved = understandings.calls[0]
+    assert saved["amend"] is None
+    assert isinstance(saved["task"], dict)
+    assert questions.asked is None
+
+
+async def test_not_heard_voice_keeps_the_question_for_the_repeat() -> None:
+    """Бот сам просит повторить — повтор должен застать вопрос открытым (§10.3).
+
+    Иначе ответ «в пятницу» после «не расслышал» стал бы второй задачей, а у
+    первой так и не появилось бы срока.
+    """
+    analyst = FakeAnalyst(answer(due_at=FRIDAY_DUE, due_precision="day"))
+    transcriber = FakeTranscriber(NotTranscribed(reason="пустая расшифровка"))
+    service, questions, understandings = build_dialog_service(analyst, transcriber=transcriber)
+
+    unheard = await record_voice(service)
+
+    assert unheard.message == texts.NOT_HEARD
+    assert understandings.calls[0]["analysis"] is None
+    assert questions.asked == ASKED
+
+    outcome = await say(service, "в пятницу")
+
+    assert analyst.questions == [ASKED]
+    block = format_open_question(analyst.questions[0], ZoneInfo(OWNER_TIMEZONE))
+    assert block.startswith(f"Открытый вопрос: {ASKED.question} — по задаче «{ASKED.title}»")
+    assert outcome.message.startswith("Понял: отправить расчёт клиенту. Срок: пятница")
+    amend = understandings.calls[1]["amend"]
+    assert isinstance(amend, dict)
+    assert amend["task_id"] == ASKED.task_id
+    assert understandings.calls[1]["task"] is None
+    assert questions.asked is None
 
 
 async def test_voice_answer_goes_the_same_way_as_text() -> None:

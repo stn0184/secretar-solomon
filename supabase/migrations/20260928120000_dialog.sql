@@ -100,14 +100,23 @@ begin
     return saved;
   end if;
 
-  -- Любой записанный разбор снимает открытые вопросы владельца (§10.3):
-  -- ответ, новое поручение, разговор, сведение о себе и вопрос старше суток
-  -- закрываются одним правилом. Новый вопрос ставится ниже, уже после.
-  update public.tasks t
-     set open_question = null,
-         question_asked_at = null
-   where t.owner_telegram_id = record_understanding.owner_telegram_id
-     and (t.open_question is not null or t.question_asked_at is not null);
+  -- Любая запись снимает открытые вопросы владельца (§10.3): ответ, новое
+  -- поручение, запись «как есть» при отказе модели, разговор, сведение о
+  -- себе и вопрос старше суток закрываются одним правилом. Новый вопрос
+  -- ставится ниже, уже после.
+  --
+  -- Кроме «не расслышал» (§9.3): ни разбора, ни задачи, ни поправки — понять
+  -- ещё ничего не удалось, а бот сам просит повторить, и повтор должен застать
+  -- вопрос открытым, иначе ответ «в пятницу» станет второй задачей.
+  if coalesce(jsonb_typeof(record_understanding.analysis), 'null') <> 'null'
+     or coalesce(jsonb_typeof(record_understanding.task), 'null') <> 'null'
+     or coalesce(jsonb_typeof(record_understanding.amend), 'null') <> 'null' then
+    update public.tasks t
+       set open_question = null,
+           question_asked_at = null
+     where t.owner_telegram_id = record_understanding.owner_telegram_id
+       and (t.open_question is not null or t.question_asked_at is not null);
+  end if;
 
   -- Ответ на вопрос (§10.2): вместо новой задачи — поправка к названной.
   -- Меняются только ключи из `fields`; чужая, несуществующая или уже

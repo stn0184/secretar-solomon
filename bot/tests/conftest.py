@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -181,12 +181,29 @@ class FakeMessages:
 
 
 class FakeUnderstandings:
-    """Второй шаг приёма: разбор, ответ бота и задача одной транзакцией."""
+    """Второй шаг приёма: разбор, ответ бота и задача одной транзакцией.
 
-    def __init__(self, task: Task | None = _DEFAULT_TASK, broken: bool = False) -> None:
+    С `questions` фейк ведёт открытый вопрос так же, как `record_understanding`
+    (`techspec/03-schema.md` §3.4): повтор по сообщению, у которого задача уже
+    есть, вопроса не трогает; «не расслышал» — ни разбора, ни задачи, ни
+    поправки — тоже; любая другая запись вопрос снимает, а задача с
+    `open_question` ставит новый — со временем от `clock`.
+    """
+
+    def __init__(
+        self,
+        task: Task | None = _DEFAULT_TASK,
+        broken: bool = False,
+        questions: FakeQuestions | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.calls: list[dict[str, object]] = []
         self.task = task
         self.broken = broken
+        self.questions = questions
+        self._clock = clock or (lambda: datetime.now(UTC))
+        # Сообщения, по которым задача уже заведена: повтор её вернёт как есть.
+        self._with_task: set[str] = set()
 
     async def __call__(
         self,
@@ -224,7 +241,43 @@ class FakeUnderstandings:
                 "amend": amend,
             }
         )
+        if message_id in self._with_task:
+            return self.task
+        if self.questions is not None:
+            self._follow_question(self.questions, analysis, task, amend)
+        if task is not None and amend is None:
+            self._with_task.add(message_id)
         return self.task
+
+    def _follow_question(
+        self,
+        questions: FakeQuestions,
+        analysis: Mapping[str, Any] | None,
+        task: Mapping[str, Any] | None,
+        amend: Mapping[str, Any] | None,
+    ) -> None:
+        """Снять и поставить открытый вопрос — по тем же правилам, что база."""
+        if analysis is None and task is None and amend is None:
+            return
+        questions.asked = None
+        if task is None or amend is not None:
+            return
+        question = str(task.get("open_question") or "").strip()
+        if not question:
+            return
+        due_at = task.get("due_at")
+        questions.asked = OpenQuestion(
+            task_id=self.task.id if self.task is not None else "new-task",
+            question=question,
+            title=str(task["title"]),
+            kind=str(task.get("kind") or "task"),
+            due_at=datetime.fromisoformat(due_at) if isinstance(due_at, str) else None,
+            due_precision=task.get("due_precision"),
+            priority=str(task.get("priority") or "normal"),
+            promise=task.get("promise"),
+            people=tuple(task.get("people") or ()),
+            asked_at=self._clock(),
+        )
 
 
 class FakeQuestions:

@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 SUMMARY_LIMIT = 200
 
 # Сколько живёт вопрос без ответа (`techspec/10-dialog.md` §10.3): дольше —
-# в промпт не попадает, и следующая запись разбора его снимет.
+# в промпт не попадает, и следующая запись его снимет (кроме «не расслышал»).
 QUESTION_TTL = timedelta(hours=24)
 
 
@@ -482,7 +482,12 @@ class TaskService:
         return await self._transcriber.transcribe(audio)
 
     async def _not_heard(self, saved: SavedMessage, result: NotTranscribed) -> RecordOutcome:
-        """Расшифровки нет: ответ в `reply`, задачи и разбора нет (§9.3)."""
+        """Расшифровки нет: ответ в `reply`, задачи и разбора нет (§9.3).
+
+        Открытый вопрос остаётся: запись без разбора, задачи и поправки база
+        его не снимает (§3.4), и повтор, о котором бот просит, дойдёт до
+        модели вместе с вопросом (§10.3).
+        """
         reply = texts.NOT_HEARD
         try:
             await self._record_understanding(
