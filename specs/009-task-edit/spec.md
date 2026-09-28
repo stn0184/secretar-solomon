@@ -104,7 +104,7 @@
       снимает с проверкой прочитанного значения. `on conflict` — только
       `on constraint`. Правка `techspec/03-schema.md` (§3.3, §3.5, §3.6,
       новая таблица) и `techspec/04-access.md` §4.2 в том же коммите.
-- [ ] Тесты PGlite: таблица случаев `reminder_plan` — прежние случаи
+- [x] Тесты PGlite: таблица случаев `reminder_plan` — прежние случаи
       `bot/tests/test_reminders.py` один в один плюс утро позже срока,
       `due_precision = null`, срок ровно сейчас, смена даты через UTC;
       `edit_task` под ролью `authenticated` с клеймом — своя, чужая,

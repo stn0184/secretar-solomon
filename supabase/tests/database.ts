@@ -16,19 +16,33 @@ import { PGlite } from "@electric-sql/pglite";
 const MIGRATIONS = new URL("../migrations/", import.meta.url);
 
 /**
- * То, что в Supabase есть до первой миграции: роли PostgREST и `auth.jwt()`.
- * Функция читает клеймы так же, как Supabase, — из `request.jwt.claims`.
+ * То, что в Supabase есть до первой миграции: роли PostgREST, их гранты и
+ * `auth.jwt()`. Функция читает клеймы так же, как Supabase, — из
+ * `request.jwt.claims`.
+ *
+ * Гранты — как в проекте Supabase: все три роли видят схему `public`, и
+ * всё, что в ней создают миграции, по умолчанию доступно всем трём.
+ * Разделяют их RLS и `revoke` в самих миграциях, поэтому тест под ролью
+ * `authenticated` или `anon` проверяет ровно то, что проверит живая база.
+ * `service_role` обходит RLS, как ключ бота.
  */
 const SUPABASE_STUBS = `
   create role anon nologin;
   create role authenticated nologin;
-  create role service_role nologin;
+  create role service_role nologin bypassrls;
   create schema auth;
   create function auth.jwt() returns jsonb
   language sql stable
   as $$
     select coalesce(nullif(current_setting('request.jwt.claims', true), ''), '{}')::jsonb
   $$;
+  grant usage on schema public, auth to anon, authenticated, service_role;
+  alter default privileges in schema public
+    grant all on tables to anon, authenticated, service_role;
+  alter default privileges in schema public
+    grant all on functions to anon, authenticated, service_role;
+  alter default privileges in schema public
+    grant all on sequences to anon, authenticated, service_role;
 `;
 
 /** Имена миграций в порядке применения — порядок имён, как у Supabase CLI. */
@@ -72,5 +86,33 @@ export async function withDatabase(body: (db: PGlite) => Promise<void>): Promise
     await body(db);
   } finally {
     await db.close();
+  }
+}
+
+/** Клеймы токена Mini App (§4.4): владелец — `telegram_id`; `null` — клейма нет. */
+function claimsOf(owner: number | null): string {
+  return JSON.stringify(owner === null ? { role: "authenticated" } : { role: "authenticated", telegram_id: owner });
+}
+
+/**
+ * Вызов под ролью PostgREST, как из Mini App: `authenticated` с клеймом
+ * владельца (или без него), либо `anon`. Роль и клеймы снимаются и при
+ * падении — следующий запрос теста снова идёт от владельца базы.
+ */
+export async function asRole<T>(
+  db: PGlite,
+  role: "authenticated" | "anon",
+  owner: number | null,
+  body: () => Promise<T>,
+): Promise<T> {
+  await db.query("select set_config('request.jwt.claims', $1, false)", [
+    role === "anon" ? "" : claimsOf(owner),
+  ]);
+  await db.exec(`set role ${role}`);
+  try {
+    return await body();
+  } finally {
+    await db.exec("reset role");
+    await db.query("select set_config('request.jwt.claims', '', false)");
   }
 }
