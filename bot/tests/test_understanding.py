@@ -43,6 +43,7 @@ from solomon.services.understanding import (
     create_anthropic_client,
     fact_status,
     format_known,
+    format_open_question,
 )
 from tests.conftest import OWNER_TIMEZONE, make_settings, make_understanding
 
@@ -162,6 +163,80 @@ def test_rules_tell_the_model_what_the_voice_mark_means() -> None:
 
     assert "Распознано с голоса" in prompt
     assert "плохо расслышал" in prompt
+
+
+# ------------------------------------------------------- уточняющий вопрос
+
+TZ = ZoneInfo(OWNER_TIMEZONE)
+
+
+@dataclass(frozen=True, slots=True)
+class Asked:
+    """Открытый вопрос, как его видит промпт: сам вопрос и поля задачи (§10.2)."""
+
+    question: str = "К какому сроку?"
+    title: str = "отправить расчёт клиенту"
+    due_at: datetime | None = None
+    due_precision: str | None = None
+    priority: str = "high"
+    people: tuple[str, ...] = ()
+
+
+def test_open_question_block_names_the_question_and_the_task() -> None:
+    block = format_open_question(Asked(), TZ)
+
+    assert block.startswith(
+        "Открытый вопрос: К какому сроку? — по задаче «отправить расчёт клиенту» "
+        "(срок: не назван, приоритет: высокий)"
+    )
+    # Правило рядом с вопросом: решить, ответ ли это, и что тогда отдавать.
+    assert "answers_question = true" in block
+    assert "answers_question = false" in block
+
+
+def test_open_question_block_names_the_due_day_and_the_people() -> None:
+    asked = Asked(
+        question="Кому позвонить?",
+        title="позвонить",
+        due_at=datetime(2026, 9, 18, 18, 0, tzinfo=TZ),
+        due_precision="day",
+        priority="normal",
+        people=("Аня",),
+    )
+
+    block = format_open_question(asked, TZ)
+
+    assert "(срок: пятница, 18 сентября, приоритет: обычный, люди: Аня)" in block
+
+
+def test_no_open_question_means_no_block() -> None:
+    assert format_open_question(None, TZ) == ""
+    assert "Открытый вопрос:" not in build_system_prompt(NOW, TZ)
+
+
+def test_open_question_goes_after_what_is_known() -> None:
+    prompt = build_system_prompt(NOW, TZ, known=[CAMRY], open_question=Asked())
+
+    assert prompt.index("car: Машина — Toyota Camry") < prompt.index("Открытый вопрос:")
+
+
+def test_rules_allow_one_question_only_when_the_errand_cannot_be_done() -> None:
+    """Правило для `question` действует всегда, а не только при открытом вопросе (§10.1)."""
+    prompt = build_system_prompt(NOW, TZ)
+
+    assert "question = null" in prompt
+    assert "answers_question" in prompt
+    assert "needs_review" in prompt
+
+
+def test_understanding_carries_the_question_and_the_answer_flag() -> None:
+    parsed = make_understanding(question="К какому сроку?", answers_question=True)
+
+    assert parsed.question == "К какому сроку?"
+    assert parsed.answers_question is True
+    # Схема требует оба поля: модель отдаёт их явно, пустое — `null` и `false`.
+    required = set(Understanding.model_json_schema()["required"])
+    assert {"question", "answers_question"} <= required
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +421,26 @@ async def test_known_facts_failure_goes_without_the_block_and_logs(
     system, _ = call.calls[0]
     assert "уже известно" not in system.lower()
     assert "ConnectTimeout" in caplog.text
+
+
+async def test_open_question_reaches_the_prompt() -> None:
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze("в пятницу", open_question=Asked())
+
+    system, text = call.calls[0]
+    assert "Открытый вопрос: К какому сроку? — по задаче «отправить расчёт клиенту»" in system
+    # Сообщение уходит как есть: вопрос — в системной части, не в тексте владельца.
+    assert text == "в пятницу"
+
+
+async def test_without_open_question_the_prompt_has_no_block() -> None:
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze("купить лампочку")
+
+    system, _ = call.calls[0]
+    assert "Открытый вопрос:" not in system
 
 
 async def test_forwarded_sender_reaches_the_call() -> None:

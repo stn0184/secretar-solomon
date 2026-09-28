@@ -148,7 +148,10 @@ def remembered(items: Sequence[str]) -> str:
 RECORDED_AS_IS = "Записал как есть: «{text}». Разобрать сейчас не смог."
 
 
-PRIORITY_WORDS = {"high": "Приоритет: высокий", "low": "Приоритет: низкий"}
+# Срочность словами: в подтверждении звучит только необычная, а модели в
+# блоке открытого вопроса (`techspec/05-ai.md` §5.2) называется любая.
+PRIORITY_NAMES = {"high": "высокий", "normal": "обычный", "low": "низкий"}
+PRIORITY_WORDS = {key: f"Приоритет: {PRIORITY_NAMES[key]}" for key in ("high", "low")}
 
 
 def recorded_reply(

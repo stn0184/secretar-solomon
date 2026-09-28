@@ -44,6 +44,7 @@ from solomon.db.tasks import MessageKind, SavedMessage, SpeechKind, Task
 from solomon.services.transcription import Transcript, TranscriptionResult
 from solomon.services.understanding import (
     Analysis,
+    AskedQuestion,
     SpeechQuality,
     Understanding,
     Verdict,
@@ -237,6 +238,8 @@ def make_understanding(**fields: Any) -> Understanding:
         "needs_review": False,
         "review_reason": None,
         "reply_hint": None,
+        "question": None,
+        "answers_question": False,
         "facts": [],
     }
     return Understanding.model_validate({**base, **fields})
@@ -257,6 +260,8 @@ class FakeAnalyst:
             else verdict
         )
         self.calls: list[tuple[str, str | None, SpeechQuality | None]] = []
+        # Открытый вопрос, с которым звали модель (§10.2), — по вызову.
+        self.questions: list[AskedQuestion | None] = []
 
     async def analyze(
         self,
@@ -264,8 +269,10 @@ class FakeAnalyst:
         *,
         forwarded_from: str | None = None,
         spoken: SpeechQuality | None = None,
+        open_question: AskedQuestion | None = None,
     ) -> Verdict:
         self.calls.append((text, forwarded_from, spoken))
+        self.questions.append(open_question)
         return self.verdict
 
 

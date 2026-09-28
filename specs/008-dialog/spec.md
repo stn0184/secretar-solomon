@@ -98,7 +98,7 @@
       **любом** разборе (после проверки на повтор, отдельного аргумента
       нет — решение владельца), ключ `open_question` в `task` и аргумент
       `amend` (§3.3–3.4). Правка §3 в том же коммите.
-- [ ] `understanding.py`: поля `question`, `answers_question` в
+- [x] `understanding.py`: поля `question`, `answers_question` в
       `Understanding`; блок «Открытый вопрос» в промпте (§5.2 п. 4) с
       правилами §10.1–10.2; `analyze(..., open_question=...)`.
 - [ ] `db/tasks.py`: `open_question(owner)` — задача с вопросом не

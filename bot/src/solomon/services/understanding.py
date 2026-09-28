@@ -6,8 +6,9 @@
 дальше памяти.
 
 Инвариант 3: текст сообщения — данные. Промпт говорит это модели прямо,
-схема не даёт ей ответить ничем, кроме полей, и ни одно поле, кроме
-`review_reason`, не пересылается человеку дословно (это делает `texts.py`).
+схема не даёт ей ответить ничем, кроме полей, и дословно человеку уходят
+только `review_reason`, вопрос `question` и тексты записей памяти (это
+делает `texts.py`, §5.4).
 """
 
 from __future__ import annotations
@@ -91,6 +92,8 @@ class Understanding(BaseModel):
     needs_review: bool
     review_reason: str | None
     reply_hint: str | None
+    question: str | None
+    answers_question: bool
     facts: list[FactItem]
 
 
@@ -152,6 +155,18 @@ promise — mine, если человек обещает сделать сам; 
 одна фраза по-русски о том, что именно неясно. Срок, имя или суть не
 выдумывайте.
 
+question — один короткий вопрос владельцу по-русски, и только когда без
+ответа дело не сделать и не о чем напомнить: у явно срочного дела нет срока
+(«срочно отправить расчёт» — «К какому сроку?»), в обещании не сказано
+кому, у «позвонить» — кому. Тогда kind = task, needs_review = true, а в
+остальных полях — то, что понятно: задача запишется сразу. Всё прочее
+неясное — не вопрос, а needs_review с причиной: помощник не анкета.
+Разговор, идея, желание и сведение о себе вопросов не получают. Нет
+вопроса — question = null.
+
+answers_question — true, только если ниже есть блок «Открытый вопрос» и
+сообщение на него отвечает; без блока — всегда false.
+
 В facts — новые сведения о самом человеке, каждое одной короткой фразой,
 как строка справочника: «Машина — Toyota Camry», «Сын Миша ходит в садик»,
 «Работа заканчивается в 18:00». Категория — только из списка: family
@@ -192,6 +207,67 @@ def format_known(known: Sequence[KnownFact]) -> str:
     )
 
 
+class AskedQuestion(Protocol):
+    """Открытый вопрос с полями задачи — то, что нужно промпту (§5.2, §10.2)."""
+
+    @property
+    def question(self) -> str: ...
+
+    @property
+    def title(self) -> str: ...
+
+    @property
+    def due_at(self) -> datetime | None: ...
+
+    @property
+    def due_precision(self) -> str | None: ...
+
+    @property
+    def priority(self) -> str: ...
+
+    @property
+    def people(self) -> Sequence[str]: ...
+
+
+ANSWER_RULES = """Вы задали этот вопрос владельцу в прошлом ответе. Решите по содержанию,
+отвечает ли на него это сообщение.
+- Отвечает («в пятницу», «Сергею», «к обеду») — answers_question = true. В
+  полях — только то, что ответ добавил или изменил: срок — due_at и
+  due_precision по обычным правилам времени, иначе null; title — суть задачи,
+  уточнённая ответом (не меняется — та же, что в вопросе); people — только
+  новые люди; promise — если ответ его меняет, иначе null; priority — high
+  или low, только если ответ меняет срочность, иначе normal. kind не важен,
+  question = null: второй вопрос не задавайте. Ответ всё ещё непонятен —
+  needs_review = true и причина в review_reason.
+- Не отвечает (новое поручение, разговор, сведение о себе) —
+  answers_question = false и обычный разбор этого сообщения как
+  самостоятельного."""
+
+
+def format_open_question(asked: AskedQuestion | None, timezone: ZoneInfo) -> str:
+    """Блок «Открытый вопрос» (§5.2 п. 4, §10.2). Вопроса нет — блока нет.
+
+    Поля задачи называются словами, как человеку: модель решает, ответ ли
+    это, по смыслу, а новый срок всё равно считает по правилам времени от
+    «сейчас».
+    """
+    if asked is None:
+        return ""
+    due = (
+        "не назван"
+        if asked.due_at is None
+        else texts.format_due(asked.due_at.astimezone(timezone), asked.due_precision)
+    )
+    priority = texts.PRIORITY_NAMES.get(asked.priority, asked.priority)
+    details = [f"срок: {due}", f"приоритет: {priority}"]
+    if asked.people:
+        details.append(f"люди: {', '.join(asked.people)}")
+    return (
+        f"Открытый вопрос: {asked.question} — по задаче «{asked.title}» "
+        f"({', '.join(details)}).\n{ANSWER_RULES}"
+    )
+
+
 def format_moment(now: datetime, timezone: ZoneInfo) -> str:
     """Контекст момента: без него «в пятницу» не превратить в дату."""
     local = now.astimezone(timezone)
@@ -203,12 +279,18 @@ def format_moment(now: datetime, timezone: ZoneInfo) -> str:
     )
 
 
-def build_system_prompt(now: datetime, timezone: ZoneInfo, known: Sequence[KnownFact] = ()) -> str:
-    """Системный промпт: роль и правила, момент, потом что уже известно (§5.2)."""
+def build_system_prompt(
+    now: datetime,
+    timezone: ZoneInfo,
+    known: Sequence[KnownFact] = (),
+    open_question: AskedQuestion | None = None,
+) -> str:
+    """Системный промпт (§5.2): роль и правила, момент, что уже известно,
+    открытый вопрос. Пустые блоки не попадают вовсе."""
     parts = [RULES, format_moment(now, timezone)]
-    block = format_known(known)
-    if block:
-        parts.append(block)
+    for block in (format_known(known), format_open_question(open_question, timezone)):
+        if block:
+            parts.append(block)
     return "\n\n".join(parts)
 
 
@@ -339,15 +421,21 @@ class UnderstandingService:
         *,
         forwarded_from: str | None = None,
         spoken: SpeechQuality | None = None,
+        open_question: AskedQuestion | None = None,
     ) -> Verdict:
         """Разобрать сообщение или честно сказать, что не вышло.
 
         Ни один отказ наружу исключением не выходит: поручение не теряется
         (инвариант 5), слой выше записывает его буквально (§5.4). `spoken` —
         текст распознан с голоса, и с каким качеством (§9.4).
+        `open_question` — вопрос, который бот задал и на который ещё не
+        ответили (§10.2): читает его слой выше, здесь он только попадает в
+        промпт, а ответ ли это — решает модель.
         """
         known = await self._known_facts()
-        system = build_system_prompt(self._clock(), self._settings.owner_timezone, known)
+        system = build_system_prompt(
+            self._clock(), self._settings.owner_timezone, known, open_question
+        )
         message = build_user_message(text, forwarded_from, spoken)
         try:
             answer = await self._call(system=system, text=message)
@@ -373,9 +461,12 @@ class UnderstandingService:
             return self._not_understood("ответ не прошёл схему")
 
         logger.info(
-            "Разобрано: kind=%s, needs_review=%s, сведений %s, токенов %s/%s",
+            "Разобрано: kind=%s, needs_review=%s, вопрос=%s, ответ на вопрос=%s, "
+            "сведений %s, токенов %s/%s",
             parsed.kind,
             parsed.needs_review,
+            parsed.question is not None,
+            parsed.answers_question,
             len(parsed.facts),
             answer.usage.input_tokens,
             answer.usage.output_tokens,
