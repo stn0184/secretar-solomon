@@ -1,12 +1,15 @@
-"""Напоминания: что запланировать при записи задачи и когда постучаться.
+"""Напоминания: расписание при записи задачи и когда постучаться.
 
-Расписание считает бот, хранит база (`techspec/06-reminders.md` §6.1):
-`plan` — чистая функция от срока, точности, вида задачи и пояса владельца,
-с внедряемым «сейчас». Поэтому все её ветки проверяются без часов и без сети.
+Расписание считает база (`techspec/11-edit.md` §11.3): правило §6.1 живёт в
+SQL-функции `reminder_plan`, и её зовут и бот, и правка из приложения. Сюда
+она приходит протоколом `Planner`, как клиент модели в `understanding.py`:
+тест подставляет свой план, а само правило проверяется тестами базы
+(`supabase/tests/reminder_plan.test.ts`). В боте остаётся строка «Напомню»
+(§6.4) — ближайшее из того плана, что уходит в базу.
 
-Здесь же цикл отправки (§6.2) и кнопка «Сделано» (§6.3). Отправка приходит
-параметром-протоколом, как клиент модели в `understanding.py`: сервис не знает
-ни про aiogram, ни про сеть, и тест подставляет свою запись вместо неё.
+Здесь же цикл отправки (§6.2), кнопка «Сделано» (§6.3) и строка «Перенёс»
+(§11.4). Отправка приходит параметром-протоколом: сервис не знает ни про
+aiogram, ни про сеть, и тест подставляет свою запись вместо неё.
 """
 
 from __future__ import annotations
@@ -15,76 +18,71 @@ import asyncio
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Literal, Protocol
-from zoneinfo import ZoneInfo
+from datetime import datetime
+from typing import Protocol
 
 from supabase import Client
 
 from solomon import texts
 from solomon.config import Settings
 from solomon.db import reminders as db_reminders
-from solomon.db.reminders import DueReminder
+from solomon.db.reminders import DueReminder, Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import Task
 from solomon.services.understanding import Clock
 
 logger = logging.getLogger(__name__)
 
-Stage = Literal["before", "due"]
 
-# Задача, названная днём, напоминает о себе утром этого дня: полночь — рано,
-# а 18:00 (`techspec/03-schema.md` §3.3) — это уже сам срок.
-MORNING_HOUR = 9
-# Назван час — предупреждаем за час: этого хватает, чтобы собраться.
-AHEAD_OF_TIME = timedelta(hours=1)
-# Виды, о которых напоминают. Идея и желание — не дела (§6.1).
-REMINDED_KINDS = ("task",)
+class Planner(Protocol):
+    """Расписание одной задачи по §6.1 — у базы. Пояс владельца знает сборка."""
 
-
-@dataclass(frozen=True, slots=True)
-class Planned:
-    """Одно запланированное напоминание: ступень и момент."""
-
-    stage: Stage
-    fire_at: datetime
-
-    def as_row(self) -> dict[str, str]:
-        """Строка для `record_understanding` — по именам колонок §3.5."""
-        return {"stage": self.stage, "fire_at": self.fire_at.isoformat()}
+    async def __call__(
+        self,
+        *,
+        due_at: datetime | None,
+        due_precision: str | None,
+        kind: str,
+        now: datetime,
+    ) -> list[Planned]: ...
 
 
-def plan(
-    *,
-    due_at: datetime | None,
-    due_precision: str | None,
-    kind: str,
-    timezone: ZoneInfo,
-    now: datetime,
-) -> list[Planned]:
-    """Расписание напоминаний для одной задачи (§6.1).
+def database_planner(settings: Settings, db: Client) -> Planner:
+    """Обычный планировщик: `reminder_plan` в базе с поясом из настроек."""
 
-    Пусто — стучаться не о чем или уже некогда: нет срока, срок прошёл, это
-    идея или желание. Момент, который на этапе планирования уже прошёл, не
-    заводится вовсе, а не срабатывает сразу: «сегодня в 15:00», сказанное
-    в 14:30, — это одно напоминание, а не два подряд.
+    async def planner(
+        *, due_at: datetime | None, due_precision: str | None, kind: str, now: datetime
+    ) -> list[Planned]:
+        return await db_reminders.reminder_plan(
+            db,
+            due_at=due_at,
+            due_precision=due_precision,
+            kind=kind,
+            timezone=settings.owner_timezone.key,
+            now=now,
+        )
+
+    return planner
+
+
+async def mirror_timezone(settings: Settings, db: Client) -> bool:
+    """Записать пояс владельца в базу при запуске (§11.3).
+
+    Источник правды — `.env`; база держит зеркало для `edit_task`. Не
+    записалось — строка в журнале, бот работает дальше: без зеркала откажет
+    только правка срока в приложении, а не приём поручений.
     """
-    if kind not in REMINDED_KINDS or due_at is None or due_at <= now:
-        return []
-
-    due_local = due_at.astimezone(timezone)
-    if due_precision == "time":
-        before = due_local - AHEAD_OF_TIME
-    else:
-        before = due_local.replace(hour=MORNING_HOUR, minute=0, second=0, microsecond=0)
-
-    planned: list[Planned] = []
-    # Утро может оказаться позже самого срока, если модель назвала днём
-    # что-то раньше девяти: тогда ступень «заранее» теряет смысл.
-    if now < before < due_local:
-        planned.append(Planned(stage="before", fire_at=before))
-    planned.append(Planned(stage="due", fire_at=due_local))
-    return planned
+    try:
+        await db_reminders.save_owner_timezone(
+            db,
+            owner_telegram_id=settings.owner_telegram_id,
+            timezone=settings.owner_timezone.key,
+        )
+    except DatabaseError as error:
+        logger.error("Пояс владельца не записан в базу: %s", error)
+        return False
+    logger.info("Пояс владельца в базе: %s", settings.owner_timezone.key)
+    return True
 
 
 def next_fire_at(planned: list[Planned]) -> datetime | None:

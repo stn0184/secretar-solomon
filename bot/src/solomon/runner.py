@@ -14,7 +14,7 @@ from supabase import Client
 from solomon import handlers
 from solomon.config import Settings
 from solomon.middlewares import OwnerOnlyMiddleware
-from solomon.services.reminders import ReminderService
+from solomon.services.reminders import ReminderService, mirror_timezone
 from solomon.services.tasks import TaskService
 from solomon.services.transcription import DeepgramTranscriber, create_deepgram_client
 from solomon.services.understanding import UnderstandingService, create_anthropic_client
@@ -85,6 +85,11 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     tasks = build_tasks(settings, db, client, speech) if db is not None else None
     reminders = build_reminders(settings, db, bot) if db is not None else None
     dispatcher = build_dispatcher(settings, db=db, tasks=tasks, reminders=reminders)
+    if db is not None:
+        # Пояс владельца — в базу до первого сообщения: правка срока из
+        # приложения берёт его оттуда (`techspec/11-edit.md` §11.3). Сбой —
+        # строка в журнале, бот работает дальше.
+        await mirror_timezone(settings, db)
     # Цикл напоминаний живёт рядом с polling, в том же процессе
     # (`techspec/06-reminders.md` §6.2): отдельного планировщика нет.
     ticking = asyncio.create_task(reminders.run()) if reminders is not None else None

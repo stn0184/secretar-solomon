@@ -16,6 +16,7 @@ from tests.conftest import (
     STRANGER_ID,
     FakeAnalyst,
     FakeMessages,
+    FakePlanner,
     FakeTranscriber,
     FakeUnderstandings,
     RecordingSession,
@@ -44,6 +45,7 @@ def build_tasks(
         record_understanding=FakeUnderstandings(),
         analyst=analyst,
         transcriber=transcriber or FakeTranscriber(),
+        planner=FakePlanner(),
     )
     return service, record_message, analyst
 

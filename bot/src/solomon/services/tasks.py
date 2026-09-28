@@ -41,9 +41,10 @@ from supabase import Client
 from solomon import texts
 from solomon.config import Settings
 from solomon.db import tasks as db_tasks
+from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import MessageKind, OpenQuestion, SavedMessage, SpeechKind, Task
-from solomon.services.reminders import Planned, next_fire_at, plan
+from solomon.services.reminders import Planner, database_planner, next_fire_at
 from solomon.services.transcription import (
     NotTranscribed,
     Transcriber,
@@ -292,6 +293,7 @@ class TaskService:
         record_understanding: UnderstandingRecorder,
         analyst: Analyst,
         transcriber: Transcriber,
+        planner: Planner,
         clock: Clock | None = None,
         open_question: QuestionReader | None = None,
     ) -> None:
@@ -300,6 +302,9 @@ class TaskService:
         self._record_understanding = record_understanding
         self._analyst = analyst
         self._transcriber = transcriber
+        # Расписание считает база (`techspec/11-edit.md` §11.3); бот берёт план
+        # у неё и передаёт в запись как есть.
+        self._planner = planner
         # Без читателя вопросов бот ответа не узнаёт, но и не спотыкается:
         # разбор идёт как до этапа 008. Обычная сборка читатель подключает.
         self._read_question = open_question
@@ -381,6 +386,7 @@ class TaskService:
             record_understanding=record_understanding,
             analyst=analyst,
             transcriber=transcriber,
+            planner=database_planner(settings, db),
             open_question=read_question,
         )
 
@@ -553,7 +559,13 @@ class TaskService:
         now = self._clock()
         if isinstance(verdict, Analysis):
             understanding = verdict.understanding
-            decision = self._decide(understanding, asked, now)
+            try:
+                decision = await self._decide(understanding, asked, now)
+            except DatabaseError as error:
+                # Без плана «Напомню» было бы неправдой, а задача без
+                # напоминаний — тихой потерей: честнее не записать (§11.3).
+                logger.warning("Расписание не получено, разбор не записан: %s", error)
+                return RecordOutcome(ok=False, message=texts.NOT_SAVED)
             analysis: Mapping[str, Any] | None = understanding.model_dump(mode="json")
             facts = fact_rows(understanding)
             ai_model: str | None = verdict.model
@@ -604,7 +616,7 @@ class TaskService:
             logger.info("Записана задача %s", recorded.id)
         return RecordOutcome(ok=True, message=decision.reply)
 
-    def _decide(
+    async def _decide(
         self, understanding: Understanding, asked: OpenQuestion | None, now: datetime
     ) -> Decision:
         """Три пути разбора: ответ на вопрос, запись с вопросом, обычная запись.
@@ -614,15 +626,17 @@ class TaskService:
         не новой задачей. Вопрос — только у задачи (§10.1): она записывается
         сразу, с пометкой и текстом вопроса. «Ответ» без открытого вопроса
         отвечать не на что — это обычная запись.
+
+        План берётся у базы, только когда есть что планировать — задача или
+        поправка; у разговора и сведения о себе задачи нет, и звать базу
+        незачем. Отказ базы выходит наружу `DatabaseError`.
         """
-        timezone = self._settings.owner_timezone
         if asked is not None and understanding.answers_question:
             changed = amendment(asked, understanding)
-            planned = plan(
+            planned = await self._planner(
                 due_at=changed.due_at,
                 due_precision=changed.due_precision,
                 kind=changed.kind,
-                timezone=timezone,
                 now=now,
             )
             reply = texts.understood_reply(
@@ -640,13 +654,15 @@ class TaskService:
             }
             return Decision(reply=reply, task=None, reminders=[], amend=amend)
 
-        planned = plan(
-            due_at=understanding.due_at,
-            due_precision=understanding.due_precision,
-            kind=understanding.kind,
-            timezone=timezone,
-            now=now,
-        )
+        task_row = task_fields(understanding) if understanding.kind in TASK_KINDS else None
+        planned = []
+        if task_row is not None:
+            planned = await self._planner(
+                due_at=understanding.due_at,
+                due_precision=understanding.due_precision,
+                kind=understanding.kind,
+                now=now,
+            )
         question = question_of(understanding)
         if question is not None:
             reply = texts.asked_reply(
@@ -658,7 +674,6 @@ class TaskService:
             task = {**task_fields(understanding), "needs_review": True, "open_question": question}
             return Decision(reply=reply, task=task, reminders=planned)
 
-        task_row = task_fields(understanding) if understanding.kind in TASK_KINDS else None
         return Decision(
             reply=self._reply_for(understanding, planned, now), task=task_row, reminders=planned
         )

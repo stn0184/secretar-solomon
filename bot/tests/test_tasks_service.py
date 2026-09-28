@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from solomon import texts
+from solomon.db.reminders import Planned
 from solomon.db.tasks import OpenQuestion, SavedMessage, SpeechKind, Task
 from solomon.services.tasks import (
     SUMMARY_LIMIT,
@@ -33,6 +34,7 @@ from tests.conftest import (
     SPOKEN,
     FakeAnalyst,
     FakeMessages,
+    FakePlanner,
     FakeQuestions,
     FakeTranscriber,
     FakeUnderstandings,
@@ -50,6 +52,7 @@ def build_service(
     messages: FakeMessages | None = None,
     understandings: FakeUnderstandings | None = None,
     transcriber: FakeTranscriber | None = None,
+    planner: FakePlanner | None = None,
 ) -> tuple[TaskService, FakeMessages, FakeUnderstandings]:
     """Сервис на подменённой базе: и запись сообщения, и запись разбора."""
     record_message = messages or FakeMessages()
@@ -60,6 +63,7 @@ def build_service(
         record_understanding=record_understanding,
         analyst=analyst,
         transcriber=transcriber or FakeTranscriber(),
+        planner=planner or FakePlanner(),
     )
     return service, record_message, record_understanding
 
@@ -810,6 +814,7 @@ def build_dialog_service(
     analyst: FakeAnalyst,
     questions: FakeQuestions | None = None,
     transcriber: FakeTranscriber | None = None,
+    planner: FakePlanner | None = None,
 ) -> tuple[TaskService, FakeQuestions, FakeUnderstandings]:
     """Сервис с открытым вопросом `ASKED` и часами на четверг, 13:00.
 
@@ -824,6 +829,7 @@ def build_dialog_service(
         record_understanding=understandings,
         analyst=analyst,
         transcriber=transcriber or FakeTranscriber(),
+        planner=planner or FakePlanner(),
         clock=lambda: THURSDAY_AFTERNOON,
         open_question=reader,
     )
@@ -889,7 +895,13 @@ async def test_question_with_a_due_names_the_due_and_the_reminder_first() -> Non
             question="Кому позвонить?",
         )
     )
-    service, _, understandings = build_dialog_service(analyst, FakeQuestions())
+    friday_plan = FakePlanner(
+        [
+            Planned(stage="before", fire_at=FRIDAY_DUE.replace(hour=9)),
+            Planned(stage="due", fire_at=FRIDAY_DUE),
+        ]
+    )
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions(), planner=friday_plan)
 
     outcome = await say(service, "в пятницу позвонить")
 
@@ -988,11 +1000,26 @@ async def test_question_read_failure_is_logged_and_the_analysis_goes_on(
 async def test_answer_amends_the_asked_task_and_says_understood() -> None:
     """§10.2: новые поля и напоминания — в ту же задачу, новой задачи нет."""
     analyst = FakeAnalyst(answer(due_at=FRIDAY_DUE, due_precision="day"))
-    service, questions, understandings = build_dialog_service(analyst)
+    planner = FakePlanner(
+        [
+            Planned(stage="before", fire_at=FRIDAY_DUE.replace(hour=9)),
+            Planned(stage="due", fire_at=FRIDAY_DUE),
+        ]
+    )
+    service, questions, understandings = build_dialog_service(analyst, planner=planner)
 
     outcome = await say(service, "в пятницу")
 
     assert outcome.ok
+    # План спрошен по сроку, каким он станет у задачи после ответа.
+    assert planner.calls == [
+        {
+            "due_at": FRIDAY_DUE,
+            "due_precision": "day",
+            "kind": "task",
+            "now": THURSDAY_AFTERNOON,
+        }
+    ]
     assert outcome.message == (
         "Понял: отправить расчёт клиенту. Срок: пятница, 18 сентября. Напомню: 18 сентября в 09:00"
     )
@@ -1141,6 +1168,7 @@ async def test_repeated_update_does_not_read_the_question() -> None:
         record_understanding=FakeUnderstandings(),
         analyst=analyst,
         transcriber=FakeTranscriber(),
+        planner=FakePlanner(),
         clock=lambda: THURSDAY_AFTERNOON,
         open_question=questions,
     )

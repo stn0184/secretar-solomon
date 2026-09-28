@@ -39,6 +39,7 @@ from aiogram.types import (
 )
 
 from solomon.config import Settings
+from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import MessageKind, OpenQuestion, SavedMessage, SpeechKind, Task
 from solomon.services.transcription import Transcript, TranscriptionResult
@@ -299,6 +300,35 @@ class FakeQuestions:
         if self.asked is None or self.asked.asked_at < since:
             return None
         return self.asked
+
+
+class FakePlanner:
+    """Вместо `reminder_plan` в базе — заранее решённый план и список вызовов.
+
+    Само правило §6.1 здесь не повторяется: оно живёт в базе и проверяется
+    тестами PGlite (`supabase/tests/reminder_plan.test.ts`). Тест бота
+    смотрит, с чем сервис спросил план и что сделал с ответом.
+    """
+
+    def __init__(self, planned: Sequence[Planned] = (), broken: bool = False) -> None:
+        self.planned = list(planned)
+        self.broken = broken
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(
+        self,
+        *,
+        due_at: datetime | None,
+        due_precision: str | None,
+        kind: str,
+        now: datetime,
+    ) -> list[Planned]:
+        self.calls.append(
+            {"due_at": due_at, "due_precision": due_precision, "kind": kind, "now": now}
+        )
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return list(self.planned)
 
 
 def make_understanding(**fields: Any) -> Understanding:

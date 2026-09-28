@@ -19,13 +19,19 @@ from aiogram.types import InlineKeyboardMarkup
 from supabase import Client
 
 from solomon import texts
-from solomon.db.reminders import DueReminder
+from solomon.db.reminders import DueReminder, Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import Task
 from solomon.handlers import done_keyboard
 from solomon.runner import build_dispatcher
 from solomon.runner import build_reminders as build_reminders_service
-from solomon.services.reminders import ReminderService, by_task, latest, plan
+from solomon.services.reminders import (
+    ReminderService,
+    by_task,
+    database_planner,
+    latest,
+    mirror_timezone,
+)
 from solomon.services.tasks import TaskService
 from solomon.services.understanding import Understanding
 from tests.conftest import (
@@ -34,6 +40,7 @@ from tests.conftest import (
     STRANGER_ID,
     FakeAnalyst,
     FakeMessages,
+    FakePlanner,
     FakeTranscriber,
     FakeUnderstandings,
     RecordingSession,
@@ -50,146 +57,245 @@ MONDAY_MORNING = datetime(2026, 9, 21, 10, 0, tzinfo=TZ)
 FRIDAY_END_OF_DAY = datetime(2026, 9, 25, 18, 0, tzinfo=TZ)
 
 
-def stages(
-    due_at: datetime | None, precision: str | None, now: datetime, kind: str = "task"
-) -> list[tuple[str, datetime]]:
-    """План в виде пар «ступень — момент»: так его удобно сверять глазами."""
-    return [
-        (planned.stage, planned.fire_at.astimezone(TZ))
-        for planned in plan(due_at=due_at, due_precision=precision, kind=kind, timezone=TZ, now=now)
-    ]
-
-
-def test_day_ahead_gets_morning_and_end_of_day() -> None:
-    """Назван день: заранее — 09:00 того дня, к сроку — сам `due_at` (18:00)."""
-    assert stages(FRIDAY_END_OF_DAY, "day", MONDAY_MORNING) == [
-        ("before", FRIDAY_END_OF_DAY.replace(hour=9)),
-        ("due", FRIDAY_END_OF_DAY),
-    ]
-
-
-def test_today_after_nine_gets_only_the_due_one() -> None:
-    """Утро сегодняшнего дня уже прошло — эта ступень не заводится."""
-    today = MONDAY_MORNING.replace(hour=18)
-
-    assert stages(today, "day", MONDAY_MORNING) == [("due", today)]
-
-
-def test_named_time_gets_an_hour_ahead_and_the_moment() -> None:
-    at_three = datetime(2026, 9, 25, 15, 0, tzinfo=TZ)
-
-    assert stages(at_three, "time", MONDAY_MORNING) == [
-        ("before", at_three.replace(hour=14)),
-        ("due", at_three),
-    ]
-
-
-def test_hour_ahead_already_passed_leaves_only_the_moment() -> None:
-    """Сказано «сегодня в 15:00» в 14:30: час до срока прошёл, и это не повод
-    стучаться немедленно (§6.1)."""
-    at_three = MONDAY_MORNING.replace(hour=15)
-    half_past_two = MONDAY_MORNING.replace(hour=14, minute=30)
-
-    assert stages(at_three, "time", half_past_two) == [("due", at_three)]
-
-
-def test_due_in_the_past_plans_nothing() -> None:
-    yesterday = MONDAY_MORNING.replace(day=20, hour=18)
-
-    assert stages(yesterday, "day", MONDAY_MORNING) == []
-
-
-def test_task_without_a_due_date_plans_nothing() -> None:
-    assert stages(None, None, MONDAY_MORNING) == []
-
-
-def test_idea_and_wish_are_not_reminded_about() -> None:
-    """Идея и желание — не дела: стучаться не о чем (§6.1)."""
-    assert stages(FRIDAY_END_OF_DAY, "day", MONDAY_MORNING, kind="idea") == []
-    assert stages(FRIDAY_END_OF_DAY, "day", MONDAY_MORNING, kind="wish") == []
-
-
-def test_due_at_in_another_zone_is_planned_in_the_owner_one() -> None:
-    """`due_at` приходит из базы в UTC — утро считается по поясу владельца."""
-    in_utc = FRIDAY_END_OF_DAY.astimezone(ZoneInfo("UTC"))
-
-    assert stages(in_utc, "day", MONDAY_MORNING) == [
-        ("before", FRIDAY_END_OF_DAY.replace(hour=9)),
-        ("due", FRIDAY_END_OF_DAY),
-    ]
-
-
-def test_plan_is_ready_for_the_database_as_rows() -> None:
-    """В `record_understanding` уходит список `{stage, fire_at}` (§3.5)."""
-    planned = plan(
-        due_at=FRIDAY_END_OF_DAY,
-        due_precision="day",
-        kind="task",
-        timezone=TZ,
-        now=MONDAY_MORNING,
-    )
-
-    rows = [item.as_row() for item in planned]
-
-    assert rows[0]["stage"] == "before"
-    assert rows[0]["fire_at"].startswith("2026-09-25T09:00")
-    assert rows[1]["stage"] == "due"
-
-
 def build_service(
-    understanding: Understanding, now: datetime
-) -> tuple[TaskService, FakeUnderstandings]:
+    understanding: Understanding, now: datetime, planner: FakePlanner | None = None
+) -> tuple[TaskService, FakeUnderstandings, FakePlanner]:
     """Приём поручения на подменённой базе и с остановленными часами."""
     understandings = FakeUnderstandings()
+    planned = planner or FakePlanner()
     service = TaskService(
         settings=make_settings(),
         record_message=FakeMessages(),
         record_understanding=understandings,
         analyst=FakeAnalyst(understanding),
         transcriber=FakeTranscriber(),
+        planner=planned,
         clock=lambda: now,
     )
-    return service, understandings
+    return service, understandings, planned
 
 
-async def record(understanding: Understanding, now: datetime) -> tuple[str, list[dict[str, str]]]:
-    """Ответ человеку и напоминания, ушедшие в базу тем же вызовом."""
-    service, understandings = build_service(understanding, now)
+async def record(
+    understanding: Understanding, now: datetime, planner: FakePlanner | None = None
+) -> tuple[str, list[dict[str, str]], FakePlanner]:
+    """Ответ человеку, напоминания, ушедшие в базу тем же вызовом, и вопросы к плану."""
+    service, understandings, planned = build_service(understanding, now, planner)
     outcome = await service.record_from_message(
         chat_id=OWNER_ID, telegram_message_id=7, text="в пятницу отправить расчёт"
     )
-    rows = cast(list[dict[str, str]], understandings.calls[0]["reminders"])
-    return outcome.message, rows
+    rows = (
+        cast(list[dict[str, str]], understandings.calls[0]["reminders"])
+        if understandings.calls
+        else []
+    )
+    return outcome.message, rows, planned
 
 
-async def test_confirmation_names_the_nearest_reminder() -> None:
-    """«Напомню» — про ближайшую ступень, а не про срок (§6.4)."""
-    message, rows = await record(
+async def test_plan_is_asked_of_the_database_with_the_task_due() -> None:
+    """Расписание считает база (§11.3): бот спрашивает его по сроку, точности и виду."""
+    _, _, planner = await record(
         make_understanding(title="отправить расчёт", due_at=FRIDAY_END_OF_DAY, due_precision="day"),
         MONDAY_MORNING,
     )
 
+    assert planner.calls == [
+        {
+            "due_at": FRIDAY_END_OF_DAY,
+            "due_precision": "day",
+            "kind": "task",
+            "now": MONDAY_MORNING,
+        }
+    ]
+
+
+async def test_confirmation_names_the_nearest_reminder() -> None:
+    """«Напомню» — про ближайшую ступень плана, а не про срок (§6.4).
+
+    План уходит в базу как есть: бот обещает ровно то, что записал.
+    """
+    morning = FRIDAY_END_OF_DAY.replace(hour=9)
+    planner = FakePlanner(
+        [Planned(stage="due", fire_at=FRIDAY_END_OF_DAY), Planned(stage="before", fire_at=morning)]
+    )
+    message, rows, _ = await record(
+        make_understanding(title="отправить расчёт", due_at=FRIDAY_END_OF_DAY, due_precision="day"),
+        MONDAY_MORNING,
+        planner,
+    )
+
     assert "Напомню: 25 сентября в 09:00" in message
-    assert [row["stage"] for row in rows] == ["before", "due"]
+    assert rows == [
+        {"stage": "due", "fire_at": FRIDAY_END_OF_DAY.isoformat()},
+        {"stage": "before", "fire_at": morning.isoformat()},
+    ]
 
 
 async def test_confirmation_says_today_when_the_reminder_is_today() -> None:
     today = MONDAY_MORNING.replace(hour=18)
-    message, rows = await record(
+    message, rows, _ = await record(
         make_understanding(title="отправить расчёт", due_at=today, due_precision="day"),
         MONDAY_MORNING,
+        FakePlanner([Planned(stage="due", fire_at=today)]),
     )
 
     assert "Напомню: сегодня в 18:00" in message
     assert [row["stage"] for row in rows] == ["due"]
 
 
-async def test_task_without_a_due_date_promises_nothing() -> None:
+async def test_moment_from_the_database_is_named_in_the_owner_zone() -> None:
+    """База отдаёт момент в UTC — «Напомню» звучит по часам владельца."""
+    morning_utc = FRIDAY_END_OF_DAY.replace(hour=9).astimezone(ZoneInfo("UTC"))
+    message, _, _ = await record(
+        make_understanding(title="отправить расчёт", due_at=FRIDAY_END_OF_DAY, due_precision="day"),
+        MONDAY_MORNING,
+        FakePlanner([Planned(stage="before", fire_at=morning_utc)]),
+    )
+
+    assert "Напомню: 25 сентября в 09:00" in message
+
+
+async def test_empty_plan_promises_nothing() -> None:
     """Напоминания нет — и обещания нет: бот не говорит о том, чего не будет."""
-    message, rows = await record(make_understanding(title="купить лампочку"), MONDAY_MORNING)
+    message, rows, _ = await record(make_understanding(title="купить лампочку"), MONDAY_MORNING)
 
     assert "Напомню" not in message
     assert rows == []
+
+
+async def test_idea_is_planned_by_the_database_too() -> None:
+    """Вид решает база: бот не отсекает идею сам, а передаёт её вид (§6.1)."""
+    _, rows, planner = await record(
+        make_understanding(kind="idea", title="курс по гончарке", due_at=FRIDAY_END_OF_DAY),
+        MONDAY_MORNING,
+    )
+
+    assert [call["kind"] for call in planner.calls] == ["idea"]
+    assert rows == []
+
+
+async def test_talk_without_a_task_does_not_ask_for_a_plan() -> None:
+    """Задачи нет — планировать нечего, и база не зовётся."""
+    message, _, planner = await record(make_understanding(kind="chat", title=""), MONDAY_MORNING)
+
+    assert planner.calls == []
+    assert message == texts.NO_ERRAND
+
+
+async def test_plan_failure_is_a_failed_record() -> None:
+    """База не дала план — не записано: «Напомню» было бы неправдой (§11.3)."""
+    service, understandings, _ = build_service(
+        make_understanding(title="отправить расчёт", due_at=FRIDAY_END_OF_DAY, due_precision="day"),
+        MONDAY_MORNING,
+        FakePlanner(broken=True),
+    )
+
+    outcome = await service.record_from_message(
+        chat_id=OWNER_ID, telegram_message_id=7, text="в пятницу отправить расчёт"
+    )
+
+    assert outcome.ok is False
+    assert outcome.message == texts.NOT_SAVED
+    assert understandings.calls == []
+
+
+class FakeRpcResponse:
+    def __init__(self, data: object) -> None:
+        self.data = data
+
+
+class FakeRpcQuery:
+    def __init__(self, data: object) -> None:
+        self._data = data
+
+    def execute(self) -> FakeRpcResponse:
+        return FakeRpcResponse(self._data)
+
+
+class FakeRpcClient:
+    """Клиент Supabase: на каждую функцию — свой ответ, вызовы записываются."""
+
+    def __init__(self, answers: dict[str, object] | None = None, broken: bool = False) -> None:
+        self.answers = answers or {}
+        self.broken = broken
+        self.calls: list[str] = []
+        self.params: list[dict[str, object]] = []
+
+    def rpc(self, function: str, params: dict[str, object]) -> FakeRpcQuery:
+        self.calls.append(function)
+        self.params.append(params)
+        if self.broken:
+            raise RuntimeError("APIError: connection refused")
+        return FakeRpcQuery(self.answers.get(function))
+
+
+async def test_database_plan_goes_with_the_owner_zone_and_comes_back_in_order() -> None:
+    """`reminder_plan` получает пояс из настроек и «сейчас»; строки — в `Planned`."""
+    client = FakeRpcClient(
+        {
+            "reminder_plan": [
+                {"stage": "due", "fire_at": "2026-09-25T13:00:00+00:00"},
+                {"stage": "before", "fire_at": "2026-09-25T04:00:00+00:00"},
+            ]
+        }
+    )
+    planner = database_planner(make_settings(), cast(Client, client))
+
+    planned = await planner(
+        due_at=FRIDAY_END_OF_DAY, due_precision="day", kind="task", now=MONDAY_MORNING
+    )
+
+    assert client.calls == ["reminder_plan"]
+    assert client.params == [
+        {
+            "due_at": FRIDAY_END_OF_DAY.isoformat(),
+            "due_precision": "day",
+            "kind": "task",
+            "timezone": OWNER_TIMEZONE,
+            "now": MONDAY_MORNING.isoformat(),
+        }
+    ]
+    assert [item.stage for item in planned] == ["before", "due"]
+    assert planned[0].fire_at == FRIDAY_END_OF_DAY.replace(hour=9)
+
+
+async def test_database_plan_without_due_sends_null() -> None:
+    client = FakeRpcClient({"reminder_plan": []})
+    planner = database_planner(make_settings(), cast(Client, client))
+
+    assert await planner(due_at=None, due_precision=None, kind="task", now=MONDAY_MORNING) == []
+    assert client.params[0]["due_at"] is None
+
+
+async def test_unknown_stage_from_the_database_is_a_refusal() -> None:
+    client = FakeRpcClient(
+        {"reminder_plan": [{"stage": "later", "fire_at": "2026-09-25T04:00:00+00:00"}]}
+    )
+    planner = database_planner(make_settings(), cast(Client, client))
+
+    with pytest.raises(DatabaseError):
+        await planner(
+            due_at=FRIDAY_END_OF_DAY, due_precision="day", kind="task", now=MONDAY_MORNING
+        )
+
+
+async def test_owner_zone_is_mirrored_into_the_database() -> None:
+    """При запуске бот пишет пояс владельца в базу (§11.3)."""
+    client = FakeRpcClient()
+
+    assert await mirror_timezone(make_settings(), cast(Client, client)) is True
+    assert client.calls == ["save_owner_timezone"]
+    assert client.params == [{"owner_telegram_id": OWNER_ID, "timezone": OWNER_TIMEZONE}]
+
+
+async def test_zone_mirror_failure_is_logged_and_survived(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Не записалось — строка в журнале, бот работает дальше."""
+    client = FakeRpcClient(broken=True)
+
+    with caplog.at_level("ERROR"):
+        assert await mirror_timezone(make_settings(), cast(Client, client)) is False
+    assert "Пояс владельца не записан" in caplog.text
 
 
 def make_due(stage: str, fire_at: datetime, task_id: str = "0e2f", **fields: object) -> DueReminder:
@@ -488,31 +594,6 @@ def test_reminder_carries_the_done_button() -> None:
     assert button.callback_data == "done:0e2f"
 
 
-class FakeRpcResponse:
-    def __init__(self, data: object) -> None:
-        self.data = data
-
-
-class FakeRpcQuery:
-    def __init__(self, data: object) -> None:
-        self._data = data
-
-    def execute(self) -> FakeRpcResponse:
-        return FakeRpcResponse(self._data)
-
-
-class FakeRpcClient:
-    """Клиент Supabase в тике: созревшее по первому вопросу, тишина дальше."""
-
-    def __init__(self, rows: list[dict[str, object]]) -> None:
-        self.rows = rows
-        self.calls: list[str] = []
-
-    def rpc(self, function: str, params: dict[str, object]) -> FakeRpcQuery:
-        self.calls.append(function)
-        return FakeRpcQuery(self.rows if function == "due_reminders" else None)
-
-
 async def test_reminder_goes_to_the_owner_with_the_button(
     bot: Bot, session: RecordingSession
 ) -> None:
@@ -526,7 +607,7 @@ async def test_reminder_goes_to_the_owner_with_the_button(
         "due_at": FRIDAY_END_OF_DAY.isoformat(),
         "due_precision": "day",
     }
-    client = FakeRpcClient([row])
+    client = FakeRpcClient({"due_reminders": [row]})
     service = build_reminders_service(make_settings(), cast(Client, client), bot)
 
     assert await service.tick(FRIDAY_END_OF_DAY) == 1
