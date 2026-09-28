@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -41,11 +42,22 @@ from aiogram.types import (
 from solomon.config import Settings
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import MessageKind, OpenQuestion, SavedMessage, SpeechKind, Task
+from solomon.db.tasks import (
+    MessageKind,
+    OpenQuestion,
+    PickedMessage,
+    SavedMessage,
+    SpeechKind,
+    StoredMessage,
+    Task,
+    TaskDetails,
+    TaskEvent,
+)
 from solomon.services.transcription import Transcript, TranscriptionResult
 from solomon.services.understanding import (
     Analysis,
     AskedQuestion,
+    OpenTask,
     SpeechQuality,
     Understanding,
     Verdict,
@@ -188,7 +200,9 @@ class FakeUnderstandings:
     (`techspec/03-schema.md` §3.4): повтор по сообщению, у которого задача уже
     есть, вопроса не трогает; «не расслышал» — ни разбора, ни задачи, ни
     поправки — тоже; любая другая запись вопрос снимает, а задача с
-    `open_question` ставит новый — со временем от `clock`.
+    `open_question` ставит новый — со временем от `clock`. Правка (`edit`)
+    вопрос тоже снимает; вопрос по правке фейк не ставит — ответ на него
+    тест начинает с готового вопроса.
     """
 
     def __init__(
@@ -222,6 +236,7 @@ class FakeUnderstandings:
         transcript: str | None = None,
         transcript_confidence: float | None = None,
         amend: Mapping[str, Any] | None = None,
+        edit: Mapping[str, Any] | None = None,
     ) -> Task | None:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -240,12 +255,13 @@ class FakeUnderstandings:
                 "transcript": transcript,
                 "transcript_confidence": transcript_confidence,
                 "amend": amend,
+                "edit": edit,
             }
         )
         if message_id in self._with_task:
             return self.task
         if self.questions is not None:
-            self._follow_question(self.questions, analysis, task, amend)
+            self._follow_question(self.questions, analysis, task, amend or edit)
         if task is not None and amend is None:
             self._with_task.add(message_id)
         return self.task
@@ -369,6 +385,11 @@ class FakeAnalyst:
         self.calls: list[tuple[str, str | None, SpeechQuality | None]] = []
         # Открытый вопрос, с которым звали модель (§10.2), — по вызову.
         self.questions: list[AskedQuestion | None] = []
+        # Подсказки правки словом (§12.2) — по вызову: список задач (`None` —
+        # блока 5 нет), номер последней задачи и строка свайпа.
+        self.tasks: list[list[OpenTask] | None] = []
+        self.last_tasks: list[int | None] = []
+        self.swipes: list[str | None] = []
 
     async def analyze(
         self,
@@ -377,10 +398,125 @@ class FakeAnalyst:
         forwarded_from: str | None = None,
         spoken: SpeechQuality | None = None,
         open_question: AskedQuestion | None = None,
+        tasks: Sequence[OpenTask] | None = None,
+        last_task: int | None = None,
+        swipe: str | None = None,
     ) -> Verdict:
         self.calls.append((text, forwarded_from, spoken))
         self.questions.append(open_question)
+        self.tasks.append(None if tasks is None else list(tasks))
+        self.last_tasks.append(last_task)
+        self.swipes.append(swipe)
         return self.verdict
+
+
+def make_details(**fields: Any) -> TaskDetails:
+    """Задача со всеми полями правки: активная, без срока, людей и срочности."""
+    base: dict[str, Any] = {
+        "id": "5b0c7a52-8f3e-4c1d-9a6b-2e4f1d3c8b90",
+        "title": "купить лампочку",
+        "kind": "task",
+        "status": "active",
+        "due_at": None,
+        "due_precision": None,
+        "priority": "normal",
+        "promise": None,
+        "people": (),
+        "created_at": datetime(2026, 9, 15, 10, 0, tzinfo=ZoneInfo(OWNER_TIMEZONE)),
+    }
+    return TaskDetails(**{**base, **fields})
+
+
+class FakeEdits:
+    """Хранилище правки словом (`EditStore` в `services/tasks.py`) без базы.
+
+    Задачи — в любом статусе; список для промпта — только активные, в том
+    порядке, в каком их дал тест: нумерует сервис. `pick` и `reopen` ведут
+    себя как `pick_task` и `reopen_task` (`techspec/03-schema.md` §3.4):
+    второй выбор по тому же сообщению не пишется, неактивная задача не
+    правится, возврат активной — без записи. `broken` — имена методов,
+    которые отвечают отказом базы.
+    """
+
+    def __init__(
+        self,
+        tasks: Sequence[TaskDetails] = (),
+        *,
+        message_event: TaskEvent | None = None,
+        reminder_event: TaskEvent | None = None,
+        reminders: Mapping[int, str] | None = None,
+        messages: Mapping[int, StoredMessage] | None = None,
+        broken: Iterable[str] = (),
+    ) -> None:
+        self.tasks = {task.id: task for task in tasks}
+        self.message_event = message_event
+        self.reminder_event = reminder_event
+        self.reminders = dict(reminders or {})
+        self.messages = dict(messages or {})
+        self.broken = set(broken)
+        self.calls: list[tuple[Any, ...]] = []
+        # Что записано: выбор кнопкой (сообщение, правка, ответ) и возврат.
+        self.picks: list[tuple[str, dict[str, Any], str]] = []
+        self.reopens: list[tuple[str, list[Planned]]] = []
+
+    def _touch(self, name: str, *args: Any) -> None:
+        self.calls.append((name, *args))
+        if name in self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+
+    async def open_tasks(self, limit: int) -> list[TaskDetails]:
+        self._touch("open_tasks", limit)
+        return [task for task in self.tasks.values() if task.status == "active"][:limit]
+
+    async def last_message_event(self, since: datetime) -> TaskEvent | None:
+        self._touch("last_message_event", since)
+        event = self.message_event
+        return event if event is not None and event.at >= since else None
+
+    async def last_reminder_event(self, since: datetime) -> TaskEvent | None:
+        self._touch("last_reminder_event", since)
+        event = self.reminder_event
+        return event if event is not None and event.at >= since else None
+
+    async def reminder_task(self, telegram_message_id: int) -> str | None:
+        self._touch("reminder_task", telegram_message_id)
+        return self.reminders.get(telegram_message_id)
+
+    async def message(self, chat_id: int, telegram_message_id: int) -> StoredMessage | None:
+        self._touch("message", chat_id, telegram_message_id)
+        return self.messages.get(telegram_message_id)
+
+    async def task(self, task_id: str) -> TaskDetails | None:
+        self._touch("task", task_id)
+        return self.tasks.get(task_id)
+
+    async def pick(self, message_id: str, edit: Mapping[str, Any], reply: str) -> PickedMessage:
+        self._touch("pick", message_id)
+        key, stored = next(
+            (key, stored) for key, stored in self.messages.items() if stored.id == message_id
+        )
+        if stored.task_id is not None:
+            return PickedMessage(id=stored.id, task_id=stored.task_id, reply=stored.reply)
+        task = self.tasks.get(str(edit["task_id"]))
+        if task is None or task.status != "active":
+            return PickedMessage(id=stored.id, task_id=None, reply=stored.reply)
+        self.picks.append((message_id, dict(edit), reply))
+        status = {"done": "done", "cancel": "cancelled"}.get(str(edit["action"]), task.status)
+        self.tasks[task.id] = replace(task, status=status)
+        self.messages[key] = replace(stored, task_id=task.id, reply=reply)
+        return PickedMessage(id=stored.id, task_id=task.id, reply=reply)
+
+    async def reopen(self, task_id: str, schedule: Sequence[Planned]) -> TaskDetails | None:
+        self._touch("reopen", task_id)
+        task = self.tasks.get(task_id)
+        if task is None:
+            return None
+        if task.status == "active":
+            return task
+        self.reopens.append((task_id, list(schedule)))
+        reopened = replace(task, status="active")
+        self.tasks[task_id] = reopened
+        return reopened
 
 
 class FakeTranscriber:
