@@ -110,8 +110,11 @@ begin
      and (t.open_question is not null or t.question_asked_at is not null);
 
   -- Ответ на вопрос (§10.2): вместо новой задачи — поправка к названной.
-  -- Меняются только ключи из `fields`; чужая или несуществующая задача —
-  -- отказ, и вся транзакция, включая разбор и память, откатывается.
+  -- Меняются только ключи из `fields`; чужая, несуществующая или уже
+  -- закрытая задача — отказ, и вся транзакция, включая разбор и память,
+  -- откатывается. Закрытую задачу дополнять незачем: её закрыли, пока модель
+  -- разбирала ответ, и напоминания по ней не уйдут (§6.2 берёт только
+  -- активные) — «Напомню» в ответе было бы неправдой (инвариант 4).
   if record_understanding.amend is not null
      and jsonb_typeof(record_understanding.amend) = 'object' then
     changes := coalesce(record_understanding.amend -> 'fields', '{}'::jsonb);
@@ -146,10 +149,11 @@ begin
              else t.needs_review end
      where t.id = (record_understanding.amend ->> 'task_id')::uuid
        and t.owner_telegram_id = record_understanding.owner_telegram_id
+       and t.status = 'active'
     returning t.* into saved;
 
     if not found then
-      raise exception 'record_understanding: task % is not owned by %',
+      raise exception 'record_understanding: task % is not an active task of %',
         record_understanding.amend ->> 'task_id', record_understanding.owner_telegram_id;
     end if;
 
