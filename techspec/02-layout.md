@@ -55,6 +55,7 @@ supabase/                база и Edge Functions
     _shared/             чистая логика: HMAC, initData, JWT
     telegram-auth/       HTTP-обвязка функции
   types/deno.d.ts        кусок API Deno для tsc
+  tests/                 SQL-функции на PGlite: все миграции к пустой базе, без сети
 
 .github/workflows/pages.yml   публикация Mini App на GitHub Pages (§7)
 scripts/gate.mjs         ворота: стековые проверки + состояние спек

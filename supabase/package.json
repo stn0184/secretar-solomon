@@ -6,9 +6,10 @@
   "description": "Edge Functions Соломона: проверка initData Telegram и выдача токена для правил доступа",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"functions/**/*.test.ts\""
+    "test": "node --test \"functions/**/*.test.ts\" \"tests/**/*.test.ts\""
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@types/node": "24.13.5",
     "typescript": "6.0.3"
   }
