@@ -40,7 +40,7 @@ from aiogram.types import (
 
 from solomon.config import Settings
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import MessageKind, SavedMessage, SpeechKind, Task
+from solomon.db.tasks import MessageKind, OpenQuestion, SavedMessage, SpeechKind, Task
 from solomon.services.transcription import Transcript, TranscriptionResult
 from solomon.services.understanding import (
     Analysis,
@@ -203,6 +203,7 @@ class FakeUnderstandings:
         facts: Sequence[Mapping[str, Any]],
         transcript: str | None = None,
         transcript_confidence: float | None = None,
+        amend: Mapping[str, Any] | None = None,
     ) -> Task | None:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -220,9 +221,31 @@ class FakeUnderstandings:
                 "facts": list(facts),
                 "transcript": transcript,
                 "transcript_confidence": transcript_confidence,
+                "amend": amend,
             }
         )
         return self.task
+
+
+class FakeQuestions:
+    """Открытый вопрос владельца: отдаётся, только если задан не раньше `since`.
+
+    Так тест видит и границу суток, которую считает сервис, и то, что старый
+    вопрос до модели не доходит (`techspec/10-dialog.md` §10.3).
+    """
+
+    def __init__(self, asked: OpenQuestion | None = None, broken: bool = False) -> None:
+        self.asked = asked
+        self.broken = broken
+        self.calls: list[tuple[int, datetime]] = []
+
+    async def __call__(self, *, owner_telegram_id: int, since: datetime) -> OpenQuestion | None:
+        self.calls.append((owner_telegram_id, since))
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        if self.asked is None or self.asked.asked_at < since:
+            return None
+        return self.asked
 
 
 def make_understanding(**fields: Any) -> Understanding:

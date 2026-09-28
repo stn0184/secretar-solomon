@@ -7,20 +7,22 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from solomon import texts
-from solomon.db.tasks import SavedMessage, SpeechKind, Task
+from solomon.db.tasks import OpenQuestion, SavedMessage, SpeechKind, Task
 from solomon.services.tasks import (
     SUMMARY_LIMIT,
     RecordOutcome,
     TaskService,
+    amendment,
     fact_rows,
     summarize,
 )
 from solomon.services.transcription import NotTranscribed, Transcript
-from solomon.services.understanding import NotUnderstood
+from solomon.services.understanding import NotUnderstood, Understanding
 from tests.conftest import (
     AUDIO,
     OWNER_ID,
@@ -75,6 +77,101 @@ def test_long_text_is_cut_to_the_limit_with_ellipsis() -> None:
 
     assert retold == "я" * SUMMARY_LIMIT + "…"
     assert len(retold) == SUMMARY_LIMIT + 1
+
+
+# Вопрос, заданный в четверг в полдень по задаче «срочно отправить расчёт».
+ASKED = OpenQuestion(
+    task_id="0e2f",
+    question="К какому сроку?",
+    title="отправить расчёт клиенту",
+    kind="task",
+    due_at=None,
+    due_precision=None,
+    priority="high",
+    promise="mine",
+    people=("клиент",),
+    asked_at=datetime(2026, 9, 17, 12, 0, tzinfo=ZoneInfo(OWNER_TIMEZONE)),
+)
+FRIDAY_DUE = FRIDAY_EVENING.replace(hour=18, minute=0)
+
+
+def answer(**fields: object) -> Understanding:
+    """Ответ модели на открытый вопрос: суть та же, остальное — как сказано."""
+    base: dict[str, object] = {
+        "title": ASKED.title,
+        "answers_question": True,
+        "people": [],
+    }
+    return make_understanding(**{**base, **fields})
+
+
+def test_answer_with_a_due_changes_only_the_due() -> None:
+    """Ответ «в пятницу» дополняет срок; срочность и люди задачи остаются (§10.2)."""
+    changed = amendment(ASKED, answer(due_at=FRIDAY_DUE, due_precision="day"))
+
+    assert changed.fields == {
+        "due_at": FRIDAY_DUE.isoformat(),
+        "due_precision": "day",
+        "needs_review": False,
+    }
+    assert changed.title == "отправить расчёт клиенту"
+    assert changed.kind == "task"
+    assert changed.due_at == FRIDAY_DUE
+    assert changed.due_precision == "day"
+    assert changed.priority == "high"
+
+
+def test_answer_that_changes_nothing_only_lifts_the_review_mark() -> None:
+    """«normal», пустой `promise` и та же суть — это «не менял», а не «сбросить»."""
+    changed = amendment(ASKED, answer(priority="normal", promise=None))
+
+    assert changed.fields == {"needs_review": False}
+    assert changed.priority == "high"
+    assert changed.due_at is None
+
+
+def test_answer_keeps_the_due_of_the_task_when_it_names_none() -> None:
+    asked = replace(ASKED, due_at=FRIDAY_DUE, due_precision="day")
+
+    changed = amendment(asked, answer(people=["Сергей"]))
+
+    assert "due_at" not in changed.fields
+    assert changed.due_at == FRIDAY_DUE
+    assert changed.due_precision == "day"
+
+
+def test_answer_adds_new_people_to_those_already_named() -> None:
+    changed = amendment(ASKED, answer(people=["Сергей", "клиент"]))
+
+    assert changed.fields["people"] == ["клиент", "Сергей"]
+
+
+def test_answer_can_refine_the_title_priority_and_promise() -> None:
+    changed = amendment(
+        ASKED, answer(title="отправить расчёт Сергею", priority="low", promise="to_me")
+    )
+
+    assert changed.fields == {
+        "title": "отправить расчёт Сергею",
+        "priority": "low",
+        "promise": "to_me",
+        "needs_review": False,
+    }
+    assert changed.title == "отправить расчёт Сергею"
+    assert changed.priority == "low"
+
+
+def test_blank_title_in_the_answer_keeps_the_title() -> None:
+    changed = amendment(ASKED, answer(title="  "))
+
+    assert "title" not in changed.fields
+    assert changed.title == "отправить расчёт клиенту"
+
+
+def test_still_unclear_answer_keeps_the_review_mark() -> None:
+    changed = amendment(ASKED, answer(needs_review=True, review_reason="Не понял, к какому дню."))
+
+    assert changed.fields == {"needs_review": True}
 
 
 def test_fact_rows_are_facts_when_said_directly() -> None:

@@ -11,6 +11,13 @@
 скачивание и распознавание, дальше — как с текстом. Не расслышали — честный
 ответ вместо задачи, и «Записал» не говорится (инвариант 4).
 
+Уточняющий вопрос (`techspec/10-dialog.md`) живёт в том же хвосте: перед
+моделью читается открытый вопрос владельца (не старше суток) и уходит ей в
+промпт; модель решает, ответ ли это. Ответ дополняет прежнюю задачу
+(`amend`) — новая не заводится; задача с вопросом записывается сразу, а
+вопрос звучит второй фразой ответа. Не прочитался вопрос — разбор идёт без
+него: поручение важнее контекста.
+
 Обработчик ничего не решает: он зовёт `record_from_message` или
 `record_from_voice` и отправляет то, что вернулось. Владелец берётся из
 настроек, а не из сообщения — чужие обновления до этого слоя не доходят
@@ -26,7 +33,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from supabase import Client
@@ -35,7 +42,7 @@ from solomon import texts
 from solomon.config import Settings
 from solomon.db import tasks as db_tasks
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import MessageKind, SavedMessage, SpeechKind, Task
+from solomon.db.tasks import MessageKind, OpenQuestion, SavedMessage, SpeechKind, Task
 from solomon.services.reminders import Planned, next_fire_at, plan
 from solomon.services.transcription import (
     NotTranscribed,
@@ -46,6 +53,7 @@ from solomon.services.transcription import (
 from solomon.services.understanding import (
     TASK_KINDS,
     Analysis,
+    AskedQuestion,
     Clock,
     SpeechQuality,
     Understanding,
@@ -59,6 +67,10 @@ logger = logging.getLogger(__name__)
 # Пересказ в ответе. В базу текст уходит целиком (инвариант 5), а ответ
 # бота остаётся коротким и в лимит Telegram укладывается всегда.
 SUMMARY_LIMIT = 200
+
+# Сколько живёт вопрос без ответа (`techspec/10-dialog.md` §10.3): дольше —
+# в промпт не попадает, и следующая запись разбора его снимет.
+QUESTION_TTL = timedelta(hours=24)
 
 
 def summarize(text: str) -> str:
@@ -118,7 +130,14 @@ class UnderstandingRecorder(Protocol):
         facts: Sequence[Mapping[str, Any]],
         transcript: str | None = None,
         transcript_confidence: float | None = None,
+        amend: Mapping[str, Any] | None = None,
     ) -> Task | None: ...
+
+
+class QuestionReader(Protocol):
+    """Открытый вопрос владельца, заданный не раньше `since` (§10.2)."""
+
+    async def __call__(self, *, owner_telegram_id: int, since: datetime) -> OpenQuestion | None: ...
 
 
 class Analyst(Protocol):
@@ -130,6 +149,7 @@ class Analyst(Protocol):
         *,
         forwarded_from: str | None = None,
         spoken: SpeechQuality | None = None,
+        open_question: AskedQuestion | None = None,
     ) -> Verdict: ...
 
 
@@ -152,6 +172,82 @@ def task_fields(understanding: Understanding) -> dict[str, Any]:
         "people": understanding.people,
         "needs_review": understanding.needs_review,
     }
+
+
+def question_of(understanding: Understanding) -> str | None:
+    """Вопрос, который бот задаст (§10.1): только у задачи и только непустой.
+
+    Идея, желание, разговор и сведение о себе вопросов не получают, даже если
+    модель его отдала: правило проверяется кодом, а не только промптом.
+    """
+    if understanding.kind != "task" or understanding.question is None:
+        return None
+    return understanding.question.strip() or None
+
+
+@dataclass(frozen=True, slots=True)
+class Amendment:
+    """Задача после ответа на вопрос (§10.2).
+
+    `fields` уходит в `amend` как есть: только то, что ответ изменил, и
+    `needs_review` всегда — пометка снимается, если модель не поставила её
+    снова. Остальное — задача целиком, какой она станет: по ней
+    перепланируются напоминания и собирается ответ «Понял».
+    """
+
+    fields: dict[str, Any]
+    title: str
+    kind: str
+    due_at: datetime | None
+    due_precision: str | None
+    priority: str
+
+
+def amendment(asked: OpenQuestion, understanding: Understanding) -> Amendment:
+    """Слить ответ модели с задачей, по которой задан вопрос.
+
+    Модель отдаёт только то, что ответ добавил (§5.2 п. 4), и пустое у неё
+    значит «не менял», а не «стереть»: нет срока — срок задачи остаётся,
+    `normal` — остаётся прежняя срочность, люди — дописываются к названным.
+    `kind` из ответа не берётся: вид задачи ответ не меняет.
+    """
+    fields: dict[str, Any] = {}
+    title = understanding.title.strip()
+    if title and title != asked.title:
+        fields["title"] = title
+    due_at, due_precision = asked.due_at, asked.due_precision
+    if understanding.due_at is not None and (
+        understanding.due_at != asked.due_at or understanding.due_precision != asked.due_precision
+    ):
+        due_at, due_precision = understanding.due_at, understanding.due_precision
+        fields["due_at"] = due_at.isoformat()
+        fields["due_precision"] = due_precision
+    if understanding.priority != "normal" and understanding.priority != asked.priority:
+        fields["priority"] = understanding.priority
+    if understanding.promise is not None and understanding.promise != asked.promise:
+        fields["promise"] = understanding.promise
+    added = [person for person in understanding.people if person not in asked.people]
+    if added:
+        fields["people"] = [*asked.people, *added]
+    fields["needs_review"] = understanding.needs_review
+    return Amendment(
+        fields=fields,
+        title=fields.get("title", asked.title),
+        kind=asked.kind,
+        due_at=due_at,
+        due_precision=due_precision,
+        priority=fields.get("priority", asked.priority),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Decision:
+    """Что записать вторым шагом и что ответить человеку."""
+
+    reply: str
+    task: Mapping[str, Any] | None
+    reminders: list[Planned]
+    amend: Mapping[str, Any] | None = None
 
 
 def fact_rows(understanding: Understanding) -> list[dict[str, Any]]:
@@ -197,12 +293,16 @@ class TaskService:
         analyst: Analyst,
         transcriber: Transcriber,
         clock: Clock | None = None,
+        open_question: QuestionReader | None = None,
     ) -> None:
         self._settings = settings
         self._record_message = record_message
         self._record_understanding = record_understanding
         self._analyst = analyst
         self._transcriber = transcriber
+        # Без читателя вопросов бот ответа не узнаёт, но и не спотыкается:
+        # разбор идёт как до этапа 008. Обычная сборка читатель подключает.
+        self._read_question = open_question
         # «Сейчас» внедряется: от него зависит расписание напоминаний, и
         # тесты не должны угадывать, который час (`services/reminders.py`).
         self._clock = clock or self._now
@@ -251,6 +351,7 @@ class TaskService:
             facts: Sequence[Mapping[str, Any]],
             transcript: str | None = None,
             transcript_confidence: float | None = None,
+            amend: Mapping[str, Any] | None = None,
         ) -> Task | None:
             return await db_tasks.record_understanding(
                 db,
@@ -266,6 +367,12 @@ class TaskService:
                 facts=facts,
                 transcript=transcript,
                 transcript_confidence=transcript_confidence,
+                amend=amend,
+            )
+
+        async def read_question(*, owner_telegram_id: int, since: datetime) -> OpenQuestion | None:
+            return await db_tasks.open_question(
+                db, owner_telegram_id=owner_telegram_id, since=since
             )
 
         return cls(
@@ -274,6 +381,7 @@ class TaskService:
             record_understanding=record_understanding,
             analyst=analyst,
             transcriber=transcriber,
+            open_question=read_question,
         )
 
     @classmethod
@@ -397,6 +505,23 @@ class TaskService:
         logger.info("Не расслышал сообщение %s: %s", saved.id, result.reason)
         return RecordOutcome(ok=False, message=reply)
 
+    async def _open_question(self) -> OpenQuestion | None:
+        """Открытый вопрос не старше суток — или ничего, если база не ответила.
+
+        Поручение важнее контекста: отказ чтения не останавливает разбор, а
+        уходит в журнал (как известные факты, `techspec/08-memory.md` §8.2).
+        """
+        if self._read_question is None:
+            return None
+        try:
+            return await self._read_question(
+                owner_telegram_id=self._settings.owner_telegram_id,
+                since=self._clock() - QUESTION_TTL,
+            )
+        except DatabaseError as error:
+            logger.error("Открытый вопрос не прочитан, разбор без него: %s", error)
+            return None
+
     async def _understand(
         self,
         saved: SavedMessage,
@@ -409,28 +534,22 @@ class TaskService:
 
         `transcript` есть у голоса: модели говорится, что текст распознан и
         с каким качеством (§9.4), а расшифровка уходит в базу тем же вызовом,
-        что разбор и задача (§9.3).
+        что разбор и задача (§9.3). Открытый вопрос читается до модели и
+        уходит ей в промпт (§10.2) — и для текста, и для голоса.
         """
         spoken: SpeechQuality | None = None
         if transcript is not None:
             spoken = "low" if transcript.low_confidence else "fine"
 
-        verdict = await self._analyst.analyze(text, forwarded_from=forwarded_from, spoken=spoken)
+        asked = await self._open_question()
+        verdict = await self._analyst.analyze(
+            text, forwarded_from=forwarded_from, spoken=spoken, open_question=asked
+        )
         now = self._clock()
         if isinstance(verdict, Analysis):
             understanding = verdict.understanding
-            planned = plan(
-                due_at=understanding.due_at,
-                due_precision=understanding.due_precision,
-                kind=understanding.kind,
-                timezone=self._settings.owner_timezone,
-                now=now,
-            )
-            reply = self._reply_for(understanding, planned, now)
+            decision = self._decide(understanding, asked, now)
             analysis: Mapping[str, Any] | None = understanding.model_dump(mode="json")
-            task: Mapping[str, Any] | None = (
-                task_fields(understanding) if understanding.kind in TASK_KINDS else None
-            )
             facts = fact_rows(understanding)
             ai_model: str | None = verdict.model
             input_tokens: int | None = verdict.input_tokens
@@ -438,10 +557,12 @@ class TaskService:
         else:
             # Разбора не случилось: записываем буквально и говорим об этом.
             # Срока у такой задачи нет, значит и напоминать не о чем.
-            planned = []
-            reply = texts.RECORDED_AS_IS.format(text=summarize(text))
+            decision = Decision(
+                reply=texts.RECORDED_AS_IS.format(text=summarize(text)),
+                task=literal_fields(text),
+                reminders=[],
+            )
             analysis = None
-            task = literal_fields(text)
             facts = []
             ai_model = None
             input_tokens = None
@@ -455,12 +576,13 @@ class TaskService:
                 ai_model=ai_model,
                 ai_input_tokens=input_tokens,
                 ai_output_tokens=output_tokens,
-                reply=reply,
-                task=task,
-                reminders=[item.as_row() for item in planned],
+                reply=decision.reply,
+                task=decision.task,
+                reminders=[item.as_row() for item in decision.reminders],
                 facts=facts,
                 transcript=transcript.text if transcript is not None else None,
                 transcript_confidence=transcript.confidence if transcript is not None else None,
+                amend=decision.amend,
             )
         except DatabaseError as error:
             logger.warning("Разбор не записан: %s", error)
@@ -469,11 +591,86 @@ class TaskService:
         if facts:
             logger.info("Записано сведений о владельце: %s", len(facts))
 
-        if recorded is not None:
-            logger.info("Записана задача %s", recorded.id)
-        else:
+        if recorded is None:
             logger.info("Задачи нет: сообщение %s сохранено с разбором", saved.id)
-        return RecordOutcome(ok=True, message=reply)
+        elif decision.amend is not None:
+            logger.info("Ответ на вопрос дополнил задачу %s", recorded.id)
+        else:
+            logger.info("Записана задача %s", recorded.id)
+        return RecordOutcome(ok=True, message=decision.reply)
+
+    def _decide(
+        self, understanding: Understanding, asked: OpenQuestion | None, now: datetime
+    ) -> Decision:
+        """Три пути разбора: ответ на вопрос, запись с вопросом, обычная запись.
+
+        Ответ дополняет задачу, по которой спрашивали (§10.2): напоминания
+        планируются заново по сроку, какой у неё станет, и уходят в `amend`, а
+        не новой задачей. Вопрос — только у задачи (§10.1): она записывается
+        сразу, с пометкой и текстом вопроса. «Ответ» без открытого вопроса
+        отвечать не на что — это обычная запись.
+        """
+        timezone = self._settings.owner_timezone
+        if asked is not None and understanding.answers_question:
+            changed = amendment(asked, understanding)
+            planned = plan(
+                due_at=changed.due_at,
+                due_precision=changed.due_precision,
+                kind=changed.kind,
+                timezone=timezone,
+                now=now,
+            )
+            reply = texts.understood_reply(
+                title=changed.title,
+                due=self._due_words(changed.due_at, changed.due_precision),
+                review_reason=understanding.review_reason if understanding.needs_review else None,
+                # Срочность звучит, только если её изменил сам ответ.
+                priority=changed.priority if "priority" in changed.fields else "normal",
+                remind_at=self._remind_words(planned, now),
+            )
+            amend = {
+                "task_id": asked.task_id,
+                "fields": changed.fields,
+                "reminders": [item.as_row() for item in planned],
+            }
+            return Decision(reply=reply, task=None, reminders=[], amend=amend)
+
+        planned = plan(
+            due_at=understanding.due_at,
+            due_precision=understanding.due_precision,
+            kind=understanding.kind,
+            timezone=timezone,
+            now=now,
+        )
+        question = question_of(understanding)
+        if question is not None:
+            reply = texts.asked_reply(
+                title=understanding.title,
+                question=question,
+                due=self._due_words(understanding.due_at, understanding.due_precision),
+                remind_at=self._remind_words(planned, now),
+            )
+            task = {**task_fields(understanding), "needs_review": True, "open_question": question}
+            return Decision(reply=reply, task=task, reminders=planned)
+
+        task_row = task_fields(understanding) if understanding.kind in TASK_KINDS else None
+        return Decision(
+            reply=self._reply_for(understanding, planned, now), task=task_row, reminders=planned
+        )
+
+    def _due_words(self, due_at: datetime | None, precision: str | None) -> str | None:
+        """Срок словами в поясе владельца; нет срока — нет и строки."""
+        if due_at is None:
+            return None
+        return texts.format_due(due_at.astimezone(self._settings.owner_timezone), precision)
+
+    def _remind_words(self, planned: list[Planned], now: datetime) -> str | None:
+        """Ближайшее напоминание словами — из того же плана, что уходит в базу (§6.4)."""
+        nearest = next_fire_at(planned)
+        if nearest is None:
+            return None
+        timezone = self._settings.owner_timezone
+        return texts.format_remind_at(nearest.astimezone(timezone), now.astimezone(timezone))
 
     def _reply_for(
         self, understanding: Understanding, planned: list[Planned], now: datetime
@@ -493,23 +690,11 @@ class TaskService:
             return texts.ALREADY_KNOWN
         if understanding.kind not in TASK_KINDS:
             return texts.NO_ERRAND
-        timezone = self._settings.owner_timezone
-        due = None
-        if understanding.due_at is not None:
-            due = texts.format_due(
-                understanding.due_at.astimezone(timezone), understanding.due_precision
-            )
-        nearest = next_fire_at(planned)
-        remind_at = (
-            None
-            if nearest is None
-            else texts.format_remind_at(nearest.astimezone(timezone), now.astimezone(timezone))
-        )
         return texts.recorded_reply(
             kind=understanding.kind,
             title=understanding.title,
-            due=due,
+            due=self._due_words(understanding.due_at, understanding.due_precision),
             review_reason=understanding.review_reason if understanding.needs_review else None,
             priority=understanding.priority,
-            remind_at=remind_at,
+            remind_at=self._remind_words(planned, now),
         )

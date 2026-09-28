@@ -154,6 +154,26 @@ PRIORITY_NAMES = {"high": "высокий", "normal": "обычный", "low": "
 PRIORITY_WORDS = {key: f"Приоритет: {PRIORITY_NAMES[key]}" for key in ("high", "low")}
 
 
+def _retold(
+    head: str,
+    due: str | None,
+    remind_at: str | None,
+    priority: str,
+    tail: str | None,
+) -> str:
+    """Пересказ по частям: суть, срок, когда напомню, приоритет, последняя фраза."""
+    parts = [head]
+    if due:
+        parts.append(f"Срок: {due}")
+    if remind_at:
+        parts.append(f"Напомню: {remind_at}")
+    if priority in PRIORITY_WORDS:
+        parts.append(PRIORITY_WORDS[priority])
+    if tail:
+        parts.append(tail)
+    return ". ".join(parts)
+
+
 def recorded_reply(
     kind: str,
     title: str,
@@ -172,16 +192,37 @@ def recorded_reply(
     Из ответа модели дословно уходит только `review_reason`
     (`techspec/05-ai.md` §5.4) — остальное собрано здесь.
     """
-    parts = [RECORDED_BY_KIND.get(kind, RECORDED_BY_KIND["task"]).format(title=title)]
-    if due:
-        parts.append(f"Срок: {due}")
-    if remind_at:
-        parts.append(f"Напомню: {remind_at}")
-    if priority in PRIORITY_WORDS:
-        parts.append(PRIORITY_WORDS[priority])
-    if review_reason:
-        parts.append(review_reason)
-    return ". ".join(parts)
+    head = RECORDED_BY_KIND.get(kind, RECORDED_BY_KIND["task"]).format(title=title)
+    return _retold(head, due, remind_at, priority, review_reason)
+
+
+def asked_reply(
+    title: str, question: str, due: str | None = None, remind_at: str | None = None
+) -> str:
+    """Запись с уточняющим вопросом (`techspec/10-dialog.md` §10.1).
+
+    «Записал: отправить расчёт клиенту. К какому сроку?» — задача уже в базе,
+    вторая фраза и есть вопрос. Приоритета и причины здесь нет: вопрос
+    говорит, чего не хватает, а лишняя фраза перед ним его заслонила бы.
+    Вопрос уходит дословно от модели, как `review_reason`.
+    """
+    return _retold(RECORDED_BY_KIND["task"].format(title=title), due, remind_at, "normal", question)
+
+
+# Ответ на вопрос лёг в ту же задачу (§10.2): пересказ как при записи, но
+# словом «Понял» — человек видит, что второй задачи не появилось.
+UNDERSTOOD = "Понял: {title}"
+
+
+def understood_reply(
+    title: str,
+    due: str | None = None,
+    review_reason: str | None = None,
+    priority: str = "normal",
+    remind_at: str | None = None,
+) -> str:
+    """«Понял: отправить расчёт клиенту. Срок: пятница, 25 сентября. Напомню: …»."""
+    return _retold(UNDERSTOOD.format(title=title), due, remind_at, priority, review_reason)
 
 
 # Напоминание и кнопка под ним (`techspec/06-reminders.md` §6.2, §6.3).

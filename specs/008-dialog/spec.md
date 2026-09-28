@@ -104,7 +104,7 @@
 - [x] `db/tasks.py`: `open_question(owner)` — задача с вопросом не
       старше суток, с явным `owner_telegram_id`; `record_understanding`
       с `amend`.
-- [ ] `services/tasks.py`: общий хвост `_understand` читает открытый
+- [x] `services/tasks.py`: общий хвост `_understand` читает открытый
       вопрос (сбой — лог), передаёт модели; ветка `answers_question` →
       `amend` с перепланированными напоминаниями (`plan` по новому
       сроку) и ответ «Понял: …»; ветка вопроса → `task` с
