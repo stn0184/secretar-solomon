@@ -124,7 +124,7 @@
       `texts.py`; тесты: отправка и снятие отметки, правка между чтением
       и снятием не теряется, закрытая задача — без строки, срок в
       прошлом — без «Напомню», срок снят — «Убрал срок».
-- [ ] Mini App `lib/`: `editTask` через `query()` с разбором ответа
+- [x] Mini App `lib/`: `editTask` через `query()` с разбором ответа
       `parseTask`; чистые `taskChanges(original, draft)` и
       `validateDraft`; перевод между полями ввода и датой в `format.ts`;
       `openQuestion` в модели задачи; `confirmDestructive` с текстом

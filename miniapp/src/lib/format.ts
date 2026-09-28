@@ -121,3 +121,60 @@ export function countOverdue(n: number): string {
   }
   return `${n} ${plural(n, "просрочена", "просрочены", "просрочено")}`;
 }
+
+/* ------------------------------------------------------ поля ввода срока */
+
+function pad(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/** «2026-10-05» — значение для `<input type="date">`; срока нет — пусто. */
+export function dateInputValue(at: Date | null): string {
+  return at ? `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}` : "";
+}
+
+/** «07:05» — значение для `<input type="time">`; срока нет — пусто. */
+export function timeInputValue(at: Date | null): string {
+  return at ? formatTime(at) : "";
+}
+
+/**
+ * Поля «день» и «час» → момент в поясе устройства. Пустое или негодное
+ * (30 февраля, 24:00, не те цифры) — `null`: дата не угадывается.
+ */
+export function momentFromInputs(day: string, time: string): Date | null {
+  const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  const t = /^(\d{2}):(\d{2})$/.exec(time);
+  if (!d || !t) {
+    return null;
+  }
+  const year = Number(d[1]);
+  const month = Number(d[2]);
+  const date = Number(d[3]);
+  const hours = Number(t[1]);
+  const minutes = Number(t[2]);
+  if (hours > 23 || minutes > 59) {
+    return null;
+  }
+  const at = new Date(year, month - 1, date, hours, minutes);
+  // Date сам переносит 30 февраля на 2 марта — такой день не годится.
+  if (at.getFullYear() !== year || at.getMonth() !== month - 1 || at.getDate() !== date) {
+    return null;
+  }
+  return at;
+}
+
+/**
+ * «2026-10-05T12:00:00+03:00» — момент с цифрами часа, которые видел
+ * человек, и смещением устройства на этот день. База читает его как тот
+ * же миг, а смещение сохраняет смысл «в 12 по моим часам».
+ */
+export function isoWithOffset(at: Date): string {
+  const offset = -at.getTimezoneOffset();
+  const sign = offset >= 0 ? "+" : "-";
+  const abs = Math.abs(offset);
+  return (
+    `${dateInputValue(at)}T${formatTime(at)}:${pad(at.getSeconds())}` +
+    `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+  );
+}

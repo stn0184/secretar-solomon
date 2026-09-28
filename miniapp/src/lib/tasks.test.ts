@@ -9,13 +9,25 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+import type { Session } from "./session.ts";
+import type { Db } from "./supabase.ts";
 import {
   type Task,
+  type TaskDraft,
+  draftOf,
+  dueHint,
+  editTask,
   formatDuration,
   groupOf,
   groupTasks,
+  needsSaving,
   parseSourceMessage,
   parseTask,
+  questionOf,
+  taskChanges,
+  validateDraft,
   voiceCaption,
 } from "./tasks.ts";
 
@@ -35,6 +47,7 @@ function task(overrides: Partial<Task> = {}): Task {
     needsReview: false,
     sourceMessageId: null,
     createdAt: new Date(2026, 8, 24, 9, 0),
+    openQuestion: null,
     ...overrides,
   };
 }
@@ -198,5 +211,299 @@ describe("voiceCaption", () => {
 
   it("без длительности — только слово", () => {
     assert.equal(voiceCaption({ text: "", receivedAt: at, kind: "voice", durationSeconds: null }), "Голосовое");
+  });
+});
+
+/* ------------------------------------------------ правка задачи (§11) */
+
+describe("parseTask: вопрос бота", () => {
+  const row = { id: "6f1c", title: "Отправить расчёт", due_at: null };
+
+  it("вопрос и когда он задан — из колонок задачи", () => {
+    const parsed = parseTask({
+      ...row,
+      open_question: "Срок — пятница или понедельник?",
+      question_asked_at: "2026-09-30T04:11:00+00:00",
+    });
+    assert.equal(parsed?.openQuestion?.text, "Срок — пятница или понедельник?");
+    assert.equal(parsed?.openQuestion?.askedAt?.toISOString(), "2026-09-30T04:11:00.000Z");
+  });
+
+  it("нет вопроса или он пустой — null", () => {
+    assert.equal(parseTask(row)?.openQuestion, null);
+    assert.equal(parseTask({ ...row, open_question: "  " })?.openQuestion, null);
+  });
+
+  it("вопрос без времени — есть, но без даты", () => {
+    const parsed = parseTask({ ...row, open_question: "К какому сроку?", question_asked_at: null });
+    assert.deepEqual(parsed?.openQuestion, { text: "К какому сроку?", askedAt: null });
+  });
+});
+
+describe("questionOf", () => {
+  const question = (askedAt: Date | null) => task({ openQuestion: { text: "К какому сроку?", askedAt } });
+
+  it("вопрос не старше суток — показывается", () => {
+    assert.equal(questionOf(question(new Date(2026, 8, 30, 9, 11)), now)?.text, "К какому сроку?");
+    assert.ok(questionOf(question(new Date(2026, 8, 29, 12, 0)), now), "ровно сутки — ещё свежий");
+  });
+
+  it("старше суток, без даты или без вопроса — нет", () => {
+    assert.equal(questionOf(question(new Date(2026, 8, 29, 11, 59)), now), null);
+    assert.equal(questionOf(question(null), now), null);
+    assert.equal(questionOf(task(), now), null);
+  });
+});
+
+function draft(overrides: Partial<TaskDraft> = {}): TaskDraft {
+  return {
+    title: "Задача",
+    day: "",
+    time: "",
+    noDue: true,
+    kind: "task",
+    priority: "normal",
+    promise: "none",
+    people: "",
+    ...overrides,
+  };
+}
+
+// Пятница, 2 октября: день без часа — в базе 18:00.
+const friday = task({
+  title: "Отправить расчёт клиенту",
+  dueAt: new Date(2026, 9, 2, 18, 0),
+  duePrecision: "day",
+  promise: "mine",
+  people: ["Кузнецов", "Анна"],
+});
+
+describe("draftOf", () => {
+  it("день без часа — поле часа пустое", () => {
+    assert.deepEqual(draftOf(friday), {
+      title: "Отправить расчёт клиенту",
+      day: "2026-10-02",
+      time: "",
+      noDue: false,
+      kind: "task",
+      priority: "normal",
+      promise: "mine",
+      people: "Кузнецов, Анна",
+    });
+  });
+
+  it("срок с часом — час в поле", () => {
+    const atNoon = task({ dueAt: new Date(2026, 9, 5, 12, 0), duePrecision: "time" });
+    assert.equal(draftOf(atNoon).time, "12:00");
+    assert.equal(draftOf(atNoon).day, "2026-10-05");
+  });
+
+  it("без срока — флажок и пустые поля; без обещания — «нет»", () => {
+    assert.deepEqual(draftOf(task()), draft());
+  });
+});
+
+describe("validateDraft", () => {
+  it("пустая суть или одни пробелы — «Напишите, что сделать.»", () => {
+    assert.equal(validateDraft(draft({ title: "" })), "Напишите, что сделать.");
+    assert.equal(validateDraft(draft({ title: "   " })), "Напишите, что сделать.");
+  });
+
+  it("срок нужен, а день не выбран — просьба выбрать", () => {
+    assert.equal(
+      validateDraft(draft({ noDue: false, day: "" })),
+      "Выберите день или отметьте «Без срока».",
+    );
+    assert.equal(
+      validateDraft(draft({ noDue: false, day: "2026-02-30" })),
+      "Выберите день или отметьте «Без срока».",
+    );
+  });
+
+  it("годный черновик — без ошибки", () => {
+    assert.equal(validateDraft(draft()), null);
+    assert.equal(validateDraft(draft({ noDue: false, day: "2026-10-05" })), null);
+    assert.equal(validateDraft(draft({ noDue: false, day: "2026-10-05", time: "12:00" })), null);
+  });
+});
+
+describe("taskChanges", () => {
+  it("ничего не меняли — пусто", () => {
+    assert.deepEqual(taskChanges(friday, draftOf(friday)), {});
+    assert.deepEqual(taskChanges(task(), draftOf(task())), {});
+  });
+
+  it("суть — без пробелов по краям; те же слова с пробелами — не правка", () => {
+    const edited = { ...draftOf(friday), title: "  Отправить расчёт Кузнецову " };
+    assert.deepEqual(taskChanges(friday, edited), { title: "Отправить расчёт Кузнецову" });
+    assert.deepEqual(taskChanges(friday, { ...draftOf(friday), title: " Отправить расчёт клиенту " }), {});
+  });
+
+  it("другой день без часа — датой, 18:00 ставит база", () => {
+    assert.deepEqual(taskChanges(friday, { ...draftOf(friday), day: "2026-10-05" }), {
+      due_date: "2026-10-05",
+    });
+  });
+
+  it("день с часом — моментом со смещением устройства", () => {
+    const changes = taskChanges(friday, { ...draftOf(friday), day: "2026-10-05", time: "12:00" });
+    assert.deepEqual(Object.keys(changes), ["due_at"]);
+    assert.equal(new Date(changes.due_at as string).getTime(), new Date(2026, 9, 5, 12, 0).getTime());
+  });
+
+  it("тот же момент — не правка; час убрали — датой того же дня", () => {
+    const atNoon = task({ dueAt: new Date(2026, 9, 5, 12, 0), duePrecision: "time" });
+    assert.deepEqual(taskChanges(atNoon, draftOf(atNoon)), {});
+    assert.deepEqual(taskChanges(atNoon, { ...draftOf(atNoon), time: "" }), { due_date: "2026-10-05" });
+  });
+
+  it("«Без срока» снимает срок; у задачи без срока — не правка", () => {
+    assert.deepEqual(taskChanges(friday, { ...draftOf(friday), noDue: true }), { due_at: null });
+    assert.deepEqual(taskChanges(task(), draft({ day: "2026-10-05" })), {});
+  });
+
+  it("вид, срочность и обещание — своими значениями; «нет» — null", () => {
+    assert.deepEqual(
+      taskChanges(friday, { ...draftOf(friday), kind: "idea", priority: "high", promise: "none" }),
+      { kind: "idea", priority: "high", promise: null },
+    );
+    assert.deepEqual(taskChanges(task(), draft({ promise: "to_me" })), { promise: "to_me" });
+  });
+
+  it("люди — через запятую, без пустых и пробелов", () => {
+    assert.deepEqual(taskChanges(friday, { ...draftOf(friday), people: "Кузнецов,  Анна , , Пётр" }), {
+      people: ["Кузнецов", "Анна", "Пётр"],
+    });
+    assert.deepEqual(taskChanges(friday, { ...draftOf(friday), people: " Кузнецов ,Анна" }), {});
+    assert.deepEqual(taskChanges(friday, { ...draftOf(friday), people: "" }), { people: [] });
+  });
+});
+
+describe("needsSaving", () => {
+  it("без изменений и без пометки — запроса нет", () => {
+    assert.equal(needsSaving(friday, {}), false);
+  });
+
+  it("пометка или вопрос любой давности — «Сохранить» снимает их и без изменений", () => {
+    assert.equal(needsSaving(task({ needsReview: true }), {}), true);
+    assert.equal(needsSaving(task({ openQuestion: { text: "Когда?", askedAt: null } }), {}), true);
+  });
+
+  it("есть изменения — запрос", () => {
+    assert.equal(needsSaving(friday, { priority: "high" }), true);
+  });
+});
+
+describe("dueHint", () => {
+  it("без срока и без дня", () => {
+    assert.equal(dueHint(draft(), now), "Без срока напоминать не буду. Час можно указать, когда выбран день.");
+    assert.equal(dueHint(draft({ noDue: false }), now), "Час можно указать, когда выбран день.");
+  });
+
+  it("идея и желание — не напоминаю", () => {
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-10-05", kind: "idea" }), now), "Об идеях и желаниях не напоминаю.");
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-10-05", kind: "wish" }), now), "Об идеях и желаниях не напоминаю.");
+  });
+
+  it("день без часа: утром и вечером, а после 09:00 — только вечером", () => {
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-10-05" }), now), "Без часа — напомню в 09:00 и в 18:00 этого дня.");
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30" }), now), "Без часа — напомню в 18:00 этого дня.");
+  });
+
+  it("срок с часом: за час и в срок, а в последний час — только в срок", () => {
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "15:00" }), now), "Напомню за час и в срок.");
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "12:30" }), now), "Напомню в срок.");
+  });
+
+  it("срок прошёл — напоминаний не будет", () => {
+    const past = "Срок уже прошёл — напоминаний по нему не будет.";
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-29" }), now), past);
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "11:00" }), now), past);
+    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30" }), new Date(2026, 8, 30, 18, 0)), past);
+  });
+});
+
+/* -------------------------------------------- editTask на подменённой базе */
+
+interface RpcCall {
+  name: string;
+  params: unknown;
+}
+
+function fakeDb(response: { data: unknown; error: { message: string; code?: string } | null; status?: number }): {
+  db: Db;
+  calls: RpcCall[];
+} {
+  const calls: RpcCall[] = [];
+  const client = {
+    rpc(name: string, params: unknown) {
+      calls.push({ name, params });
+      return Promise.resolve(response);
+    },
+  } as unknown as SupabaseClient;
+  const session = {
+    env: { url: "https://example.supabase.co", anonKey: "anon" },
+    token: () => "token",
+    expired: () => false,
+    refresh: () => Promise.resolve({ ok: false, message: "не нужен" }),
+  } as unknown as Session;
+  return { db: { client, session }, calls };
+}
+
+const SAVED_ROW = {
+  id: "6f1c",
+  title: "Отправить расчёт клиенту",
+  kind: "task",
+  due_at: "2026-10-05T07:00:00+00:00",
+  due_precision: "time",
+  priority: "high",
+  promise: "mine",
+  people: ["Кузнецов"],
+  needs_review: false,
+  open_question: null,
+  question_asked_at: null,
+  source_message_id: "m1",
+  created_at: "2026-09-28T05:02:00+00:00",
+};
+
+const NOT_FOUND = "Задача не найдена — возможно, её закрыли или удалили в чате. Обновите список.";
+
+describe("editTask", () => {
+  it("зовёт edit_task с изменёнными полями и отдаёт строку базы", async () => {
+    const { db, calls } = fakeDb({ data: SAVED_ROW, error: null, status: 200 });
+
+    const result = await editTask(db, "6f1c", { priority: "high" });
+
+    assert.deepEqual(calls, [{ name: "edit_task", params: { task_id: "6f1c", changes: { priority: "high" } } }]);
+    assert.ok(result.ok);
+    assert.equal(result.task.priority, "high");
+    assert.equal(result.task.dueAt?.toISOString(), "2026-10-05T07:00:00.000Z");
+    assert.equal(result.task.needsReview, false);
+  });
+
+  it("строка в списке из одной — та же строка", async () => {
+    const { db } = fakeDb({ data: [SAVED_ROW], error: null, status: 200 });
+    const result = await editTask(db, "6f1c", {});
+    assert.ok(result.ok);
+    assert.equal(result.task.id, "6f1c");
+  });
+
+  it("пустой ответ — задачу закрыли или удалили: ничего не записано", async () => {
+    for (const data of [null, { id: null, title: null }, []]) {
+      const { db } = fakeDb({ data, error: null, status: 200 });
+      assert.deepEqual(await editTask(db, "6f1c", { title: "x" }), { ok: false, message: NOT_FOUND });
+    }
+  });
+
+  it("отказ базы — причина по-русски, без английского хвоста", async () => {
+    const { db } = fakeDb({
+      data: null,
+      error: { message: "edit_task: owner has no timezone", code: "P0001" },
+      status: 400,
+    });
+    assert.deepEqual(await editTask(db, "6f1c", { due_date: "2026-10-05" }), {
+      ok: false,
+      message: "Не получилось сохранить задачу. База ответила отказом. Попробуйте ещё раз.",
+    });
   });
 });

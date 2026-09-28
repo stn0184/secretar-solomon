@@ -1,5 +1,5 @@
 /**
- * Задачи владельца: список, карточка и два действия.
+ * Задачи владельца: список, карточка, правка и два действия.
  *
  * Фильтра по владельцу здесь нет намеренно: строки режет сама база правилами
  * доступа (`techspec/04-access.md` §4.2) — она смотрит на клейм `telegram_id`
@@ -14,7 +14,13 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { sameDay } from "./format.ts";
+import {
+  dateInputValue,
+  isoWithOffset,
+  momentFromInputs,
+  sameDay,
+  timeInputValue,
+} from "./format.ts";
 import { dateOrNull, oneOf, recordOf } from "./parse.ts";
 import { type ActionResult, type Db, failed, query } from "./supabase.ts";
 
@@ -37,6 +43,14 @@ export interface Task {
   needsReview: boolean;
   sourceMessageId: string | null;
   createdAt: Date;
+  /** Вопрос, который бот задал по задаче и на который ещё нет ответа. */
+  openQuestion: OpenQuestion | null;
+}
+
+/** Уточняющий вопрос бота (§10.4): текст и когда задан; время может не прийти. */
+export interface OpenQuestion {
+  text: string;
+  askedAt: Date | null;
 }
 
 /** Вид исходного сообщения (`techspec/03-schema.md` §3.2): текст, голосовое, кружок. */
@@ -77,7 +91,8 @@ export type DetailsResult = { ok: true; details: TaskDetails } | { ok: false; me
 /* ----------------------------------------------------------------- разбор */
 
 const COLUMNS =
-  "id, title, kind, due_at, due_precision, priority, promise, people, needs_review, source_message_id, created_at";
+  "id, title, kind, due_at, due_precision, priority, promise, people, needs_review, " +
+  "open_question, question_asked_at, source_message_id, created_at";
 
 /** Строка `tasks` → задача. Не годится (нет id или названия) — `null`. */
 export function parseTask(row: unknown): Task | null {
@@ -100,6 +115,10 @@ export function parseTask(row: unknown): Task | null {
     needsReview: r.needs_review === true,
     sourceMessageId: typeof r.source_message_id === "string" ? r.source_message_id : null,
     createdAt: dateOrNull(r.created_at) ?? new Date(0),
+    openQuestion:
+      typeof r.open_question === "string" && r.open_question.trim() !== ""
+        ? { text: r.open_question, askedAt: dateOrNull(r.question_asked_at) }
+        : null,
   };
 }
 
@@ -329,6 +348,31 @@ export async function loadTaskDetails(db: Db, task: Task): Promise<DetailsResult
   };
 }
 
+/**
+ * «Сохранить»: `edit_task` под токеном (`techspec/03-schema.md` §3.6).
+ * База возвращает задачу после правки — она и показывается, а не черновик:
+ * «сохранено» говорится о том, что записала база (инвариант 4). Пустой
+ * ответ — задачу закрыли или удалили в чате, ничего не записано.
+ */
+export async function editTask(db: Db, taskId: string, changes: TaskChanges): Promise<EditResult> {
+  const result = await query(db, (client: SupabaseClient) =>
+    client.rpc("edit_task", { task_id: taskId, changes }),
+  );
+  if (!result.ok) {
+    return failed("Не получилось сохранить задачу", result);
+  }
+  // Функция возвращает строку таблицы; пустая строка приходит объектом из null.
+  const row: unknown = Array.isArray(result.data) ? result.data[0] : result.data;
+  const task = parseTask(row);
+  if (task === null) {
+    return {
+      ok: false,
+      message: "Задача не найдена — возможно, её закрыли или удалили в чате. Обновите список.",
+    };
+  }
+  return { ok: true, task };
+}
+
 /** «Сделано»: `complete_task` под токеном; `null` — задачи у владельца нет. */
 export async function completeTask(db: Db, taskId: string): Promise<ActionResult> {
   const result = await query(db, (client: SupabaseClient) =>
@@ -361,4 +405,181 @@ export async function removeTask(db: Db, taskId: string): Promise<ActionResult> 
     };
   }
   return { ok: true };
+}
+
+/* ------------------------------------------------------ правка задачи */
+
+/**
+ * Вопрос бота, который стоит показать в карточке: задан не больше суток
+ * назад. Бот слушает ответ реплаем только сутки (§10.4) — позже вопрос
+ * не висит на экране, но колонка остаётся, и «Сохранить» её снимет.
+ */
+export function questionOf(task: Task, now: Date): OpenQuestion | null {
+  const question = task.openQuestion;
+  if (!question?.askedAt) {
+    return null;
+  }
+  return now.getTime() - question.askedAt.getTime() <= DAY_MS ? question : null;
+}
+
+/**
+ * Черновик формы правки — строки полей ввода, как их держит браузер.
+ * День и час раздельно: день без часа — срок «днём» (18:00 ставит база).
+ */
+export interface TaskDraft {
+  title: string;
+  /** «2026-10-05» или пусто. */
+  day: string;
+  /** «12:00» или пусто — тогда срок днём. */
+  time: string;
+  /** Флажок «Без срока»: поля дня и часа не читаются. */
+  noDue: boolean;
+  kind: TaskKind;
+  priority: Priority;
+  promise: PromiseSide | "none";
+  /** Люди через запятую. */
+  people: string;
+}
+
+/** Изменённые поля для `edit_task` — ровно те ключи, что понимает база. */
+export interface TaskChanges {
+  title?: string;
+  /** Момент со смещением — срок с часом; `null` — срок снят. */
+  due_at?: string | null;
+  /** «2026-10-05» — срок днём, 18:00 этого дня в поясе владельца. */
+  due_date?: string;
+  kind?: TaskKind;
+  priority?: Priority;
+  promise?: PromiseSide | null;
+  people?: string[];
+}
+
+export type EditResult = { ok: true; task: Task } | { ok: false; message: string };
+
+/** Форма открывается с тем, что сейчас записано. Срок днём — поле часа пустое. */
+export function draftOf(task: Task): TaskDraft {
+  return {
+    title: task.title,
+    day: dateInputValue(task.dueAt),
+    time: task.duePrecision === "time" ? timeInputValue(task.dueAt) : "",
+    noDue: task.dueAt === null,
+    kind: task.kind,
+    priority: task.priority,
+    promise: task.promise ?? "none",
+    people: task.people.join(", "),
+  };
+}
+
+/** «Кузнецов,  Анна , ,» → ["Кузнецов", "Анна"]. */
+function peopleOf(text: string): string[] {
+  return text
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+}
+
+/** День из поля — годная дата или `null`. Час для проверки не важен. */
+function dayOf(draft: TaskDraft): Date | null {
+  return momentFromInputs(draft.day, "00:00");
+}
+
+/**
+ * Что мешает сохранить — одной фразой, или `null`. Пустой день при снятом
+ * «Без срока» — ошибка, а не молчаливое снятие срока.
+ */
+export function validateDraft(draft: TaskDraft): string | null {
+  if (draft.title.trim() === "") {
+    return "Напишите, что сделать.";
+  }
+  if (!draft.noDue && dayOf(draft) === null) {
+    return "Выберите день или отметьте «Без срока».";
+  }
+  return null;
+}
+
+function sameList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((item, i) => item === b[i]);
+}
+
+/** Срок из черновика — ключ `edit_task`, если он отличается от записанного. */
+function dueChange(task: Task, draft: TaskDraft): Pick<TaskChanges, "due_at" | "due_date"> {
+  if (draft.noDue) {
+    return task.dueAt === null ? {} : { due_at: null };
+  }
+  const moment = draft.time === "" ? null : momentFromInputs(draft.day, draft.time);
+  if (moment) {
+    const same = task.duePrecision === "time" && task.dueAt?.getTime() === moment.getTime();
+    return same ? {} : { due_at: isoWithOffset(moment) };
+  }
+  const same =
+    task.dueAt !== null && task.duePrecision !== "time" && dateInputValue(task.dueAt) === draft.day;
+  return same ? {} : { due_date: draft.day };
+}
+
+/**
+ * Только изменённые поля: база получает ровно правку, а не всю форму.
+ * Черновик должен пройти `validateDraft`. Суть — без пробелов по краям;
+ * люди — списком без пустых имён; «нет» у обещания — `null`.
+ */
+export function taskChanges(task: Task, draft: TaskDraft): TaskChanges {
+  const changes: TaskChanges = {};
+  const title = draft.title.trim();
+  if (title !== task.title) {
+    changes.title = title;
+  }
+  Object.assign(changes, dueChange(task, draft));
+  if (draft.kind !== task.kind) {
+    changes.kind = draft.kind;
+  }
+  if (draft.priority !== task.priority) {
+    changes.priority = draft.priority;
+  }
+  const promise = draft.promise === "none" ? null : draft.promise;
+  if (promise !== task.promise) {
+    changes.promise = promise;
+  }
+  const people = peopleOf(draft.people);
+  if (!sameList(people, task.people)) {
+    changes.people = people;
+  }
+  return changes;
+}
+
+/**
+ * Нужен ли запрос. Без изменений он нужен только задаче с пометкой или
+ * вопросом: «Сохранить» подтверждает разбор и снимает их (§11.2).
+ */
+export function needsSaving(task: Task, changes: TaskChanges): boolean {
+  return Object.keys(changes).length > 0 || task.needsReview || task.openQuestion !== null;
+}
+
+/**
+ * Подсказка под сроком — по тому же правилу, что считает база (§6.1):
+ * у дня — 09:00 и 18:00, у часа — за час и в срок; что уже прошло, не
+ * называется. Часы — устройства, как во всём приложении (`format.ts`).
+ */
+export function dueHint(draft: TaskDraft, now: Date): string {
+  if (draft.noDue) {
+    return "Без срока напоминать не буду. Час можно указать, когда выбран день.";
+  }
+  if (draft.kind !== "task") {
+    return "Об идеях и желаниях не напоминаю.";
+  }
+  const day = dayOf(draft);
+  if (!day) {
+    return "Час можно указать, когда выбран день.";
+  }
+  const withTime = draft.time === "" ? null : momentFromInputs(draft.day, draft.time);
+  const due = withTime ?? momentFromInputs(draft.day, "18:00");
+  if (!due || due.getTime() <= now.getTime()) {
+    return "Срок уже прошёл — напоминаний по нему не будет.";
+  }
+  if (withTime) {
+    const before = withTime.getTime() - 60 * 60 * 1000;
+    return before > now.getTime() ? "Напомню за час и в срок." : "Напомню в срок.";
+  }
+  const morning = momentFromInputs(draft.day, "09:00");
+  return morning && morning.getTime() > now.getTime()
+    ? "Без часа — напомню в 09:00 и в 18:00 этого дня."
+    : "Без часа — напомню в 18:00 этого дня.";
 }

@@ -113,9 +113,10 @@ function shorten(text: string): string {
 /**
  * Подтверждение необратимого действия — системным окном Telegram
  * (`showPopup`), не своим. Вне Telegram и на SDK старше 6.2 — окно
- * браузера, чтобы dev-прогон жил.
+ * браузера, чтобы dev-прогон жил. `button` — слово на красной кнопке:
+ * то, что случится («Удалить», «Бросить»).
  */
-function confirmDestructive(title: string, message: string): Promise<boolean> {
+function confirmDestructive(title: string, message: string, button: string): Promise<boolean> {
   const webApp = getWebApp();
   if (!webApp || !webApp.isVersionAtLeast("6.2")) {
     return Promise.resolve(window.confirm(`${title}\n\n${message}`));
@@ -127,10 +128,10 @@ function confirmDestructive(title: string, message: string): Promise<boolean> {
         message,
         buttons: [
           { id: "cancel", type: "cancel" },
-          { id: "delete", type: "destructive", text: "Удалить" },
+          { id: "confirm", type: "destructive", text: button },
         ],
       },
-      (buttonId) => resolve(buttonId === "delete"),
+      (buttonId) => resolve(buttonId === "confirm"),
     );
   });
 }
@@ -140,6 +141,7 @@ export function confirmDelete(title: string): Promise<boolean> {
   return confirmDestructive(
     "Удалить задачу?",
     `«${shorten(title)}» исчезнет вместе с напоминаниями. Сообщение в переписке останется.`,
+    "Удалить",
   );
 }
 
@@ -148,7 +150,13 @@ export function confirmRemoveFact(text: string): Promise<boolean> {
   return confirmDestructive(
     "Удалить запись?",
     `«${shorten(text)}» исчезнет из памяти помощника. Сообщение в переписке останется.`,
+    "Удалить",
   );
+}
+
+/** Уйти из формы правки с несохранёнными изменениями: они пропадут. */
+export function confirmDiscard(): Promise<boolean> {
+  return confirmDestructive("Бросить правку?", "Изменения не сохранятся.", "Бросить");
 }
 
 /** Закрыть приложение и вернуться в чат. Вне Telegram закрывать нечего. */

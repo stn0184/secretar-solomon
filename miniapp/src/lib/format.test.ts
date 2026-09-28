@@ -11,12 +11,16 @@ import { describe, it } from "node:test";
 import {
   countActive,
   countOverdue,
+  dateInputValue,
   formatDay,
   formatDue,
   formatMoment,
   formatRecorded,
   formatTime,
+  isoWithOffset,
+  momentFromInputs,
   plural,
+  timeInputValue,
 } from "./format.ts";
 
 // Среда, 30 сентября 2026, 12:00 — «сегодня» на экранах прототипа.
@@ -93,5 +97,58 @@ describe("plural", () => {
     assert.equal(countOverdue(1), "одна просрочена");
     assert.equal(countOverdue(2), "2 просрочены");
     assert.equal(countOverdue(5), "5 просрочено");
+  });
+});
+
+describe("поля ввода срока (§11.3)", () => {
+  it("день и час — цифрами для input date/time, по часам устройства", () => {
+    const at = new Date(2026, 9, 5, 7, 5);
+    assert.equal(dateInputValue(at), "2026-10-05");
+    assert.equal(timeInputValue(at), "07:05");
+  });
+
+  it("срока нет — поля пустые", () => {
+    assert.equal(dateInputValue(null), "");
+    assert.equal(timeInputValue(null), "");
+  });
+
+  it("из полей — момент в поясе устройства", () => {
+    assert.equal(
+      momentFromInputs("2026-10-05", "12:00")?.getTime(),
+      new Date(2026, 9, 5, 12, 0).getTime(),
+    );
+    assert.equal(
+      momentFromInputs("2026-01-31", "00:00")?.getTime(),
+      new Date(2026, 0, 31, 0, 0).getTime(),
+    );
+  });
+
+  it("пустое и негодное — не момент", () => {
+    const bad: [string, string][] = [
+      ["", "12:00"],
+      ["2026-10-05", ""],
+      ["2026-02-30", "12:00"],
+      ["2026-13-01", "12:00"],
+      ["2026-10-05", "24:00"],
+      ["2026-10-05", "12:60"],
+      ["05.10.2026", "12:00"],
+      ["2026-10-05", "12"],
+    ];
+    for (const [day, time] of bad) {
+      assert.equal(momentFromInputs(day, time), null, `${day} ${time}`);
+    }
+  });
+
+  it("момент со смещением: те же цифры часа и тот же миг", () => {
+    const at = new Date(2026, 9, 5, 12, 0);
+    const iso = isoWithOffset(at);
+    assert.match(iso, /^2026-10-05T12:00:00[+-]\d{2}:\d{2}$/);
+    assert.equal(new Date(iso).getTime(), at.getTime());
+  });
+
+  it("смещение берётся на сам день, а не на сегодня", () => {
+    for (const at of [new Date(2026, 0, 15, 9, 30), new Date(2026, 6, 15, 23, 45)]) {
+      assert.equal(new Date(isoWithOffset(at)).getTime(), at.getTime());
+    }
   });
 });

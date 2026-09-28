@@ -37,6 +37,7 @@ export const TASK_BEFORE: Task = {
   needsReview: true,
   sourceMessageId: "proto-009-msg-a",
   createdAt: new Date(2026, 8, 28, 9, 10),
+  openQuestion: QUESTION,
 };
 
 export const REMINDERS_BEFORE: Reminder[] = [
@@ -53,6 +54,7 @@ export const TASK_AFTER: Task = {
   duePrecision: "time",
   priority: "high",
   needsReview: false,
+  openQuestion: null,
 };
 
 export const REMINDERS_AFTER: Reminder[] = [
@@ -81,4 +83,5 @@ export const TASK_BARE: Task = {
   needsReview: false,
   sourceMessageId: "proto-009-msg-b",
   createdAt: new Date(2026, 8, 26, 19, 42),
+  openQuestion: null,
 };
