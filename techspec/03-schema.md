@@ -76,6 +76,8 @@ polling может отдать обновление повторно, и вто
 | `promise` | text, `check in ('mine', 'to_me')`, nullable | чьё обещание (`spec.md` §3.3); пусто — не обещание |
 | `people` | text[], `default '{}'` | упомянутые люди, как названы |
 | `needs_review` | boolean, `default false` | модель не уверена или не разобрала вовсе — человеку стоит взглянуть |
+| `open_question` | text, nullable | уточняющий вопрос без ответа (§10.1); у владельца не больше одного |
+| `question_asked_at` | timestamptz, nullable | когда задан; старше суток — считается снятым (§10.3) |
 | `source_message_id` | uuid, `references messages(id)`, nullable | сообщение, из которого возникла; пусто у задач, заведённых из Mini App |
 | `created_at` | timestamptz, `default now()` | |
 | `updated_at` | timestamptz, `default now()` | обновляется триггером при любой правке |
@@ -116,7 +118,8 @@ record_understanding(message_id uuid, owner_telegram_id bigint,
                      reply text, task jsonb, reminders jsonb,
                      facts jsonb,
                      transcript text default null,
-                     transcript_confidence numeric default null)
+                     transcript_confidence numeric default null,
+                     amend jsonb default null)
   returns tasks
 ```
 
@@ -131,8 +134,17 @@ record_understanding(message_id uuid, owner_telegram_id bigint,
 (§4.3): чужое `message_id` — отказ.
 
 Поля задачи берутся из `task` по именам колонок §3.3; `people` ждётся
-массивом, всё остальное — строками. Прежняя `record_task` (этап 002)
-удалена той же миграцией.
+массивом, всё остальное — строками. `task` с ключом `open_question`
+пишет вопрос и `question_asked_at = now()` в новую задачу, а у прочих
+задач владельца вопрос снимается той же транзакцией (§10.1). Прежняя
+`record_task` (этап 002) удалена той же миграцией.
+
+`amend` (этап 008, §10.2) — `{task_id, fields, reminders}`: вместо
+новой задачи функция обновляет поля названной задачи владельца (только
+ключи из `fields`), удаляет её неотправленные напоминания, вставляет
+новые из `reminders`, очищает `open_question` / `question_asked_at` и
+возвращает обновлённую строку; `task` при этом `null`. Чужой или
+несуществующий `task_id` — отказ, ничего не пишется.
 
 `transcript` и `transcript_confidence` (этап 007) — расшифровка голоса:
 не `null` — становится `text` сообщения (§9.3); `null` — текст не трогается.
