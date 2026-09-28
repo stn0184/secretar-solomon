@@ -1,0 +1,334 @@
+/*
+ * Прототип 009. Две части:
+ *  1. Предложение для styles.css — вопрос бота в карточке, строка «Изменить»,
+ *     блок пометки в форме, форма правки, поля ввода, выбор из вариантов.
+ *     Цвет только через переменные design.md §1, новых токенов нет.
+ *  2. Рама прототипа (.p9-*) — не продукт, уходит вместе с этапом.
+ */
+
+/* ─── 1. Карточка: вопрос бота и вход в форму ───────────────────────── */
+
+.kv__q {
+  display: block;
+  width: 100%;
+  font: 400 14px/19px var(--font-ui);
+  color: var(--ink-2);
+}
+
+.kv__edit {
+  appearance: none;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: none;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 11px var(--s4);
+  font: 500 15px/20px var(--font-ui);
+  color: var(--accent);
+  text-align: left;
+  cursor: pointer;
+}
+
+.kv__edit svg {
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+.kv__edit:active {
+  background: var(--surface-2);
+}
+
+/* ─── 1. Форма: пометка «Перепроверьте» и вопрос ────────────────────── */
+
+.review {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-card);
+  background: var(--guess-weak);
+  box-shadow: inset 2px 0 0 var(--guess);
+}
+
+.review__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  font: var(--t-sub);
+  color: var(--ink-3);
+}
+
+.review__q {
+  margin: 0;
+  font: 400 15px/20px var(--font-ui);
+  color: var(--ink);
+}
+
+.review__note {
+  margin: 0;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+/* ─── 1. Форма: строки, поля ввода, выбор из вариантов ──────────────── */
+
+.form {
+  display: flex;
+  flex-direction: column;
+}
+
+.form__row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px var(--s4) var(--s3);
+}
+
+.form__row + .form__row {
+  border-top: 1px solid var(--line);
+}
+
+.form__k {
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.form__hint {
+  margin: 0;
+  font: var(--t-sub);
+  color: var(--ink-3);
+}
+
+.form__due {
+  display: flex;
+  gap: var(--s2);
+}
+
+.form__due .input[type="date"] {
+  flex: 1.5;
+}
+
+.form__due .input[type="time"] {
+  flex: 1;
+}
+
+/* 16px — меньше iOS увеличивает страницу при фокусе */
+.input {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  margin: 0;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font: var(--t-body);
+  color: var(--ink);
+  color-scheme: inherit;
+}
+
+.input:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+.input:disabled {
+  opacity: 0.45;
+}
+
+.input::placeholder {
+  color: var(--ink-3);
+}
+
+.input--area {
+  padding: 9px var(--s3);
+  resize: none;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  align-self: flex-start;
+  font: 400 15px/20px var(--font-ui);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.check input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.seg {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.seg__opt {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  cursor: pointer;
+}
+
+/* сам radio не виден: кнопкой служит подпись */
+.seg__opt input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.seg__opt span {
+  display: block;
+  padding: 7px 4px;
+  border-radius: 8px;
+  text-align: center;
+  font: 500 14px/18px var(--font-ui);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.seg__opt input:checked + span {
+  background: var(--accent-weak);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, var(--surface));
+}
+
+.seg__opt input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ─── 2. Рама прототипа — не продукт ────────────────────────────────── */
+
+.p9 {
+  min-height: 100vh;
+  padding: 28px 32px 48px;
+  background: color-mix(in srgb, var(--ink) 7%, var(--app-bg));
+  font: var(--t-body);
+  color: var(--ink);
+}
+
+.p9-head {
+  max-width: 60rem;
+  margin-bottom: 24px;
+}
+
+.p9-head h1 {
+  margin: 0 0 6px;
+  font: 600 20px/26px var(--font-ui);
+}
+
+.p9-head p {
+  margin: 0 0 4px;
+  font: 400 14px/20px var(--font-ui);
+  color: var(--ink-2);
+}
+
+.p9-links a {
+  color: var(--accent);
+}
+
+.p9-sub {
+  margin: 36px 0 16px;
+  font: var(--t-cap);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.p9-strip {
+  display: flex;
+  gap: 28px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.p9-board {
+  flex: none;
+  width: 390px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.p9-cap {
+  min-height: 76px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font: 400 13px/18px var(--font-ui);
+  color: var(--ink-2);
+}
+
+.p9-cap b {
+  font: 600 14px/19px var(--font-ui);
+  color: var(--ink);
+}
+
+.p9-phone {
+  border-radius: 28px;
+  overflow: hidden;
+  background: var(--app-bg);
+  box-shadow: 0 0 0 1px var(--line-strong), 0 12px 32px rgb(0 0 0 / 0.12);
+}
+
+/* шапку рисует Telegram, не мы — здесь только её место */
+.p9-tg {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--s4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.p9-tg__side {
+  flex: 1;
+  font: 400 15px/20px var(--font-ui);
+  color: var(--accent);
+}
+
+.p9-tg__side--end {
+  text-align: right;
+  color: var(--ink-2);
+}
+
+.p9-tg__mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.p9-tg__mid b {
+  font: 600 15px/19px var(--font-ui);
+}
+
+.p9-tg__mid small {
+  font: 400 12px/15px var(--font-ui);
+  color: var(--ink-3);
+}
+
+/* видимая часть приложения: 740px, как у телефона без шапки Telegram */
+.p9-viewport {
+  --tg-viewport-stable-height: 740px;
+  height: 740px;
+  overflow-y: auto;
+}
