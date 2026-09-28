@@ -265,8 +265,8 @@ async def test_errand_with_a_guess_records_both_and_keeps_the_reply_short() -> N
     ]
 
 
-async def test_about_me_without_facts_answers_as_before() -> None:
-    """Модель сочла сообщение сведением, но запоминать нечего — прежний ответ."""
+async def test_about_me_without_facts_says_it_is_already_known() -> None:
+    """Модель сочла сообщение сведением, но нового нет — оно уже в памяти."""
     analyst = FakeAnalyst(make_understanding(kind="about_me", title="о себе", facts=[]))
     service, _, understandings = build_service(
         analyst, understandings=FakeUnderstandings(task=None)
@@ -276,7 +276,7 @@ async def test_about_me_without_facts_answers_as_before() -> None:
         chat_id=42, telegram_message_id=7, text="я вообще-то ничего"
     )
 
-    assert outcome.message == texts.NO_ERRAND
+    assert outcome.message == texts.ALREADY_KNOWN
     assert understandings.calls[0]["facts"] == []
     assert understandings.calls[0]["task"] is None
 

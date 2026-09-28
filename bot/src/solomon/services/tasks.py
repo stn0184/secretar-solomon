@@ -486,8 +486,11 @@ class TaskService:
         (`techspec/08-memory.md` §8.2); предположения из поручения в ответ
         не попадают — они видны в приложении.
         """
-        if understanding.kind == "about_me" and understanding.facts:
-            return texts.remembered([item.text for item in understanding.facts])
+        if understanding.kind == "about_me":
+            if understanding.facts:
+                return texts.remembered([item.text for item in understanding.facts])
+            # Сведение есть, а нового нет — значит, оно уже в памяти (§8.2).
+            return texts.ALREADY_KNOWN
         if understanding.kind not in TASK_KINDS:
             return texts.NO_ERRAND
         timezone = self._settings.owner_timezone
