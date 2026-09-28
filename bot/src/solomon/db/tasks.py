@@ -12,17 +12,24 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 
 from supabase import Client
 
-from solomon.db.rpc import DatabaseError, ask, single_row
+from solomon.db.rpc import DatabaseError, ask, moment, single_row
 
 RECORD_MESSAGE_FUNCTION = "record_message"
 RECORD_UNDERSTANDING_FUNCTION = "record_understanding"
 TASKS_TABLE = "tasks"
 ACTIVE_STATUS = "active"
 TASK_COLUMNS = "id, title, status"
+# Поля задачи, которые нужны промпту с открытым вопросом и слиянию ответа
+# с задачей (`techspec/10-dialog.md` §10.2).
+QUESTION_COLUMNS = (
+    "id, title, kind, due_at, due_precision, priority, promise, people, "
+    "open_question, question_asked_at"
+)
 
 # Вид сообщения (`techspec/03-schema.md` §3.2, §9.1): текст, голосовое,
 # видео-кружок. Голосовые виды — те, у которых есть файл и длительность.
@@ -37,6 +44,26 @@ class Task:
     id: str
     title: str
     status: str
+
+
+@dataclass(frozen=True, slots=True)
+class OpenQuestion:
+    """Задача, по которой бот задал вопрос и ещё не получил ответа (§10.1).
+
+    Вместе с вопросом — поля задачи как они есть: модель видит их в промпте,
+    а бот сливает с ними ответ и по итогу перепланирует напоминания.
+    """
+
+    task_id: str
+    question: str
+    title: str
+    kind: str
+    due_at: datetime | None
+    due_precision: str | None
+    priority: str
+    promise: str | None
+    people: tuple[str, ...]
+    asked_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +96,43 @@ def task_from_row(row: Any) -> Task:
         raise DatabaseError("База вернула не строку задачи.")
     try:
         return Task(id=str(row["id"]), title=str(row["title"]), status=str(row["status"]))
+    except KeyError as error:
+        raise DatabaseError(f"В ответе базы нет поля задачи: {error}.") from error
+
+
+def _optional_text(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def _open_question_from_row(row: Any) -> OpenQuestion | None:
+    """Разобрать строку задачи с вопросом.
+
+    Вопроса в строке нет — `None`: записи разбора снимают его вместе со
+    временем, и такая строка значит «спрашивать не о чем». Неполная или
+    кривая строка — отказ: слить ответ с полупустой задачей нельзя.
+    """
+    if not isinstance(row, Mapping):
+        raise DatabaseError("База вернула не строку задачи.")
+    try:
+        question = row["open_question"]
+        if question is None:
+            return None
+        people = row["people"]
+        if not isinstance(people, list):
+            raise DatabaseError(f"В ответе базы не разобрать people: {people!r}.")
+        due_at = row["due_at"]
+        return OpenQuestion(
+            task_id=str(row["id"]),
+            question=str(question),
+            title=str(row["title"]),
+            kind=str(row["kind"]),
+            due_at=None if due_at is None else moment(due_at, "due_at"),
+            due_precision=_optional_text(row["due_precision"]),
+            priority=str(row["priority"]),
+            promise=_optional_text(row["promise"]),
+            people=tuple(str(person) for person in people),
+            asked_at=moment(row["question_asked_at"], "question_asked_at"),
+        )
     except KeyError as error:
         raise DatabaseError(f"В ответе базы нет поля задачи: {error}.") from error
 
@@ -124,6 +188,7 @@ async def record_understanding(
     facts: Sequence[Mapping[str, Any]],
     transcript: str | None = None,
     transcript_confidence: float | None = None,
+    amend: Mapping[str, Any] | None = None,
 ) -> Task | None:
     """Шаг второй: разбор, ответ бота, задача, напоминания и память — одной транзакцией.
 
@@ -138,6 +203,12 @@ async def record_understanding(
     по владельцу, категории и тексту база схлопывает сама. `transcript` —
     расшифровка голоса (§9.3): она становится текстом сообщения; у текста и
     у нерасслышанного голоса её нет, и текст не трогается.
+
+    `amend` — ответ на открытый вопрос (`techspec/10-dialog.md` §10.2):
+    `{task_id, fields, reminders}`. Тогда `task` пуст, а база дополняет
+    прежнюю задачу и заменяет её неотправленные напоминания; возвращается
+    она же. Чужая задача — отказ базы, а не тихий пропуск. Открытые вопросы
+    владельца база снимает при любом разборе сама (§3.4).
     """
     params = {
         "message_id": message_id,
@@ -152,6 +223,7 @@ async def record_understanding(
         "facts": list(facts),
         "transcript": transcript,
         "transcript_confidence": transcript_confidence,
+        "amend": amend,
     }
     data = single_row(
         await ask(lambda: db.rpc(RECORD_UNDERSTANDING_FUNCTION, params).execute().data)
@@ -180,3 +252,29 @@ async def list_active_tasks(db: Client, *, owner_telegram_id: int, limit: int) -
     if not isinstance(rows, list):
         raise DatabaseError("База вернула не список задач.")
     return [task_from_row(row) for row in rows]
+
+
+async def open_question(
+    db: Client, *, owner_telegram_id: int, since: datetime
+) -> OpenQuestion | None:
+    """Последний открытый вопрос владельца, заданный не раньше `since`.
+
+    Срок жизни вопроса (сутки, §10.3) решает слой выше и передаёт сюда
+    границу. Вопрос у закрытой задачи не в счёт: дополнять нечего.
+    """
+    rows = await ask(
+        lambda: (
+            db.table(TASKS_TABLE)
+            .select(QUESTION_COLUMNS)
+            .eq("owner_telegram_id", owner_telegram_id)
+            .eq("status", ACTIVE_STATUS)
+            .gte("question_asked_at", since.isoformat())
+            .order("question_asked_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+    )
+    if not isinstance(rows, list):
+        raise DatabaseError("База вернула не список задач.")
+    return _open_question_from_row(rows[0]) if rows else None

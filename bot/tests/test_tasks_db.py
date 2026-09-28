@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import inspect
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -19,7 +19,7 @@ from solomon.db import reminders as db_reminders
 from solomon.db import tasks as db_tasks
 from solomon.db.facts import Fact
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import SavedMessage, Task
+from solomon.db.tasks import OpenQuestion, SavedMessage, Task
 from tests.conftest import OWNER_TIMEZONE
 
 OWNER_ID = 777
@@ -31,6 +31,28 @@ TASK_FIELDS = {"title": "купить лампочку", "kind": "task", "needs_
 REMINDER_ROWS = [{"stage": "before", "fire_at": "2026-09-25T09:00:00+05:00"}]
 FACT_ROWS = [{"category": "car", "text": "Машина — Toyota Camry", "status": "fact"}]
 FACT_ROW = {"id": "f1", "category": "car", "text": "Машина — Toyota Camry", "status": "fact"}
+AMEND = {
+    "task_id": "0e2f",
+    "fields": {
+        "due_at": "2026-09-25T18:00:00+05:00",
+        "due_precision": "day",
+        "needs_review": False,
+    },
+    "reminders": REMINDER_ROWS,
+}
+ASKED_AT = datetime(2026, 9, 24, 12, 0, tzinfo=TZ)
+QUESTION_ROW = {
+    "id": "0e2f",
+    "title": "отправить расчёт клиенту",
+    "kind": "task",
+    "due_at": None,
+    "due_precision": None,
+    "priority": "high",
+    "promise": "mine",
+    "people": ["клиент"],
+    "open_question": "К какому сроку?",
+    "question_asked_at": "2026-09-24T12:00:00+05:00",
+}
 REMINDER_ROW = {
     "id": "b17c",
     "task_id": "0e2f",
@@ -63,6 +85,10 @@ class FakeQuery:
 
     def order(self, column: str, *, desc: bool = False) -> FakeQuery:
         self.client.calls.append(("order", column, desc))
+        return self
+
+    def gte(self, column: str, value: Any) -> FakeQuery:
+        self.client.calls.append(("gte", column, value))
         return self
 
     def limit(self, size: int) -> FakeQuery:
@@ -214,8 +240,34 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
             "facts": FACT_ROWS,
             "transcript": None,
             "transcript_confidence": None,
+            "amend": None,
         },
     )
+
+
+async def test_record_understanding_sends_the_amendment_instead_of_a_task() -> None:
+    """Ответ на вопрос дополняет прежнюю задачу (§10.2): новой в запросе нет."""
+    fake = FakeClient(data=ROW)
+
+    task = await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a72",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=45,
+        reply="Понял: купить лампочку",
+        task=None,
+        reminders=[],
+        facts=[],
+        amend=AMEND,
+    )
+
+    assert task == Task(id="0e2f", title="купить лампочку", status="active")
+    params = fake.calls[0][2]
+    assert params["task"] is None
+    assert params["amend"] == AMEND
 
 
 async def test_record_understanding_sends_the_transcript_and_its_confidence() -> None:
@@ -428,12 +480,84 @@ async def test_broken_fact_row_is_a_failure() -> None:
         await db_facts.list_facts(as_client(fake), owner_telegram_id=OWNER_ID)
 
 
+async def read_question(fake: FakeClient) -> OpenQuestion | None:
+    return await db_tasks.open_question(as_client(fake), owner_telegram_id=OWNER_ID, since=ASKED_AT)
+
+
+async def test_open_question_is_asked_for_this_owner_and_the_last_day() -> None:
+    """Открытый вопрос — свой, у активной задачи и не старше `since` (§10.3)."""
+    fake = FakeClient(data=[QUESTION_ROW])
+    since = ASKED_AT - timedelta(hours=1)
+
+    found = await db_tasks.open_question(as_client(fake), owner_telegram_id=OWNER_ID, since=since)
+
+    assert found == OpenQuestion(
+        task_id="0e2f",
+        question="К какому сроку?",
+        title="отправить расчёт клиенту",
+        kind="task",
+        due_at=None,
+        due_precision=None,
+        priority="high",
+        promise="mine",
+        people=("клиент",),
+        asked_at=ASKED_AT,
+    )
+    assert ("table", "tasks") in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("eq", "status", "active") in fake.calls
+    assert ("gte", "question_asked_at", since.isoformat()) in fake.calls
+    assert ("order", "question_asked_at", True) in fake.calls
+    assert ("limit", 1) in fake.calls
+
+
+async def test_open_question_reads_the_due_of_the_task() -> None:
+    fake = FakeClient(
+        data=[{**QUESTION_ROW, "due_at": "2026-09-25T18:00:00+05:00", "due_precision": "day"}]
+    )
+
+    found = await read_question(fake)
+
+    assert found is not None
+    assert found.due_at == datetime(2026, 9, 25, 18, 0, tzinfo=TZ)
+    assert found.due_precision == "day"
+
+
+async def test_no_open_question_is_none() -> None:
+    fake = FakeClient(data=[])
+
+    assert await read_question(fake) is None
+
+
+async def test_task_without_question_text_is_no_question() -> None:
+    fake = FakeClient(data=[{**QUESTION_ROW, "open_question": None}])
+
+    assert await read_question(fake) is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {key: value for key, value in QUESTION_ROW.items() if key != "title"},
+        {**QUESTION_ROW, "question_asked_at": "вчера"},
+        {**QUESTION_ROW, "people": "клиент"},
+        "не строка",
+    ],
+)
+async def test_broken_question_row_is_a_failure(row: Any) -> None:
+    fake = FakeClient(data=[row])
+
+    with pytest.raises(DatabaseError):
+        await read_question(fake)
+
+
 def test_owner_is_required_by_every_query() -> None:
     """Инвариант 2 держится сигнатурой: владельца не забыть и не подставить."""
     for query in (
         db_tasks.record_message,
         db_tasks.record_understanding,
         db_tasks.list_active_tasks,
+        db_tasks.open_question,
         db_reminders.due_reminders,
         db_reminders.mark_sent,
         db_reminders.mark_task_done,

@@ -101,7 +101,7 @@
 - [x] `understanding.py`: поля `question`, `answers_question` в
       `Understanding`; блок «Открытый вопрос» в промпте (§5.2 п. 4) с
       правилами §10.1–10.2; `analyze(..., open_question=...)`.
-- [ ] `db/tasks.py`: `open_question(owner)` — задача с вопросом не
+- [x] `db/tasks.py`: `open_question(owner)` — задача с вопросом не
       старше суток, с явным `owner_telegram_id`; `record_understanding`
       с `amend`.
 - [ ] `services/tasks.py`: общий хвост `_understand` читает открытый

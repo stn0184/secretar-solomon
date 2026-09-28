@@ -15,7 +15,7 @@ from typing import Any
 
 from supabase import Client
 
-from solomon.db.rpc import DatabaseError, ask, single_row
+from solomon.db.rpc import DatabaseError, ask, moment, single_row
 from solomon.db.tasks import Task, task_from_row
 
 DUE_REMINDERS_FUNCTION = "due_reminders"
@@ -40,16 +40,6 @@ class DueReminder:
     due_precision: str | None
 
 
-def _moment(value: Any, field: str) -> datetime:
-    """Время из ответа PostgREST — строкой ISO с поясом."""
-    if isinstance(value, datetime):
-        return value
-    try:
-        return datetime.fromisoformat(str(value))
-    except ValueError as error:
-        raise DatabaseError(f"В ответе базы не разобрать {field}: {value!r}.") from error
-
-
 def _reminder_from_row(row: Any) -> DueReminder:
     """Разобрать строку. Неполная — отказ, а не напоминание без срока."""
     if not isinstance(row, Mapping):
@@ -60,9 +50,9 @@ def _reminder_from_row(row: Any) -> DueReminder:
             id=str(row["id"]),
             task_id=str(row["task_id"]),
             stage=str(row["stage"]),
-            fire_at=_moment(row["fire_at"], "fire_at"),
+            fire_at=moment(row["fire_at"], "fire_at"),
             title=str(row["title"]),
-            due_at=None if due_at is None else _moment(due_at, "due_at"),
+            due_at=None if due_at is None else moment(due_at, "due_at"),
             due_precision=None if row["due_precision"] is None else str(row["due_precision"]),
         )
     except KeyError as error:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 
@@ -25,6 +26,16 @@ async def ask(call: Callable[[], Any]) -> Any:
         return await asyncio.to_thread(call)
     except Exception as error:  # отказ клиента превращается в DatabaseError, а не в трассировку
         raise DatabaseError(f"{type(error).__name__}: {error}") from error
+
+
+def moment(value: Any, field: str) -> datetime:
+    """Время из ответа PostgREST — строкой ISO с поясом; не разобрать — отказ."""
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError as error:
+        raise DatabaseError(f"В ответе базы не разобрать {field}: {value!r}.") from error
 
 
 def single_row(data: Any) -> Any:
