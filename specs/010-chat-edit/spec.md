@@ -102,7 +102,7 @@
 
 Этап L — сначала `plan.md` в папке этапа.
 
-- [ ] Миграция: `tasks.status` получает `cancelled`; `messages.task_id`
+- [x] Миграция: `tasks.status` получает `cancelled`; `messages.task_id`
       (ссылка на `tasks`, `on delete set null`, у старых строк — из
       `tasks.source_message_id`); ядро правки выносится из `edit_task`
       — владелец и готовый план аргументами, `edit_task` становится
