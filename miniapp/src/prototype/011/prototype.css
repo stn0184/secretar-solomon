@@ -1,0 +1,298 @@
+/*
+ * Прототип 011 — повторяющиеся задачи. Два раздела:
+ *  1. Новые элементы продукта — предложение для styles.css: отметка «↻»
+ *     в строке списка, строка «Сделано. Следующий раз», шаг повтора,
+ *     дни недели флажками, правило словами. Только токены из styles.css,
+ *     новых цветов нет.
+ *  2. Рама прототипа (.p11-*) — не продукт, уходит вместе с этапом.
+ */
+
+/* ─── 1. Новое в продукте ───────────────────────────────────────────── */
+
+/* Список: правило коротко сразу за сроком — подписью, не меткой:
+   повтор — свойство задачи, а не её состояние, цвета у него нет. */
+.row__rep {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.row__rep i {
+  font-style: normal;
+  color: var(--ink-3);
+}
+
+/* После «Сделано» в карточке: что вернула база — цветом «ок». */
+.row__next {
+  font: 500 13px/17px var(--font-ui);
+  color: var(--ok);
+}
+
+/* Форма: «Каждые [2] недели» — шаг числом между словами. */
+.rep__step {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font: 400 15px/20px var(--font-ui);
+  color: var(--ink);
+}
+
+.input--step {
+  width: 64px;
+  flex: none;
+  text-align: center;
+  padding: 0 var(--s2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Дни недели флажками: семь отдельных кнопок — видно, что можно несколько. */
+.days {
+  display: flex;
+  gap: 4px;
+}
+
+.days__opt {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  cursor: pointer;
+}
+
+.days__opt input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.days__opt span {
+  display: block;
+  padding: 8px 0;
+  border-radius: 8px;
+  text-align: center;
+  font: 500 14px/18px var(--font-ui);
+  color: var(--ink-2);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.days__opt input:checked + span {
+  background: var(--accent-weak);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, var(--surface));
+}
+
+.days__opt input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Правило словами под выбором — как его назовёт бот. */
+.rep__words {
+  margin: 0;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.rep__words b {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* Выбор повтора — пять вариантов в ряд: на 360px «Месяцы» иначе не влезают. */
+.rep__every .seg__opt span {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+/* ─── 2. Рама прототипа — не продукт ────────────────────────────────── */
+
+.p11 {
+  min-height: 100vh;
+  padding: 28px 32px 48px;
+  background: color-mix(in srgb, var(--ink) 7%, var(--app-bg));
+  font: var(--t-body);
+  color: var(--ink);
+}
+
+.p11-head {
+  max-width: 60rem;
+  margin-bottom: 24px;
+}
+
+.p11-head h1 {
+  margin: 0 0 6px;
+  font: 600 20px/26px var(--font-ui);
+}
+
+.p11-head p,
+.p11-lead {
+  margin: 0 0 4px;
+  max-width: 60rem;
+  font: 400 14px/20px var(--font-ui);
+  color: var(--ink-2);
+}
+
+.p11-lead {
+  margin: -8px 0 16px;
+}
+
+.p11-links a {
+  color: var(--accent);
+}
+
+.p11-sub {
+  margin: 36px 0 16px;
+  font: var(--t-cap);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.p11-strip {
+  display: flex;
+  gap: 28px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.p11-strip--wrap {
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+
+.p11-board {
+  flex: none;
+  width: 390px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.p11-cap {
+  min-height: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font: 400 13px/18px var(--font-ui);
+  color: var(--ink-2);
+}
+
+.p11-cap--frag {
+  min-height: 56px;
+}
+
+.p11-cap b {
+  font: 600 14px/19px var(--font-ui);
+  color: var(--ink);
+}
+
+.p11-phone {
+  position: relative;
+  /* фиксированные вкладки приложения встают по низу телефона, а не окна */
+  transform: translateZ(0);
+  border-radius: 28px;
+  overflow: hidden;
+  background: var(--app-bg);
+  box-shadow: 0 0 0 1px var(--line-strong), 0 12px 32px rgb(0 0 0 / 0.12);
+}
+
+/* кусок формы — на фоне экрана, с отступами экрана */
+.p11-frag {
+  padding: var(--s3) var(--s4);
+  border-radius: 20px;
+  background: var(--app-bg);
+  box-shadow: 0 0 0 1px var(--line-strong);
+}
+
+/* шапку рисует Telegram, не мы — здесь только её место */
+.p11-tg {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--s4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.p11-tg__side {
+  flex: 1;
+  font: 400 15px/20px var(--font-ui);
+  color: var(--accent);
+}
+
+.p11-tg__side--end {
+  text-align: right;
+  color: var(--ink-2);
+}
+
+.p11-tg__mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.p11-tg__mid b {
+  font: 600 15px/19px var(--font-ui);
+}
+
+.p11-tg__mid small {
+  font: 400 12px/15px var(--font-ui);
+  color: var(--ink-3);
+}
+
+/* видимая часть приложения: 740px, как у телефона без шапки Telegram */
+.p11-viewport {
+  --tg-viewport-stable-height: 740px;
+  height: 740px;
+  overflow-y: auto;
+}
+
+/* системное окно Telegram — его рисует мессенджер */
+.p11-dim {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 36px;
+  background: rgb(0 0 0 / 0.4);
+}
+
+.p11-popup {
+  width: 100%;
+  padding: 18px 18px 6px;
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.25);
+}
+
+.p11-popup b {
+  display: block;
+  font: 600 16px/21px var(--font-ui);
+  color: var(--ink);
+}
+
+.p11-popup p {
+  margin: 6px 0 10px;
+  font: 400 14px/19px var(--font-ui);
+  color: var(--ink);
+}
+
+.p11-popup__btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 20px;
+  padding: 8px 0;
+  font: 500 15px/20px var(--font-ui);
+  color: var(--accent);
+}
+
+.p11-popup__danger {
+  color: var(--urgent);
+}
