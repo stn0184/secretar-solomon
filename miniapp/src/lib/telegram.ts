@@ -136,13 +136,27 @@ function confirmDestructive(title: string, message: string, button: string): Pro
   });
 }
 
+/**
+ * Слова окна удаления. У повторяющейся задачи удаляется вся цепочка —
+ * и этот раз, и все следующие (§13.6), окно говорит об этом прямо.
+ */
+export function deleteQuestion(
+  title: string,
+  repeating: boolean,
+): { title: string; message: string } {
+  const gone = `«${shorten(title)}» исчезнет вместе с напоминаниями`;
+  return repeating
+    ? {
+        title: "Удалить задачу со всеми повторами?",
+        message: `${gone} — и этот раз, и все следующие. Сообщение в переписке останется.`,
+      }
+    : { title: "Удалить задачу?", message: `${gone}. Сообщение в переписке останется.` };
+}
+
 /** Удалить задачу: вместе с напоминаниями, сообщение в переписке остаётся. */
-export function confirmDelete(title: string): Promise<boolean> {
-  return confirmDestructive(
-    "Удалить задачу?",
-    `«${shorten(title)}» исчезнет вместе с напоминаниями. Сообщение в переписке останется.`,
-    "Удалить",
-  );
+export function confirmDelete(title: string, repeating = false): Promise<boolean> {
+  const question = deleteQuestion(title, repeating);
+  return confirmDestructive(question.title, question.message, "Удалить");
 }
 
 /** Удалить запись памяти: помощник её забудет, сообщение в переписке остаётся. */

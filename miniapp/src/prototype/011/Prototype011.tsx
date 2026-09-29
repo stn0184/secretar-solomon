@@ -195,10 +195,10 @@ function Row({ task, group, next }: { task: ProtoTask; group: GroupKey; next: bo
               : formatRecorded(task.createdAt)}
           </span>
           {/* новое: правило коротко, сразу за сроком — цветом подписи, не меткой */}
-          {task.repeat ? (
+          {task.rep ? (
             <span className="row__rep">
               <i aria-hidden="true">↻</i>
-              {task.repeat.short}
+              {task.rep.short}
             </span>
           ) : null}
           <PriorityChip task={task} compact />
@@ -268,9 +268,9 @@ function Card({
             {task.dueAt ? formatDue(task.dueAt, task.duePrecision, NOW) : "не назван"}
           </Field>
           {/* новое: правило словами, как у бота; у разовой задачи строки нет */}
-          {task.repeat ? (
+          {task.rep ? (
             <Field label="Повтор" note="«Сделано» переведёт задачу на следующий раз">
-              {task.repeat.words}
+              {task.rep.words}
             </Field>
           ) : null}
           {task.priority === "high" ? (

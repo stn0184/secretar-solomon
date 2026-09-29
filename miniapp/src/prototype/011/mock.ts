@@ -20,7 +20,7 @@ export interface RepeatView {
 }
 
 /** Задача прототипа — задача приложения плюс повтор (`null` — разовая). */
-export type ProtoTask = Task & { repeat: RepeatView | null };
+export type ProtoTask = Task & { rep: RepeatView | null };
 
 function task(
   id: string,
@@ -42,6 +42,8 @@ function task(
     createdAt: new Date(2026, 8, 21, 9, 0),
     openQuestion: null,
     repeat: null,
+    occurrenceAt: null,
+    rep: null,
     ...extra,
   };
 }
@@ -50,12 +52,12 @@ function task(
 
 /** Раз прошёл без отметки: ждёт до начала следующего (четверг, 00:00). */
 export const WATER = task("water", "Полить цветы в переговорной", new Date(2026, 8, 28, 18, 0), {
-  repeat: { words: "каждые 3 дня", short: "каждые 3 дня" },
+  rep: { words: "каждые 3 дня", short: "каждые 3 дня" },
 });
 
 export const STANDUP = task("standup", "Созвон с командой", new Date(2026, 8, 29, 11, 30), {
   duePrecision: "time",
-  repeat: { words: "по будням", short: "по будням" },
+  rep: { words: "по будням", short: "по будням" },
   sourceMessageId: "proto-011-msg-standup",
 });
 
@@ -68,24 +70,24 @@ const SERVICE = task("service", "Позвонить в сервис насчёт
 });
 
 const METERS = task("meters", "Передать показания счётчиков", new Date(2026, 8, 30, 18, 0), {
-  repeat: { words: "в последний день месяца", short: "в последний день" },
+  rep: { words: "в последний день месяца", short: "в последний день" },
 });
 
 export const REPORT = task("report", "Отправить отчёт Гончаровой", new Date(2026, 9, 5, 18, 0), {
   promise: "mine",
   people: ["Гончарова"],
-  repeat: { words: "каждый понедельник", short: "каждый пн" },
+  rep: { words: "каждый понедельник", short: "каждый пн" },
   sourceMessageId: "proto-011-msg-report",
 });
 
 const DRY = task("dry", "Забрать костюм из химчистки", new Date(2026, 9, 2, 18, 0));
 
 const RENT = task("rent", "Заплатить за квартиру", new Date(2026, 9, 10, 18, 0), {
-  repeat: { words: "каждый месяц 10-го", short: "10-го" },
+  rep: { words: "каждый месяц 10-го", short: "10-го" },
 });
 
 const BIRTHDAY = task("birthday", "Поздравить Веру Павловну с днём рождения", new Date(2026, 9, 14, 18, 0), {
-  repeat: { words: "каждый год 14 октября", short: "каждый год" },
+  rep: { words: "каждый год 14 октября", short: "каждый год" },
 });
 
 const IDEA = task("idea", "Записаться на курс по фотографии", null, {

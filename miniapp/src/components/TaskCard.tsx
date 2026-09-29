@@ -214,7 +214,8 @@ export function TaskCard({
           kind: "done",
           label: "Сделано",
           busyLabel: "Закрываем…",
-          onClick: () => void run("done", () => completeTask(db, task.id)),
+          onClick: () =>
+            void run("done", () => completeTask(db, task.id, task.repeat ? task.occurrenceAt : null)),
         }}
         onDelete={() => void onDelete()}
       />

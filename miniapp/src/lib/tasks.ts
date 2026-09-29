@@ -9,6 +9,10 @@
  * Отказ — это текст на экране, а не исключение (`supabase.ts`). Действие
  * считается сделанным только когда база вернула строку (инвариант 4).
  *
+ * Повторяющаяся задача (`techspec/13-repeat.md`) — та же строка с правилом
+ * и разом: «Сделано» переводит её на следующий раз, а форма правит правило
+ * вместе со сроком. Слова и выбор повтора — в `repeat.ts`.
+ *
  * Группировка и разбор строк — чистые функции, проверяются на Node.
  */
 
@@ -22,6 +26,22 @@ import {
   timeInputValue,
 } from "./format.ts";
 import { dateOrNull, oneOf, recordOf } from "./parse.ts";
+import {
+  NO_REPEAT,
+  type Repeat,
+  type RepeatChange,
+  type RepeatDraft,
+  fitDay,
+  intervalOf,
+  movedNote,
+  occurrenceSeconds,
+  parseRepeat,
+  repeatDraftOf,
+  repeatJson,
+  repeatWords,
+  ruleOf,
+  sameChoice,
+} from "./repeat.ts";
 import { type ActionResult, type Db, failed, query } from "./supabase.ts";
 
 export type { ActionResult } from "./supabase.ts";
@@ -45,6 +65,10 @@ export interface Task {
   createdAt: Date;
   /** Вопрос, который бот задал по задаче и на который ещё нет ответа. */
   openQuestion: OpenQuestion | null;
+  /** Правило повтора; у разовой задачи `null`. */
+  repeat: Repeat | null;
+  /** Раз по правилу, который задача сейчас представляет; у разовой `null`. */
+  occurrenceAt: Date | null;
 }
 
 /** Уточняющий вопрос бота (§10.4): текст и когда задан; время может не прийти. */
@@ -92,7 +116,7 @@ export type DetailsResult = { ok: true; details: TaskDetails } | { ok: false; me
 
 const COLUMNS =
   "id, title, kind, due_at, due_precision, priority, promise, people, needs_review, " +
-  "open_question, question_asked_at, source_message_id, created_at";
+  "open_question, question_asked_at, source_message_id, created_at, repeat, occurrence_at";
 
 /** Строка `tasks` → задача. Не годится (нет id или названия) — `null`. */
 export function parseTask(row: unknown): Task | null {
@@ -119,6 +143,9 @@ export function parseTask(row: unknown): Task | null {
       typeof r.open_question === "string" && r.open_question.trim() !== ""
         ? { text: r.open_question, askedAt: dateOrNull(r.question_asked_at) }
         : null,
+    // Правило не по форме — задача показывается разовой, а не пропадает.
+    repeat: parseRepeat(r.repeat),
+    occurrenceAt: dateOrNull(r.occurrence_at),
   };
 }
 
@@ -373,21 +400,41 @@ export async function editTask(db: Db, taskId: string, changes: TaskChanges): Pr
   return { ok: true, task };
 }
 
-/** «Сделано»: `complete_task` под токеном; `null` — задачи у владельца нет. */
-export async function completeTask(db: Db, taskId: string): Promise<ActionResult> {
-  const result = await query(db, (client: SupabaseClient) =>
-    client.rpc("complete_task", { task_id: taskId }),
-  );
+/**
+ * Ответ на «Сделано»: `next` — задача, которую база оставила активной
+ * (повторяющаяся на следующем разе); `null` — задача закрыта и уходит.
+ */
+export type CompleteResult = { ok: true; next: Task | null } | { ok: false; message: string };
+
+/**
+ * «Сделано»: `complete_task` под токеном (§13.3). У повторяющейся задачи
+ * с ней уходит раз, который видит экран: задача уже на другом — база её
+ * второй раз не переводит. Разовая зовётся без раза, как до этапа 011.
+ * Пустой ответ — задачи у владельца нет.
+ */
+export async function completeTask(
+  db: Db,
+  taskId: string,
+  occurrenceAt: Date | null,
+): Promise<CompleteResult> {
+  const params =
+    occurrenceAt === null
+      ? { task_id: taskId }
+      : { task_id: taskId, occurrence: occurrenceSeconds(occurrenceAt) };
+  const result = await query(db, (client: SupabaseClient) => client.rpc("complete_task", params));
   if (!result.ok) {
     return failed("Не получилось закрыть задачу", result);
   }
-  if (result.data === null) {
+  // Функция возвращает строку таблицы; пустая строка приходит объектом из null.
+  const row: unknown = Array.isArray(result.data) ? result.data[0] : result.data;
+  const task = parseTask(row);
+  if (task === null) {
     return {
       ok: false,
       message: "Задача не найдена — возможно, её уже закрыли в чате. Обновите список.",
     };
   }
-  return { ok: true };
+  return { ok: true, next: recordOf(row)?.status === "active" ? task : null };
 }
 
 /** «Удалить»: обычный delete под RLS; база вернула строку — значит удалено. */
@@ -439,6 +486,8 @@ export interface TaskDraft {
   promise: PromiseSide | "none";
   /** Люди через запятую. */
   people: string;
+  /** Выбор повтора; действует, пока выбран день (`repeatOpen`). */
+  repeat: RepeatDraft;
 }
 
 /** Изменённые поля для `edit_task` — ровно те ключи, что понимает база. */
@@ -452,6 +501,8 @@ export interface TaskChanges {
   priority?: Priority;
   promise?: PromiseSide | null;
   people?: string[];
+  /** Правило без часа — срок формы станет первым разом; `null` — повтор снят. */
+  repeat?: RepeatChange | null;
 }
 
 export type EditResult = { ok: true; task: Task } | { ok: false; message: string };
@@ -467,6 +518,7 @@ export function draftOf(task: Task): TaskDraft {
     priority: task.priority,
     promise: task.promise ?? "none",
     people: task.people.join(", "),
+    repeat: repeatDraftOf(task.repeat),
   };
 }
 
@@ -494,6 +546,13 @@ export function validateDraft(draft: TaskDraft): string | null {
   if (!draft.noDue && dayOf(draft) === null) {
     return "Выберите день или отметьте «Без срока».";
   }
+  const repeat = repeatOf(draft);
+  if (repeat.every !== "none" && intervalOf(repeat.interval) === null) {
+    return "Шаг повтора — число от 1 до 99.";
+  }
+  if (repeat.every === "week" && repeat.weekdays.length === 0) {
+    return "Отметьте хотя бы один день недели.";
+  }
   return null;
 }
 
@@ -516,10 +575,93 @@ function dueChange(task: Task, draft: TaskDraft): Pick<TaskChanges, "due_at" | "
   return same ? {} : { due_date: draft.day };
 }
 
+/** Срок формы целиком — ключом `edit_task`, даже если он тот же. */
+function formDue(draft: TaskDraft): Pick<TaskChanges, "due_at" | "due_date"> {
+  const moment = draft.time === "" ? null : momentFromInputs(draft.day, draft.time);
+  return moment ? { due_at: isoWithOffset(moment) } : { due_date: draft.day };
+}
+
+/* ----------------------------------------------------- повтор в форме */
+
+/** Выбрать повтор можно у задачи с днём (§13.6): без срока и у идеи — нет. */
+export function repeatOpen(draft: TaskDraft): boolean {
+  return !draft.noDue && draft.kind === "task" && dayOf(draft) !== null;
+}
+
+/** Выбор повтора, который видит и сохраняет форма: заперт — «Нет». */
+export function repeatOf(draft: TaskDraft): RepeatDraft {
+  return repeatOpen(draft) ? draft.repeat : NO_REPEAT;
+}
+
+/**
+ * Выбор повтора изменён: правило уйдёт в базу, и срок станет первым
+ * разом. Не изменён — дата и час меняют только этот раз (§13.6).
+ */
+export function repeatChanged(task: Task, draft: TaskDraft): boolean {
+  return !sameChoice(repeatOf(draft), repeatDraftOf(task.repeat));
+}
+
+/**
+ * Правка поля формы. «Без срока» и вид не «задача» сбрасывают повтор на
+ * «Нет»: вернуть флажок или вид правило не вернёт.
+ */
+export function patchDraft(draft: TaskDraft, patch: Partial<TaskDraft>): TaskDraft {
+  const next = { ...draft, ...patch };
+  return next.noDue || next.kind !== "task" ? { ...next, repeat: NO_REPEAT } : next;
+}
+
+/**
+ * Новый выбор повтора. Дни или «в последний день месяца», в которые дата
+ * не попадает, передвигают её на ближайший подходящий день не раньше неё;
+ * `moved` — строка подсказки под сроком: куда и почему.
+ */
+export function applyRepeat(
+  draft: TaskDraft,
+  repeat: RepeatDraft,
+): { draft: TaskDraft; moved: string | null } {
+  // Полдень: переход на летнее время не сдвинет день.
+  const day = momentFromInputs(draft.day, "12:00");
+  if (day === null) {
+    return { draft: { ...draft, repeat }, moved: null };
+  }
+  const fitted = fitDay(repeat, day);
+  return {
+    draft: { ...draft, repeat, day: dateInputValue(fitted) },
+    moved: movedNote(repeat, day, fitted),
+  };
+}
+
+/**
+ * Строка «Получается: …» под выбором: правило задачи, пока выбор не
+ * меняли, иначе — из выбора и даты. «Нет» и неделя без дня — `null`.
+ */
+export function repeatSummary(
+  task: Task,
+  draft: TaskDraft,
+): { words: string; changed: boolean } | null {
+  const choice = repeatOf(draft);
+  const day = dayOf(draft);
+  if (choice.every === "none" || day === null) {
+    return null;
+  }
+  const changed = repeatChanged(task, draft);
+  const rule = !changed && task.repeat !== null ? task.repeat : ruleOf(choice, day);
+  return rule === null ? null : { words: repeatWords(rule), changed };
+}
+
+/** Под сроком повторяющейся задачи, пока выбор не меняли. */
+export function repeatDueHint(task: Task, draft: TaskDraft): string | null {
+  return task.repeat !== null && repeatOpen(draft) && !repeatChanged(task, draft)
+    ? "Дата и час меняют только этот раз — повтор останется прежним."
+    : null;
+}
+
 /**
  * Только изменённые поля: база получает ровно правку, а не всю форму.
  * Черновик должен пройти `validateDraft`. Суть — без пробелов по краям;
- * люди — списком без пустых имён; «нет» у обещания — `null`.
+ * люди — списком без пустых имён; «нет» у обещания — `null`. Выбор
+ * повтора изменён — правило уходит вместе со сроком формы (он станет
+ * первым разом); «Нет» — `repeat: null`.
  */
 export function taskChanges(task: Task, draft: TaskDraft): TaskChanges {
   const changes: TaskChanges = {};
@@ -541,6 +683,17 @@ export function taskChanges(task: Task, draft: TaskDraft): TaskChanges {
   const people = peopleOf(draft.people);
   if (!sameList(people, task.people)) {
     changes.people = people;
+  }
+  if (repeatChanged(task, draft)) {
+    const choice = repeatOf(draft);
+    const day = dayOf(draft);
+    const rule = day === null ? null : ruleOf(choice, day);
+    if (choice.every === "none") {
+      changes.repeat = null;
+    } else if (rule !== null) {
+      changes.repeat = repeatJson(rule);
+      Object.assign(changes, formDue(draft));
+    }
   }
   return changes;
 }

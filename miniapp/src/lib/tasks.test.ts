@@ -11,11 +11,14 @@ import { describe, it } from "node:test";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { NO_REPEAT, type Repeat } from "./repeat.ts";
 import type { Session } from "./session.ts";
 import type { Db } from "./supabase.ts";
 import {
   type Task,
   type TaskDraft,
+  applyRepeat,
+  completeTask,
   draftOf,
   dueHint,
   editTask,
@@ -25,7 +28,12 @@ import {
   needsSaving,
   parseSourceMessage,
   parseTask,
+  patchDraft,
   questionOf,
+  repeatChanged,
+  repeatDueHint,
+  repeatOpen,
+  repeatSummary,
   taskChanges,
   validateDraft,
   voiceCaption,
@@ -48,6 +56,8 @@ function task(overrides: Partial<Task> = {}): Task {
     sourceMessageId: null,
     createdAt: new Date(2026, 8, 24, 9, 0),
     openQuestion: null,
+    repeat: null,
+    occurrenceAt: null,
     ...overrides,
   };
 }
@@ -149,6 +159,34 @@ describe("parseTask", () => {
     assert.equal(parseTask({ ...row, title: 5 }), null);
     assert.equal(parseTask(null), null);
     assert.equal(parseTask({ ...row, id: undefined }), null);
+  });
+
+  it("повтор и раз (§13.2); у разовой их нет", () => {
+    const parsed = parseTask({
+      ...row,
+      repeat: { every: "week", interval: 1, weekdays: [1], month_day: null, month: null, time: "13:00" },
+      occurrence_at: "2026-09-30T10:00:00+00:00",
+    });
+    assert.ok(parsed);
+    assert.deepEqual(parsed.repeat, {
+      every: "week",
+      interval: 1,
+      weekdays: [1],
+      monthDay: null,
+      month: null,
+      time: "13:00",
+    });
+    assert.equal(parsed.occurrenceAt?.toISOString(), "2026-09-30T10:00:00.000Z");
+
+    const single = parseTask(row);
+    assert.equal(single?.repeat, null);
+    assert.equal(single?.occurrenceAt, null);
+  });
+
+  it("правило не по форме — задача читается разовой, а не пропадает", () => {
+    const parsed = parseTask({ ...row, repeat: { every: "week", interval: 1, weekdays: [] } });
+    assert.ok(parsed);
+    assert.equal(parsed.repeat, null);
   });
 });
 
@@ -265,6 +303,7 @@ function draft(overrides: Partial<TaskDraft> = {}): TaskDraft {
     priority: "normal",
     promise: "none",
     people: "",
+    repeat: NO_REPEAT,
     ...overrides,
   };
 }
@@ -289,6 +328,7 @@ describe("draftOf", () => {
       priority: "normal",
       promise: "mine",
       people: "Кузнецов, Анна",
+      repeat: NO_REPEAT,
     });
   });
 
@@ -386,6 +426,163 @@ describe("taskChanges", () => {
   });
 });
 
+/* ------------------------------------------------- повтор в форме (§13.6) */
+
+// Понедельник, 5 октября, без часа; повтор — каждый понедельник.
+const MONDAYS: Repeat = {
+  every: "week",
+  interval: 1,
+  weekdays: [1],
+  monthDay: null,
+  month: null,
+  time: null,
+};
+
+const weekly = task({
+  id: "6f1c",
+  title: "Отправить отчёт",
+  dueAt: new Date(2026, 9, 5, 18, 0),
+  duePrecision: "day",
+  repeat: MONDAYS,
+  occurrenceAt: new Date(2026, 9, 5, 18, 0),
+});
+
+const EVERY_MONDAY = { every: "week", interval: 1, weekdays: [1], month_day: null, month: null };
+
+describe("повтор: черновик", () => {
+  it("форма открывается с правилом задачи", () => {
+    assert.deepEqual(draftOf(weekly).repeat, { every: "week", interval: "1", weekdays: [1], last: false });
+    assert.deepEqual(draftOf(friday).repeat, NO_REPEAT);
+  });
+
+  it("выбрать повтор можно только у задачи с днём", () => {
+    assert.equal(repeatOpen(draftOf(weekly)), true);
+    assert.equal(repeatOpen({ ...draftOf(weekly), noDue: true }), false);
+    assert.equal(repeatOpen({ ...draftOf(weekly), day: "" }), false);
+    assert.equal(repeatOpen({ ...draftOf(weekly), kind: "wish" }), false);
+  });
+
+  it("«Без срока» и вид не «задача» сбрасывают выбор на «Нет»; другие поля — нет", () => {
+    assert.deepEqual(patchDraft(draftOf(weekly), { noDue: true }).repeat, NO_REPEAT);
+    assert.deepEqual(patchDraft(draftOf(weekly), { kind: "idea" }).repeat, NO_REPEAT);
+    assert.deepEqual(patchDraft(draftOf(weekly), { title: "Отчёт" }).repeat, draftOf(weekly).repeat);
+    assert.deepEqual(patchDraft(draftOf(weekly), { day: "2026-10-07" }).repeat, draftOf(weekly).repeat);
+  });
+
+  it("дни, в которые дата не попадает, передвигают её — с подсказкой", () => {
+    const moved = applyRepeat(draftOf(weekly), { every: "week", interval: "2", weekdays: [2], last: false });
+    assert.equal(moved.draft.day, "2026-10-06");
+    assert.deepEqual(moved.draft.repeat.weekdays, [2]);
+    assert.equal(moved.moved, "Дата передвинута на вторник, 6 октября — в понедельник повтор не попадает.");
+
+    const last = applyRepeat(draftOf(weekly), { every: "month", interval: "1", weekdays: [], last: true });
+    assert.equal(last.draft.day, "2026-10-31");
+    assert.equal(last.moved, "Дата передвинута на 31 октября — последний день месяца.");
+  });
+
+  it("дата по правилу — остаётся, подсказки нет; час не трогается", () => {
+    const atNine = { ...draftOf(weekly), time: "09:00" };
+    const kept = applyRepeat(atNine, { every: "week", interval: "1", weekdays: [1, 3], last: false });
+    assert.equal(kept.draft.day, "2026-10-05");
+    assert.equal(kept.draft.time, "09:00");
+    assert.equal(kept.moved, null);
+  });
+
+  it("неделя без дня и негодный шаг — форма не сохраняется", () => {
+    const empty = { ...draftOf(weekly), repeat: { ...draftOf(weekly).repeat, weekdays: [] } };
+    assert.equal(validateDraft(empty), "Отметьте хотя бы один день недели.");
+    const step = { ...draftOf(weekly), repeat: { ...draftOf(weekly).repeat, interval: "0" } };
+    assert.equal(validateDraft(step), "Шаг повтора — число от 1 до 99.");
+    // Выбор заперт — его поля не проверяются.
+    assert.equal(validateDraft({ ...empty, noDue: true }), null);
+  });
+});
+
+describe("повтор: что уходит в базу", () => {
+  it("выбор не меняли — дата меняет только этот раз, правила в правке нет", () => {
+    assert.deepEqual(taskChanges(weekly, draftOf(weekly)), {});
+    assert.equal(repeatChanged(weekly, draftOf(weekly)), false);
+    assert.deepEqual(taskChanges(weekly, { ...draftOf(weekly), day: "2026-10-07" }), {
+      due_date: "2026-10-07",
+    });
+  });
+
+  it("выбор изменён — правило вместе со сроком формы, даже тем же", () => {
+    const edited = { ...draftOf(weekly), repeat: { ...draftOf(weekly).repeat, weekdays: [1, 5] } };
+    assert.equal(repeatChanged(weekly, edited), true);
+    assert.deepEqual(taskChanges(weekly, edited), {
+      repeat: { ...EVERY_MONDAY, weekdays: [1, 5] },
+      due_date: "2026-10-05",
+    });
+  });
+
+  it("срок с часом — моментом рядом с правилом", () => {
+    const edited = {
+      ...draftOf(weekly),
+      time: "09:00",
+      repeat: { ...draftOf(weekly).repeat, interval: "2" },
+    };
+    const changes = taskChanges(weekly, edited);
+    assert.deepEqual(changes.repeat, { ...EVERY_MONDAY, interval: 2 });
+    assert.equal(new Date(changes.due_at as string).getTime(), new Date(2026, 9, 5, 9, 0).getTime());
+    assert.equal(changes.due_date, undefined);
+  });
+
+  it("у разовой — число месяца из даты", () => {
+    const edited = {
+      ...draftOf(friday),
+      repeat: { every: "month" as const, interval: "1", weekdays: [], last: false },
+    };
+    assert.deepEqual(taskChanges(friday, edited), {
+      repeat: { every: "month", interval: 1, weekdays: null, month_day: 2, month: null },
+      due_date: "2026-10-02",
+    });
+  });
+
+  it("«Нет», «Без срока» и идея снимают правило", () => {
+    assert.deepEqual(taskChanges(weekly, { ...draftOf(weekly), repeat: NO_REPEAT }), { repeat: null });
+    assert.deepEqual(taskChanges(weekly, patchDraft(draftOf(weekly), { noDue: true })), {
+      due_at: null,
+      repeat: null,
+    });
+    assert.deepEqual(taskChanges(weekly, patchDraft(draftOf(weekly), { kind: "idea" })), {
+      kind: "idea",
+      repeat: null,
+    });
+  });
+
+  it("выбрали другое и вернули то же — не правка", () => {
+    const back = { ...draftOf(weekly), repeat: { every: "week" as const, interval: "01", weekdays: [1], last: false } };
+    assert.deepEqual(taskChanges(weekly, back), {});
+  });
+});
+
+describe("повтор: подписи формы", () => {
+  it("«Получается» — правило задачи, пока выбор не меняли", () => {
+    // Дата сдвинута на среду, а правило — прежнее.
+    const moved = { ...draftOf(weekly), day: "2026-10-07" };
+    assert.deepEqual(repeatSummary(weekly, moved), { words: "каждый понедельник", changed: false });
+  });
+
+  it("выбор изменён — правило из выбора и даты", () => {
+    const monthly = { ...draftOf(weekly), repeat: { every: "month" as const, interval: "3", weekdays: [], last: false } };
+    assert.deepEqual(repeatSummary(weekly, monthly), { words: "каждые 3 месяца 5-го", changed: true });
+  });
+
+  it("«Нет» и неделя без дня — строки нет", () => {
+    assert.equal(repeatSummary(friday, draftOf(friday)), null);
+    const empty = { ...draftOf(weekly), repeat: { ...draftOf(weekly).repeat, weekdays: [] } };
+    assert.equal(repeatSummary(weekly, empty), null);
+  });
+
+  it("под сроком — что дата меняет только этот раз", () => {
+    const only = "Дата и час меняют только этот раз — повтор останется прежним.";
+    assert.equal(repeatDueHint(weekly, draftOf(weekly)), only);
+    assert.equal(repeatDueHint(weekly, { ...draftOf(weekly), repeat: NO_REPEAT }), null);
+    assert.equal(repeatDueHint(friday, draftOf(friday)), null);
+  });
+});
+
 describe("needsSaving", () => {
   it("без изменений и без пометки — запроса нет", () => {
     assert.equal(needsSaving(friday, {}), false);
@@ -474,6 +671,50 @@ const SAVED_ROW = {
 };
 
 const NOT_FOUND = "Задача не найдена — возможно, её закрыли или удалили в чате. Обновите список.";
+
+describe("completeTask", () => {
+  const ADVANCED = {
+    ...SAVED_ROW,
+    status: "active",
+    due_at: "2026-10-12T13:00:00+00:00",
+    due_precision: "day",
+    repeat: { every: "week", interval: 1, weekdays: [1], month_day: null, month: null, time: null },
+    occurrence_at: "2026-10-12T13:00:00+00:00",
+  };
+
+  it("повторяющаяся: раз в секундах, в ответ — задача на следующем разе", async () => {
+    const { db, calls } = fakeDb({ data: ADVANCED, error: null, status: 200 });
+    const occurrence = new Date("2026-10-05T13:00:00.250Z");
+
+    const result = await completeTask(db, "6f1c", occurrence);
+
+    assert.deepEqual(calls, [
+      { name: "complete_task", params: { task_id: "6f1c", occurrence: 1791205200 } },
+    ]);
+    assert.ok(result.ok);
+    assert.equal(result.next?.dueAt?.toISOString(), "2026-10-12T13:00:00.000Z");
+    assert.equal(result.next?.repeat?.every, "week");
+  });
+
+  it("разовая: без раза — как раньше; закрыта — уходит из списка", async () => {
+    const { db, calls } = fakeDb({ data: { ...SAVED_ROW, status: "done" }, error: null, status: 200 });
+
+    const result = await completeTask(db, "6f1c", null);
+
+    assert.deepEqual(calls, [{ name: "complete_task", params: { task_id: "6f1c" } }]);
+    assert.deepEqual(result, { ok: true, next: null });
+  });
+
+  it("задачи нет — ничего не сделано", async () => {
+    for (const data of [null, { id: null, title: null }, []]) {
+      const { db } = fakeDb({ data, error: null, status: 200 });
+      assert.deepEqual(await completeTask(db, "6f1c", null), {
+        ok: false,
+        message: "Задача не найдена — возможно, её уже закрыли в чате. Обновите список.",
+      });
+    }
+  });
+});
 
 describe("editTask", () => {
   it("зовёт edit_task с изменёнными полями и отдаёт строку базы", async () => {
