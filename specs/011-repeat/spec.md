@@ -135,7 +135,7 @@
 
 Этап L — сначала `plan.md` в папке этапа.
 
-- [ ] Миграция: колонки `tasks.repeat` и `tasks.occurrence_at` с
+- [x] Миграция: колонки `tasks.repeat` и `tasks.occurrence_at` с
       проверками §13.2; чистые `repeat_valid` и `repeat_next` (право —
       `service_role` и `authenticated`); одно ядро перехода на следующий
       раз (§13.3); `mark_task_done(owner, task_id, occurrence default
@@ -157,7 +157,7 @@
       несёт секунды Unix. `on conflict` — только `on constraint`. Правка
       `techspec/03-schema.md` §3.3–3.6 в том же коммите — и первая
       фраза §3.3 о том, что повторяемость не хранится.
-- [ ] Тесты PGlite: прежние тесты (`record_understanding`, `edit_task`,
+- [x] Тесты PGlite: прежние тесты (`record_understanding`, `edit_task`,
       `chat_edit`, `reminder_plan`, `due_moved`) зелёные без правки
       ожиданий; таблица случаев `repeat_next` (из «Приёмки»);
       `repeat_valid` — каждое правило формы и отказы; переход с кнопки,

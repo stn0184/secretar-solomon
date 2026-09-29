@@ -71,9 +71,10 @@ null`.
 
 ### 3.3 `tasks` — задачи
 
-Задачу заполняет разбор сообщения моделью (§5.3). «Следующий шаг» и
-повторяемость из `spec.md` §3.3 не заводятся: их некому заполнять
-надёжно, колонка без записи — догадка о будущем.
+Задачу заполняет разбор сообщения моделью (§5.3). «Следующий шаг» из
+`spec.md` §3.3 не заводится: его некому заполнять надёжно, колонка без
+записи — догадка о будущем. Повторяемость заведена этапом 011 — правило
+`repeat` и раз `occurrence_at` (§13.2).
 
 | Колонка | Тип | Что это |
 | --- | --- | --- |
@@ -84,6 +85,8 @@ null`.
 | `status` | text, `check in ('active', 'done', 'cancelled')`, `default 'active'` | активна, выполнена или убрана (§12.3): убранную делать не надо, но она не выполнена и не удалена |
 | `due_at` | timestamptz, nullable | срок; пусто — срок не назван |
 | `due_precision` | text, `check in ('day', 'time')`, nullable | назван день или день и время |
+| `repeat` | jsonb, nullable | правило повтора `{every, interval, weekdays, month_day, month, time}` (§13.2); пусто — разовая задача |
+| `occurrence_at` | timestamptz, nullable | раз серии, на котором стоит задача (§13.2): от него, а не от срока, считается следующий; срок — момент этого раза, если его не переносили |
 | `priority` | text, `check in ('low', 'normal', 'high')`, `default 'normal'` | срочность по словам человека |
 | `promise` | text, `check in ('mine', 'to_me')`, nullable | чьё обещание (`spec.md` §3.3); пусто — не обещание |
 | `people` | text[], `default '{}'` | упомянутые люди, как названы |
@@ -102,6 +105,16 @@ null`.
 в 18:00 ядро правки `change_task` (§3.6) по поясу из `owner_settings`
 (§3.8). Уже
 записанный срок база не пересчитывает.
+
+Правило и раз держат три проверки таблицы (миграция 011,
+`20260929200000_repeat.sql`): `tasks_repeat_valid` — форма правила
+по `repeat_valid` (§3.5); `tasks_repeat_occurrence` — раз есть ровно у
+задачи с правилом; `tasks_repeat_needs_due` — правило только у задачи
+(`kind = 'task'`) со сроком. Каноническую форму — все шесть ключей, дни
+недели по порядку, неположенные поля `null`, `time` — час срока в поясе
+владельца (при точности `day` — `null`) — ставит `repeat_rule` (§3.5):
+его зовут `change_task` и `record_understanding`, `time` ни модель, ни
+приложение не шлют. Прямая правка под RLS проходит те же проверки.
 
 Индекс `(owner_telegram_id, status)` — под главный запрос «активные
 задачи владельца»; частичный `(owner_telegram_id) where due_moved_at is
@@ -155,7 +168,11 @@ record_understanding(message_id uuid, owner_telegram_id bigint,
 (§4.3): чужое `message_id` — отказ.
 
 Поля задачи берутся из `task` по именам колонок §3.3; `people` ждётся
-массивом, всё остальное — строками. Прежняя `record_task` (этап 002)
+массивом, всё остальное — строками. `repeat` (этап 011, §13.5) —
+правило без `time`: база канонизирует его `repeat_rule` по сроку и
+поясу владельца, первым разом (`occurrence_at`) становится срок. Правило
+без срока или у идеи и желания — отказ (бот такое отбрасывает сам,
+§13.5), у владельца без пояса — тоже. Прежняя `record_task` (этап 002)
 удалена той же миграцией.
 
 Открытый вопрос (этап 008, §10) снимается **любой** записью
@@ -186,18 +203,23 @@ record_understanding(message_id uuid, owner_telegram_id bigint,
 (`sent_at = null`) — иначе строка «Напомню» в ответе обещала бы
 напоминание, которого не будет (инвариант 4). Какие ключи попадают в
 `fields`, решает бот (§10.2): только изменённые ответом плюс
-`needs_review`.
+`needs_review`. С этапа 011 ответ может дать и правило — ключ `repeat`
+(объект — поставить по сроку после поправки, раз — этот срок; `null` —
+снять), как у `change_task` (§3.6). Срок снят — правило снимается тоже;
+срок перенесён без правила — перенесён только этот раз.
 
 `edit` (этап 010, §12.4) — правка задачи из списка словом; `task` и
 `amend` при этом `null`:
 
 ```
 {
-  "task_id":  uuid,                        -- задача из списка
-  "action":   "change" | "done" | "cancel",
-  "changes":  {title?, due_at? | due_date?, priority?, promise?, people?},
-  "schedule": [{stage, fire_at}],          -- готовый план (§12.4)
-  "question": text | null                  -- question верхнего уровня
+  "task_id":    uuid,                      -- задача из списка
+  "action":     "change" | "done" | "skip" | "cancel",
+  "changes":    {title?, due_at? | due_date?, priority?, promise?, people?, repeat?},
+  "schedule":   [{stage, fire_at}],        -- готовый план (§12.4)
+  "question":   text | null,               -- question верхнего уровня
+  "occurrence": bigint,                    -- done/skip повторяющейся: раз, секунды Unix
+  "next_at":    timestamptz                -- done/skip повторяющейся: следующий раз
 }
 ```
 
@@ -207,8 +229,15 @@ record_understanding(message_id uuid, owner_telegram_id bigint,
 функция `edit_from_chat(owner_telegram_id bigint, edit jsonb) returns
 tasks` — одна на `record_understanding` и `pick_task`:
 
-- `done` / `cancel` — `status = 'done'` / `'cancelled'` и удаление
-  неотправленных напоминаний, как `mark_task_done` (§3.5);
+- разовая задача: `done` — `status = 'done'`, `skip` и `cancel` —
+  `'cancelled'`, и удаление неотправленных напоминаний, как
+  `mark_task_done` (§3.5);
+- повторяющаяся (этап 011, §13.3): `cancel` — убрать всю серию
+  (`cancelled`, правило и раз остаются, `reopen_task` её возвращает);
+  `done` и `skip` — переход на следующий раз ядром `advance_task` (§3.6)
+  с готовыми `next_at` и `schedule` бота. Без `next_at` — исключение;
+  `occurrence` не передан или задача стоит на другом разе — `null`, как
+  у не активной;
 - `change` с непустым `question` — непонятно новое значение: поля не
   трогаются, задача получает `needs_review = true`, `open_question` и
   `question_asked_at = now()` (§10.1), вопросы других задач снимаются
@@ -252,7 +281,8 @@ pick_task(owner_telegram_id bigint, message_id uuid, edit jsonb,
 Миграция этапа 010 — `20260929100000_chat_edit.sql`; тринадцати-
 аргументная версия удалена ею же. Аргумент `edit` необязательный, и
 прежний вызов бота по именам аргументов работает на новой версии как
-раньше.
+раньше. Миграция 011 меняет тела `record_understanding` и
+`edit_from_chat` (`create or replace`), сигнатуры и права прежние.
 
 `transcript` и `transcript_confidence` (этап 007) — расшифровка голоса:
 не `null` — становится `text` сообщения (§9.3); `null` — текст не трогается.
@@ -288,16 +318,26 @@ RLS — как у остальных (§4.2).
 - `due_reminders(owner_telegram_id bigint, now timestamptz)` —
   созревшие напоминания владельца вместе с полями задачи, только по
   задачам `status = 'active'`; колонки `id, task_id, stage, fire_at,
-  title, due_at, due_precision`, порядок по `fire_at`.
+  title, due_at, due_precision, repeat, occurrence_at` (последние две —
+  миграция 011: кнопка «Сделано» несёт раз, §13.3), порядок по
+  `fire_at`.
 - `mark_reminders_sent(owner_telegram_id bigint, ids uuid[],
   telegram_message_id bigint)` — `returns void`; уже помеченные строки
   не трогает, поэтому `sent_at` остаётся временем первой отправки.
-- `mark_task_done(owner_telegram_id bigint, task_id uuid) returns tasks` —
-  `status = done` и удаление неотправленных напоминаний задачи одной
-  транзакцией; не активная задача (`done` или `cancelled`) —
-  возвращается как есть, ни статус, ни напоминания не тронуты (с
-  миграции 010: «Сделано» под старым напоминанием убранной задачи её не
-  закрывает), чужая или несуществующая — `null` и ни одной правки.
+- `mark_task_done(owner_telegram_id bigint, task_id uuid, occurrence
+  bigint default null) returns tasks` — обёртка над ядром
+  `advance_task` (§3.6), миграция 011; прежняя перегрузка без раза
+  удалена (PostgREST не различает перегрузки), вызов без раза работает.
+  Разовая задача — `status = done` и удаление неотправленных
+  напоминаний одной транзакцией. Повторяющаяся — переход на следующий
+  раз (§13.3): срок и раз — `repeat_next` от `max(occurrence_at, now())`
+  по поясу владельца, план — `reminder_plan`, статус активный.
+  `occurrence` — раз из callback кнопки (секунды Unix): задача стоит на
+  другом разе — возвращается как есть; без раза переводится текущий.
+  Не активная задача (`done` или `cancelled`) — как есть, ни статус, ни
+  напоминания не тронуты (с миграции 010: «Сделано» под старым
+  напоминанием убранной задачи её не закрывает), чужая или
+  несуществующая — `null` и ни одной правки.
 - `reopen_task(owner_telegram_id bigint, task_id uuid, schedule jsonb)
   returns tasks` — «Вернуть» под «Закрыл» и «Убрал из списка» (§12.6),
   миграция 010: `status = active`, неотправленные напоминания заменены
@@ -307,13 +347,51 @@ RLS — как у остальных (§4.2).
   чужая или несуществующая — `null`.
 - `moved_tasks(owner_telegram_id bigint)` — активные задачи владельца с
   `due_moved_at` (§11.4): `id, title, due_at, due_precision,
-  due_moved_at, next_fire_at`, где `next_fire_at` — ближайшее
-  неотправленное напоминание задачи или `null`; порядок по
-  `due_moved_at`. Закрытая или удалённая задача строки не даёт.
+  due_moved_at, next_fire_at, repeat, occurrence_at`, где
+  `next_fire_at` — ближайшее неотправленное напоминание задачи или
+  `null` (правило и раз — миграция 011: у повторяющейся перенесён
+  только этот раз); порядок по `due_moved_at`. Закрытая или удалённая
+  задача строки не даёт.
+- `return_occurrence(owner_telegram_id bigint, task_id uuid, back_to
+  bigint, moved_from bigint, schedule jsonb) returns tasks` — «Вернуть»
+  под «Отметил» и «Пропускаю» (§13.3), миграция 011: задача активна,
+  повторяется и стоит на разе `moved_from` — `due_at = occurrence_at =
+  back_to` (секунды Unix) в точности серии, неотправленные напоминания
+  заменены планом `schedule` с `on conflict … sent_at = null`. Иначе —
+  как есть (бот узнаёт исход по разу в ответе); нет задачи — `null`.
+- `roll_repeats(owner_telegram_id bigint, now timestamptz) returns setof
+  tasks` — пропущенный раз (§13.4), миграция 011: активные
+  повторяющиеся задачи со сроком в прошлом переходят на последний
+  наступивший раз ряда от `max(occurrence_at, due_at)`; начало раза —
+  `min(полночь его дня, ступень «заранее»)` в поясе владельца. План
+  нового раза — `reminder_plan` на миг раньше его начала: обе ступени.
+  `due_moved_at` не ставится. Пояса нет — ничего. Отдаёт перекатанные
+  задачи.
 - `clear_due_moved(owner_telegram_id bigint, task_id uuid, seen
   timestamptz) returns boolean` — снимает отметку, только если она всё
   ещё равна прочитанной `seen`; правка между чтением и снятием отметку
   сменила, и она остаётся. `true` — снята.
+
+Правило повтора (миграция 011, §13.2) — три функции без таблиц, права
+`authenticated` и `service_role` (их зовут ядра под токеном и проверка
+таблицы при правке под RLS), `anon` и `public` — `revoke`:
+
+- `repeat_valid(rule jsonb) returns boolean` — `immutable`, форма
+  правила: ключи только `every, interval, weekdays, month_day, month,
+  time`; `interval` — целое 1–99; `weekdays` — непустой список
+  различных 1–7 только у `week`; `month_day` — 1–31 или −1 у `month`,
+  1–31 у `year` и не больше длины месяца (у февраля 29); `month` — 1–12
+  только у `year`; `time` — `HH:MM` или `null`. `null` проходит.
+- `repeat_rule(rule jsonb, due_at timestamptz, due_precision text,
+  timezone text) returns jsonb` — канон правила (§3.3); `time` из
+  `rule` отбрасывается и ставится из срока. Не по форме — исключение
+  `invalid repeat`.
+- `repeat_next(repeat jsonb, occurrence_at timestamptz, after
+  timestamptz, timezone text) returns timestamptz` — `stable`, первый
+  раз ряда строго позже `after` и на дне позже дня раза: дни — от дня
+  раза, недели — от понедельника недели раза, месяцы и годы — от
+  месяца и года раза, с шагом `interval`; час — `time`, без него 18:00;
+  число больше длины месяца — последний день. `null` на входе — `null`.
 
 `reminder_plan(due_at timestamptz, due_precision text, kind text,
 timezone text, now timestamptz)` — правило §6.1 в одном месте (§11.3):
@@ -336,9 +414,14 @@ Mini App ходит в базу под ролью `authenticated` (§4.1), вл�
 и работают под RLS (`security invoker`). Выдаются только
 `authenticated`; `anon` и `public` — `revoke`.
 
-- `complete_task(task_id uuid) returns tasks` — `status = done` и
-  удаление неотправленных напоминаний одной транзакцией; то же, что
-  `mark_task_done` для бота (§3.5), но владелец — из токена. Чужая или
+- `complete_task(task_id uuid, occurrence bigint default null) returns
+  tasks` — то же, что `mark_task_done` для бота (§3.5), но владелец —
+  из токена: разовая закрывается (`status = done` и удаление
+  неотправленных напоминаний одной транзакцией), повторяющаяся переходит
+  на следующий раз, если стоит на разе `occurrence` (без раза —
+  текущий). С миграции 011 — обёртка над `advance_task` (ниже), прежняя
+  перегрузка удалена, вызов с одним `task_id` работает; `service_role`
+  права не имеет. Чужая или
   несуществующая задача — `null`, не ошибка. Токен без клейма
   `telegram_id` — тоже `null`. Не активная (`done` или `cancelled`) —
   возвращается как есть, ничего не тронуто (миграция 010). Заведена
@@ -353,9 +436,10 @@ Mini App ходит в базу под ролью `authenticated` (§4.1), вл�
   несуществующая, закрытая задача и токен без клейма — `null`, ничего не
   записано. `changes` — только изменённые поля: `title`, `kind`,
   `priority`, `promise`, `people` (массив; пробелы по краям и пустые
-  имена отбрасываются) и срок одним ключом — `due_at` со смещением
+  имена отбрасываются), срок одним ключом — `due_at` со смещением
   (`time`), `due_date` `YYYY-MM-DD` (`day`, 18:00 в поясе владельца) или
-  `due_at = null` (срока нет). Незнакомый ключ, оба ключа срока, момент
+  `due_at = null` (срока нет) — и с миграции 011 `repeat` (ниже, у
+  `change_task`). Незнакомый ключ, оба ключа срока, момент
   без смещения, пустая суть — исключение, транзакция откатывается.
   Любой вызов, даже с `{}`, снимает у задачи `needs_review`,
   `open_question` и `question_asked_at`. Срок, точность или вид
@@ -378,6 +462,31 @@ Mini App ходит в базу под ролью `authenticated` (§4.1), вл�
   записано), `schedule` отбрасывается, сверх того режет RLS
   (`security invoker`). Права — `authenticated` (его зовёт `edit_task`)
   и `service_role`; `anon` и `public` — `revoke`.
+
+  Ключ `repeat` (миграция 011, §13.5): объект — поставить или сменить
+  правило: канон `repeat_rule` (§3.5) по сроку после правки, раз
+  (`occurrence_at`) — этот срок; без срока после правки или у идеи и
+  желания — исключение `change_task: repeat needs a due date of a task`,
+  не по форме — `invalid repeat`. `null` — снять: задача становится
+  разовой с текущим сроком. Без ключа перенос срока меняет только этот
+  раз — правило и раз остаются; снятие срока и смена вида на идею или
+  желание снимают правило. Сама смена правила расписание не трогает.
+- `advance_task(owner_telegram_id bigint, task_id uuid, occurrence
+  bigint default null, next_at timestamptz default null, schedule jsonb
+  default null) returns tasks` — ядро «Сделано» и пропуска (§13.3),
+  миграция 011: одно на кнопку (`mark_task_done`), приложение
+  (`complete_task`) и слово (`edit_from_chat`). Строка берётся `for
+  update`. Разовая — `done`; повторяющаяся — `due_at = occurrence_at =
+  next_at`, точность по `time` правила, неотправленные напоминания
+  заменены планом с `on conflict … sent_at = null, telegram_message_id =
+  null`; статус, пометка и вопрос не трогаются, `due_moved_at` не
+  ставится. `occurrence` не совпал с разом (секунды Unix) — как есть.
+  `next_at` и `schedule` `null` — считает база: `repeat_next` от
+  `max(occurrence_at, now())` и `reminder_plan` по поясу из
+  `owner_settings` (нет пояса — исключение). Под `authenticated` — как
+  `change_task`: владелец обязан совпасть с клеймом, готовые `next_at`
+  и `schedule` отбрасываются. Права — `authenticated` и
+  `service_role`.
 - Удаление задачи — обычный `delete from tasks where id = …` под RLS;
   напоминания уходят каскадом (§3.5), сообщение-источник остаётся:
   это след, а не часть задачи.
