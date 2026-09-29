@@ -14,10 +14,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
 
 from anthropic import (
@@ -75,18 +75,38 @@ class FactItem(BaseModel):
     text: str
 
 
-# Правка задачи из списка (`techspec/12-chat-edit.md` §12.1). Доккомментарий
-# уходит в схему описанием — он для модели.
+# Правило повтора (`techspec/13-repeat.md` §13.1–13.2). Доккомментарий уходит
+# в схему описанием — он для модели. Диапазонов в схеме нет нарочно: правило
+# не по форме бот отбрасывает сам с пометкой (`services/repeat.py`), а не
+# роняет разбор целиком.
+class Repeat(BaseModel):
+    """Повтор задачи без часа (час — в сроке): every — day, week, month или year;
+    interval — шаг 1–99 («через день» — 2, «раз в квартал» — 3); weekdays — дни
+    недели 1–7 (понедельник — 1), только у week, иначе пустой список;
+    month_day — число 1–31 у month и year, −1 — последний день месяца, только у
+    month, иначе null; month — месяц 1–12, только у year, иначе null."""
+
+    every: Literal["day", "week", "month", "year"]
+    interval: int
+    weekdays: list[int]
+    month_day: int | None
+    month: int | None
+
+
+# Правка задачи из списка (`techspec/12-chat-edit.md` §12.1, §13.5).
+# Доккомментарий уходит в схему описанием — он для модели.
 class TaskEdit(BaseModel):
     """Правка задачи из блока «Открытые задачи»: номер и новые значения; пустое — не менял."""
 
-    action: Literal["change", "done", "cancel"]
+    action: Literal["change", "done", "cancel", "skip"]
     task: int | None
     candidates: list[int]
     title: str | None
     due_at: datetime | None
     due_precision: Literal["day", "time"] | None
     due_removed: bool
+    repeat: Repeat | None
+    repeat_removed: bool
     priority: Literal["low", "normal", "high"] | None
     promise: Literal["mine", "to_me"] | None
     people: list[str] | None
@@ -103,6 +123,7 @@ class Understanding(BaseModel):
     title: str
     due_at: datetime | None
     due_precision: Literal["day", "time"] | None
+    repeat: Repeat | None
     priority: Literal["low", "normal", "high"]
     promise: Literal["mine", "to_me"] | None
     people: list[str]
@@ -162,6 +183,27 @@ RULES = """Вы — Соломон, помощник-секретарь. Вы р
   18:00, иначе через неделю;
 - «через неделю» — тот же день недели через семь дней.
 due_at — время по ISO с поясом владельца.
+
+repeat — повтор, только у задачи (kind = task) со сроком; иначе null.
+Правила: по дням («каждый день», «через день» — interval 2, «каждые 3 дня»),
+по неделям («каждый понедельник», «по будням» — weekdays 1–5, «по выходным» —
+6 и 7, «раз в две недели по пятницам» — interval 2), по месяцам («каждое
+10-е», «в последний день месяца» — month_day −1, «раз в квартал 5-го» —
+interval 3) и по годам («каждый год 5 марта»). Часа в правиле нет — он в
+сроке: «по будням в 9 планёрка» — due_at в 09:00, due_precision = time.
+Срок — первый раз: ближайший по правилу, который ещё не прошёл, — сегодня,
+если час повтора (без часа — 18:00) ещё впереди.
+- Первого раза не посчитать («каждый месяц платить за квартиру» — какого
+  числа? «раз в неделю звонить маме» — в какой день? «каждый год» без даты) —
+  срока и повтора нет, а question называет повтор: «Какого числа каждый
+  месяц?», «В какой день недели?». Ответ даст и срок, и правило.
+- Несколько раз в день и по часам («в 9 и в 18», «каждые два часа»), день по
+  счёту в месяце («первый понедельник месяца», «последняя пятница»), отсчёт
+  от выполнения («через неделю после того, как полил») — повтора нет: одна
+  задача со сроком по обычным правилам, needs_review = true и review_reason
+  о том, что такой повтор не поддерживается.
+- Назван конец серии («до декабря», «пять раз») — правило без конца,
+  needs_review = true и review_reason: конец серии не запомнил.
 
 priority — по словам человека: «срочно», «горит» — high; «когда-нибудь»,
 «не к спеху» — low; иначе normal.
@@ -292,10 +334,13 @@ def format_open_question(asked: AskedQuestion | None, timezone: ZoneInfo) -> str
 
 
 class OpenTask(Protocol):
-    """Открытая задача — то, что нужно строке блока 5 (§5.2, §12.2)."""
+    """Открытая задача — то, что нужно строке блока 5 (§5.2, §12.2, §13.5)."""
 
     @property
     def title(self) -> str: ...
+
+    @property
+    def repeat(self) -> Mapping[str, Any] | None: ...
 
     @property
     def kind(self) -> str: ...
@@ -322,7 +367,9 @@ EDIT_RULES = """Если сообщение просит поменять уже
   обещание или людей: «перенеслась на пять вечера», «не в пятницу, а в
   понедельник», «это не срочно», «не Кузнецову, а Петрову»;
 - action = done — дело сделано: «сделал», «отправил», «готово»;
-- action = cancel — делать больше не нужно: «отменилась», «уже не нужно».
+- action = cancel — делать больше не нужно: «отменилась», «уже не нужно»;
+- action = skip — пропустить этот раз повторяющейся задачи: «в этот раз не
+  надо», «на этой неделе пропускаю», «сегодня не будет».
 Задачу называйте её номером в поле task. Подсказки о том, какая это задача:
 строка перед текстом «Ответ на напоминание о задаче №N» или «Ответ на своё
 сообщение о задаче №N» — человек ответил на сообщение об этой задаче; строка
@@ -333,7 +380,22 @@ EDIT_RULES = """Если сообщение просит поменять уже
 В остальных полях edit — только то, что меняется; не меняется — null, а
 due_removed = false. Новый срок — due_at и due_precision по тем же правилам
 времени; снять срок — due_removed = true; people — новый список людей
-целиком, он заменяет прежний. Вид задачи словом не меняется. Новое значение
+целиком, он заменяет прежний. Вид задачи словом не меняется.
+У задачи со строкой «повтор: …» — повторяющейся:
+- done — сделан этот раз, задача перейдёт на следующий; skip — пропуск
+  этого раза. «Отменилась», «не будет» без слов «насовсем», «больше не
+  нужно» — это skip, а не cancel: cancel убирает всю серию;
+- перенос («перенеси на вторник», «сегодня в 11») меняет только этот раз:
+  due_at и due_precision, repeat = null;
+- сменить правило — repeat с новым правилом и due_at с due_precision —
+  ближайший раз по новому правилу в час серии: «теперь по вторникам» —
+  weekdays [2] и срок ближайшего вторника; «теперь в 11» — то же правило
+  и срок этого раза в 11:00; срок не назван — due_at = null, первым разом
+  станет текущий срок;
+- «больше не повторяй», «только в этот раз» — repeat_removed = true.
+Правило ставится и разовой задаче: «повторяй каждую неделю» — repeat по дню
+её срока. Не меняется правило — repeat = null и repeat_removed = false.
+Новое значение
 непонятно («перенеси встречу» — на когда? вместо времени бессмыслица) —
 action = change без новых значений и один вопрос в question. В одном
 сообщении несколько правок — отдайте первую.
@@ -347,12 +409,17 @@ action = change без новых значений и один вопрос в q
 
 
 def _open_task_line(number: int, task: OpenTask, timezone: ZoneInfo) -> str:
-    """«N. суть (срок: …; люди: …; срочно; идея)» — подробности только те, что есть."""
+    """«N. суть (срок: …; повтор: …; люди: …; срочно; идея)» — подробности только те, что есть.
+
+    Повтор — словами без часа: час уже в сроке (§13.5).
+    """
     details: list[str] = []
     if task.due_at is not None:
         details.append(
             f"срок: {texts.format_due(task.due_at.astimezone(timezone), task.due_precision)}"
         )
+    if task.repeat is not None:
+        details.append(f"повтор: {texts.repeat_words(task.repeat)}")
     if task.people:
         details.append(f"люди: {', '.join(task.people)}")
     if task.priority == "high":

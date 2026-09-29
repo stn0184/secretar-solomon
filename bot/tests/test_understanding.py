@@ -296,6 +296,29 @@ def test_open_tasks_block_numbers_the_tasks_with_their_details() -> None:
     assert not any(line.startswith("Последняя задача в разговоре") for line in lines)
 
 
+def test_open_task_line_names_the_repeat_without_the_hour() -> None:
+    """Повторяющаяся задача (§13.5): «повтор: …» после срока, час — только в сроке."""
+    weekly = open_task(
+        title="планёрка",
+        due_at=datetime(2026, 10, 5, 9, 0, tzinfo=TZ),
+        due_precision="time",
+        repeat={
+            "every": "week",
+            "interval": 1,
+            "weekdays": [1, 2, 3, 4, 5],
+            "month_day": None,
+            "month": None,
+            "time": "09:00",
+        },
+    )
+
+    block = format_open_tasks([weekly], None, TZ)
+
+    assert block.splitlines()[1] == (
+        "1. планёрка (срок: понедельник, 5 октября, 09:00; повтор: по будням)"
+    )
+
+
 def test_open_tasks_block_names_the_last_task_after_the_list() -> None:
     block = format_open_tasks([MEETING, REPORT], 2, TZ)
 
@@ -318,8 +341,27 @@ def test_open_tasks_block_carries_the_edit_rules() -> None:
         "Ответ на напоминание о задаче №N",
         "Последняя задача в разговоре",
         "edit = null",
+        "action = skip",
+        "repeat_removed = true",
+        "cancel убирает всю серию",
+        "меняет только этот раз",
     ):
         assert phrase in block, phrase
+
+
+def test_rules_name_the_repeat_and_what_it_is_not() -> None:
+    """Повтор в правилах §5.2: только у задачи со сроком, без часа, вопрос о первом разе."""
+    prompt = build_system_prompt(NOW, TZ, known=[])
+
+    for phrase in (
+        "repeat — повтор, только у задачи (kind = task) со сроком",
+        "Часа в правиле нет",
+        "month_day −1",
+        "Какого числа каждый",
+        "такой повтор не поддерживается",
+        "конец серии не запомнил",
+    ):
+        assert phrase in prompt, phrase
 
 
 def test_empty_task_list_is_a_line_and_the_same_rules() -> None:
@@ -364,6 +406,8 @@ def test_understanding_requires_the_edit_and_all_its_fields() -> None:
         "due_at",
         "due_precision",
         "due_removed",
+        "repeat",
+        "repeat_removed",
         "priority",
         "promise",
         "people",
@@ -761,6 +805,8 @@ def model_edit(**fields: Any) -> dict[str, Any]:
         "due_at": None,
         "due_precision": None,
         "due_removed": False,
+        "repeat": None,
+        "repeat_removed": False,
         "priority": None,
         "promise": None,
         "people": None,

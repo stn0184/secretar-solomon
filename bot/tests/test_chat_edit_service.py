@@ -97,6 +97,8 @@ def edit(**fields: Any) -> dict[str, Any]:
         "due_at": None,
         "due_precision": None,
         "due_removed": False,
+        "repeat": None,
+        "repeat_removed": False,
         "priority": None,
         "promise": None,
         "people": None,

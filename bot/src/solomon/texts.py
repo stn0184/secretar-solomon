@@ -8,8 +8,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
+from typing import Any
 
 WEEKDAYS = (
     "понедельник",
@@ -49,6 +50,30 @@ WEEKDAYS_ACCUSATIVE = (
     "воскресенье",
 )
 
+# Повтор словами (`techspec/13-repeat.md` §13.7): «каждый понедельник»,
+# «каждую среду», «каждое воскресенье» — род дня; «по понедельникам и
+# пятницам» — дательный множественного.
+EVERY_WEEKDAY = ("каждый", "каждый", "каждую", "каждый", "каждую", "каждую", "каждое")
+WEEKDAYS_DATIVE_PLURAL = (
+    "понедельникам",
+    "вторникам",
+    "средам",
+    "четвергам",
+    "пятницам",
+    "субботам",
+    "воскресеньям",
+)
+WORKDAYS = [1, 2, 3, 4, 5]
+WEEKEND = [6, 7]
+ALL_WEEK = [1, 2, 3, 4, 5, 6, 7]
+# Единица шага: «каждый» при 1 и при 21, 31…; формы для 1, 2–4 и 5–20.
+REPEAT_UNITS = {
+    "day": ("каждый", "день", "дня", "дней"),
+    "week": ("каждую", "неделю", "недели", "недель"),
+    "month": ("каждый", "месяц", "месяца", "месяцев"),
+    "year": ("каждый", "год", "года", "лет"),
+}
+
 # Короткий срок на кнопке кандидата (§12.6): «2 окт».
 MONTHS_SHORT = (
     "янв",
@@ -64,6 +89,70 @@ MONTHS_SHORT = (
     "ноя",
     "дек",
 )
+
+
+def _listed(words: Sequence[str]) -> str:
+    """«а», «а и б», «а, б и в»."""
+    if len(words) == 1:
+        return words[0]
+    return f"{', '.join(words[:-1])} и {words[-1]}"
+
+
+def _every(unit: str, interval: int) -> str:
+    """Шаг правила: «каждую неделю», «каждые 2 недели», «каждые 5 недель», «каждую 21 неделю»."""
+    every, one, few, many = REPEAT_UNITS[unit]
+    if interval == 1:
+        return f"{every} {one}"
+    tens, ones = interval % 100, interval % 10
+    if ones == 1 and tens != 11:
+        return f"{every} {interval} {one}"
+    if 2 <= ones <= 4 and not 12 <= tens <= 14:
+        return f"каждые {interval} {few}"
+    return f"каждые {interval} {many}"
+
+
+def _weekdays_words(days: Sequence[int]) -> str:
+    """Дни недели после шага: «по будням», «по выходным», «по вторникам», «по средам и пятницам»."""
+    if list(days) == WORKDAYS:
+        return "по будням"
+    if list(days) == WEEKEND:
+        return "по выходным"
+    return "по " + _listed([WEEKDAYS_DATIVE_PLURAL[day - 1] for day in days])
+
+
+def repeat_words(rule: Mapping[str, Any]) -> str:
+    """Повтор словами без часа — час уже в сроке (§13.7).
+
+    Правило — каноническое, как его хранит база (§13.2). Те же слова пишет
+    приложение (`miniapp/src/lib/repeat.ts`); примеры в тестах общие.
+    """
+    every = str(rule.get("every"))
+    interval = int(rule.get("interval") or 1)
+    if every == "day":
+        if interval == 2:
+            return "через день"
+        return _every("day", interval)
+    if every == "week":
+        days = sorted(int(day) for day in rule.get("weekdays") or [])
+        if days == ALL_WEEK:
+            return "каждый день" if interval == 1 else f"{_every('week', interval)}, каждый день"
+        if interval == 1:
+            if len(days) == 1:
+                day = days[0] - 1
+                return f"{EVERY_WEEKDAY[day]} {WEEKDAYS_ACCUSATIVE[day]}"
+            return _weekdays_words(days)
+        return f"{_every('week', interval)} {_weekdays_words(days)}"
+    month_day = int(rule.get("month_day") or 1)
+    if every == "month":
+        if month_day == -1:
+            if interval == 1:
+                return "в последний день месяца"
+            return f"{_every('month', interval)} в последний день"
+        return f"{_every('month', interval)} {month_day}-го"
+    if every == "year":
+        month = int(rule.get("month") or 1)
+        return f"{_every('year', interval)} {month_day} {MONTHS[month - 1]}"
+    raise ValueError(f"Unknown repeat rule: {every}")
 
 
 def format_day(moment: datetime) -> str:
@@ -398,6 +487,10 @@ def done_message(text: str) -> str:
 
 
 NOT_SAVED = "Не смог записать: база не ответила. Попробуйте ещё раз."
+
+# Правило повтора не по форме (§13.5): задача записана разовой, причина — в
+# пометке «Перепроверьте».
+REPEAT_DROPPED = "Не разобрал повтор — записал разовой"
 
 # Кнопку нажали, а база не ответила: задача не закрыта, и сказать об этом
 # надо прямо (инвариант 4).

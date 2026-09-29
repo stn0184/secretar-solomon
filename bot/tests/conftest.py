@@ -354,6 +354,7 @@ def make_understanding(**fields: Any) -> Understanding:
         "title": "купить лампочку",
         "due_at": None,
         "due_precision": None,
+        "repeat": None,
         "priority": "normal",
         "promise": None,
         "people": [],
