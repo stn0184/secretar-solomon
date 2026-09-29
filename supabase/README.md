@@ -251,6 +251,27 @@ supabase db push
 2. `supabase db push` — миграция 010;
 3. перезапуск бота версии 010.
 
+Миграция 011 (`20260929200000_repeat.sql`) — повторяющиеся задачи
+(`techspec/13-repeat.md`). Она добавляет задаче правило `repeat` и раз
+`occurrence_at` с проверками формы, заводит `repeat_valid`, `repeat_rule`,
+`repeat_next` и `advance_task`, `return_occurrence` и `roll_repeats`
+(две последние — только `service_role`), пересоздаёт `mark_task_done` и
+`complete_task` с необязательным разом `occurrence`, а `due_reminders` и
+`moved_tasks` — с правилом и разом в конце строки; `change_task`,
+`edit_from_chat` и `record_understanding` понимают ключ `repeat`.
+Бот версии 010 и нынешняя Mini App с ней работают (новые аргументы
+необязательны, лишние колонки не читаются), а бот и Mini App версии 011
+без неё — нет: бот зовёт `roll_repeats` каждую минуту, приложение читает
+колонку `repeat`.
+
+Порядок выкладки:
+
+1. `supabase migration list` — сверить, что в базе стоит 010, а 011 ещё нет;
+2. `supabase db push --dry-run` — посмотреть, что уйдёт ровно миграция 011;
+3. `supabase db push` — миграция 011;
+4. перезапуск бота версии 011;
+5. push Mini App в `main` — публикация повтора в списке, карточке и форме.
+
 ## Проверки
 
 ```bash
