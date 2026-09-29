@@ -53,6 +53,9 @@ export default function App() {
   );
   const [reloadKey, setReloadKey] = useState(0);
   const [factsKey, setFactsKey] = useState(0);
+  // Повторяющаяся задача, которую только что отметили: строка «✓ Сделано»
+  // под ней держится до следующего чтения списка.
+  const [justDone, setJustDone] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
 
   // Telegram — внешняя система: ей говорят, что приложение готово.
@@ -70,6 +73,7 @@ export default function App() {
         return;
       }
       setNow(new Date());
+      setJustDone(null);
       setList(
         result.ok
           ? { kind: "ready", tasks: result.tasks, more: result.more }
@@ -200,6 +204,20 @@ export default function App() {
     back();
   }
 
+  /**
+   * «Сделано» у повторяющейся: база перевела задачу на следующий раз. Она
+   * остаётся в списке с новым сроком и строкой «✓ Сделано», экран — назад.
+   */
+  function advanced(task: Task) {
+    setList((current) =>
+      current.kind === "ready"
+        ? { ...current, tasks: current.tasks.map((t) => (t.id === task.id ? task : t)) }
+        : current,
+    );
+    setJustDone(task.id);
+    back();
+  }
+
   /** «Подтвердить»: после ответа базы запись становится фактом и теряет метку. */
   async function confirm(fact: Fact): Promise<ActionResult> {
     if ("error" in boot) {
@@ -244,6 +262,7 @@ export default function App() {
         editing={editing}
         onBack={back}
         onGone={gone}
+        onAdvanced={advanced}
         onEdit={edit}
         onSaved={saved}
         onDirty={reportDirty}
@@ -254,7 +273,14 @@ export default function App() {
   return (
     <>
       {tab === "tasks" ? (
-        <TaskList state={list} now={now} onOpen={open} onReload={reload} onClose={closeApp} />
+        <TaskList
+          state={list}
+          now={now}
+          doneId={justDone}
+          onOpen={open}
+          onReload={reload}
+          onClose={closeApp}
+        />
       ) : (
         <FactList
           state={facts}

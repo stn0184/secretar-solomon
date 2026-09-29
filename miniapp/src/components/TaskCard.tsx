@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { formatDay, formatDue, formatMoment, sameDay } from "../lib/format.ts";
+import { repeatWords } from "../lib/repeat.ts";
 import type { Db } from "../lib/supabase.ts";
 import {
   type Task,
@@ -55,7 +56,9 @@ function PencilIcon() {
  * из списка, сообщение и напоминания докачиваются здесь.
  *
  * После подтверждённого действия `onGone` — список убирает задачу и
- * возвращается; отказ базы остаётся текстом под кнопками.
+ * возвращается; отказ базы остаётся текстом под кнопками. Повторяющаяся
+ * задача после «Сделано» не уходит: база перевела её на следующий раз,
+ * и `onAdvanced` кладёт в список её новую строку.
  *
  * `editing` — на месте карточки форма правки (`TaskEdit`). Карточка
  * остаётся владельцем докачанного: форма берёт у неё исходное сообщение,
@@ -69,6 +72,7 @@ export function TaskCard({
   editing,
   onBack,
   onGone,
+  onAdvanced,
   onEdit,
   onSaved,
   onDirty,
@@ -79,6 +83,7 @@ export function TaskCard({
   editing: boolean;
   onBack: () => void;
   onGone: (taskId: string) => void;
+  onAdvanced: (task: Task) => void;
   onEdit: () => void;
   onSaved: (task: Task) => void;
   onDirty: (dirty: boolean) => void;
@@ -119,8 +124,26 @@ export function TaskCard({
     }
   }
 
+  /**
+   * «Сделано». У повторяющейся с запросом уходит раз, который видно на
+   * экране: задача уже на другом — база второй раз её не переводит.
+   */
+  async function done() {
+    setBusy("done");
+    setActionError(null);
+    const result = await completeTask(db, task.id, task.repeat ? task.occurrenceAt : null);
+    setBusy(null);
+    if (!result.ok) {
+      setActionError(result.message);
+    } else if (result.next) {
+      onAdvanced(result.next);
+    } else {
+      onGone(task.id);
+    }
+  }
+
   async function onDelete() {
-    if (await confirmDelete(task.title)) {
+    if (await confirmDelete(task.title, task.repeat !== null)) {
       await run("delete", () => removeTask(db, task.id));
     }
   }
@@ -162,6 +185,11 @@ export function TaskCard({
           <Field label="Срок" note={dueToday && task.dueAt ? formatDay(task.dueAt) : undefined}>
             {task.dueAt ? formatDue(task.dueAt, task.duePrecision, now) : "не назван"}
           </Field>
+          {task.repeat ? (
+            <Field label="Повтор" note="«Сделано» переведёт задачу на следующий раз">
+              {repeatWords(task.repeat)}
+            </Field>
+          ) : null}
           {task.kind !== "task" ? <Field label="Вид">{KIND_WORD[task.kind]}</Field> : null}
           {task.priority === "high" ? (
             <Field label="Приоритет">
@@ -213,9 +241,8 @@ export function TaskCard({
         primary={{
           kind: "done",
           label: "Сделано",
-          busyLabel: "Закрываем…",
-          onClick: () =>
-            void run("done", () => completeTask(db, task.id, task.repeat ? task.occurrenceAt : null)),
+          busyLabel: task.repeat ? "Отмечаем…" : "Закрываем…",
+          onClick: () => void done(),
         }}
         onDelete={() => void onDelete()}
       />

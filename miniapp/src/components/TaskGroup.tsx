@@ -9,10 +9,13 @@ import { TaskRow } from "./TaskRow.tsx";
 export function TaskGroup({
   group,
   now,
+  doneId,
   onOpen,
 }: {
   group: Group;
   now: Date;
+  /** Задача, которую только что отметили «Сделано» и база перевела дальше. */
+  doneId: string | null;
   onOpen: (task: Task) => void;
 }) {
   return (
@@ -23,7 +26,14 @@ export function TaskGroup({
       </h2>
       <div className="card">
         {group.tasks.map((task) => (
-          <TaskRow key={task.id} task={task} group={group.key} now={now} onOpen={onOpen} />
+          <TaskRow
+            key={task.id}
+            task={task}
+            group={group.key}
+            now={now}
+            justDone={task.id === doneId}
+            onOpen={onOpen}
+          />
         ))}
       </div>
     </section>

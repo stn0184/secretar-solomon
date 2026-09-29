@@ -25,12 +25,15 @@ function subtitle(state: ListState, overdue: number): string | undefined {
 export function TaskList({
   state,
   now,
+  doneId,
   onOpen,
   onReload,
   onClose,
 }: {
   state: ListState;
   now: Date;
+  /** Повторяющаяся задача, которую только что отметили, — до следующего чтения. */
+  doneId: string | null;
   onOpen: (task: Task) => void;
   onReload: () => void;
   onClose: () => void;
@@ -52,7 +55,7 @@ export function TaskList({
         />
       ) : null}
       {groups.map((group) => (
-        <TaskGroup key={group.key} group={group} now={now} onOpen={onOpen} />
+        <TaskGroup key={group.key} group={group} now={now} doneId={doneId} onOpen={onOpen} />
       ))}
       {state.kind === "ready" && state.more ? (
         <p className="note">Показаны первые {TASKS_SHOWN}.</p>

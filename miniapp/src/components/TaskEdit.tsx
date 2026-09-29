@@ -9,18 +9,24 @@ import {
   type Task,
   type TaskDraft,
   type TaskKind,
+  applyRepeat,
   draftOf,
   dueHint,
   editTask,
   needsSaving,
+  patchDraft,
   questionOf,
+  repeatChanged,
+  repeatDueHint,
   taskChanges,
   validateDraft,
 } from "../lib/tasks.ts";
+import type { RepeatDraft } from "../lib/repeat.ts";
 import { Actions } from "./Actions.tsx";
 import { Choice } from "./Choice.tsx";
 import { ReviewChip } from "./Chip.tsx";
 import { Header } from "./Header.tsx";
+import { RepeatRow } from "./RepeatRow.tsx";
 import { SourceMessage } from "./SourceMessage.tsx";
 
 const KINDS = [
@@ -53,6 +59,10 @@ const PROMISES = [
  *
  * `message` — исходное сообщение из карточки; `undefined` — карточка
  * его ещё не докачала, и блока нет.
+ *
+ * Ряд «Повтор» — сразу под сроком (§13.6): новый выбор подгоняет дату
+ * под правило, и первая строка подсказки под сроком говорит, куда она
+ * передвинулась. Выбор не меняли — дата и час правят только этот раз.
  */
 export function TaskEdit({
   db,
@@ -74,15 +84,29 @@ export function TaskEdit({
   const [draft, setDraft] = useState<TaskDraft>(() => draftOf(task));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Куда и почему правило передвинуло дату; своя правка срока его снимает.
+  const [moved, setMoved] = useState<string | null>(null);
 
-  const dirty = Object.keys(taskChanges(task, draft)).length > 0;
+  // Неделя без дней в правку не попадает, но выбор уже не тот, что был.
+  const dirty = Object.keys(taskChanges(task, draft)).length > 0 || repeatChanged(task, draft);
   useEffect(() => {
     onDirty(dirty);
   }, [dirty, onDirty]);
 
   function update(patch: Partial<TaskDraft>) {
     setError(null);
-    setDraft((current) => ({ ...current, ...patch }));
+    if ("day" in patch || "time" in patch || "noDue" in patch) {
+      setMoved(null);
+    }
+    setDraft((current) => patchDraft(current, patch));
+  }
+
+  function chooseRepeat(repeat: RepeatDraft) {
+    setError(null);
+    const result = applyRepeat(draft, repeat);
+    setDraft(result.draft);
+    // Тот же вид, дата осталась (поменяли шаг) — прежнее объяснение ещё верно.
+    setMoved(result.moved ?? (repeat.every === draft.repeat.every ? moved : null));
   }
 
   async function save() {
@@ -111,6 +135,7 @@ export function TaskEdit({
   const question = questionOf(task, now);
   const dayMissing = draft.day === "";
   const hasTime = !draft.noDue && !dayMissing && draft.time !== "";
+  const onlyThisTime = repeatDueHint(task, draft);
 
   return (
     <main className="screen">
@@ -190,8 +215,12 @@ export function TaskEdit({
               </button>
             ) : null}
           </div>
+          {moved ? <p className="form__hint">{moved}</p> : null}
           <p className="form__hint">{dueHint(draft, now)}</p>
+          {onlyThisTime ? <p className="form__hint">{onlyThisTime}</p> : null}
         </div>
+
+        <RepeatRow task={task} draft={draft} busy={busy} onChange={chooseRepeat} />
 
         <div className="form__row">
           <span className="form__k">Вид</span>

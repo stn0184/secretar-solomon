@@ -256,6 +256,27 @@ button {
   font: 400 17px/21px var(--font-ui);
 }
 
+/* Список: правило коротко сразу за сроком — подписью, не меткой:
+   повтор — свойство задачи, а не её состояние, цвета у него нет. */
+.row__rep {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.row__rep i {
+  font-style: normal;
+  color: var(--ink-3);
+}
+
+/* После «Сделано» в карточке: что вернула база — цветом «ок». */
+.row__next {
+  font: 500 13px/17px var(--font-ui);
+  color: var(--ok);
+}
+
 /* ─── Метки ─────────────────────────────────────────────────────────── */
 
 .chip {
@@ -663,6 +684,86 @@ button {
 .seg__opt input:focus-visible + span {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* ─── Форма правки: повтор (прототип 011) ──────────────────────────── */
+
+/* Форма: «Каждые [2] недели» — шаг числом между словами. */
+.rep__step {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font: 400 15px/20px var(--font-ui);
+  color: var(--ink);
+}
+
+.input--step {
+  width: 64px;
+  flex: none;
+  text-align: center;
+  padding: 0 var(--s2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Дни недели флажками: семь отдельных кнопок — видно, что можно несколько. */
+.days {
+  display: flex;
+  gap: 4px;
+}
+
+.days__opt {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  cursor: pointer;
+}
+
+.days__opt input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.days__opt span {
+  display: block;
+  padding: 8px 0;
+  border-radius: 8px;
+  text-align: center;
+  font: 500 14px/18px var(--font-ui);
+  color: var(--ink-2);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.days__opt input:checked + span {
+  background: var(--accent-weak);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, var(--surface));
+}
+
+.days__opt input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Правило словами под выбором — как его назовёт бот. */
+.rep__words {
+  margin: 0;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.rep__words b {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* Выбор повтора — пять вариантов в ряд: на 360px «Месяцы» иначе не влезают. */
+.rep__every .seg__opt span {
+  padding-left: 2px;
+  padding-right: 2px;
 }
 
 /* ─── Кнопки и действия ─────────────────────────────────────────────── */
