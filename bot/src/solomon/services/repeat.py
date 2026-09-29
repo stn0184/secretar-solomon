@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -24,6 +25,9 @@ EVERY = ("day", "week", "month", "year")
 MAX_INTERVAL = 99
 # Последний день месяца — только у месячного правила (§13.2).
 LAST_DAY = -1
+# Ключи правила без часа серии: по ним правило модели сравнивается с тем,
+# что лежит в базе (§13.5).
+RULE_KEYS = ("every", "interval", "month_day", "month")
 # Длина месяцев в високосный год: «каждый год 29 февраля» — законное правило,
 # в обычный год его раз — 28-е.
 MONTH_DAYS = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
@@ -74,6 +78,23 @@ def clean_rule(rule: Repeat) -> dict[str, Any] | None:
     }
 
 
+def same_rule(stored: Mapping[str, Any] | None, rule: Mapping[str, Any]) -> bool:
+    """То же ли правило, без часа серии: он в базе, а у модели его нет (§13.5).
+
+    Пустые дни недели — `null` или пустой список — одно и то же.
+    """
+    if stored is None:
+        return False
+    if any(stored.get(key) != rule.get(key) for key in RULE_KEYS):
+        return False
+    return sorted(stored.get("weekdays") or []) == sorted(rule.get("weekdays") or [])
+
+
+def series_precision(rule: Mapping[str, Any]) -> str:
+    """Точность раза серии: есть час серии — `time`, нет — `day` (§13.3)."""
+    return "time" if rule.get("time") else "day"
+
+
 @dataclass(frozen=True, slots=True)
 class RuleOutcome:
     """Что делать с правилом модели при записи задачи (§13.5).
@@ -84,6 +105,10 @@ class RuleOutcome:
 
     rule: dict[str, Any] | None
     malformed: bool = False
+
+
+# Правила нет и не было: разовая задача без пометки.
+NO_RULE = RuleOutcome(rule=None)
 
 
 def record_rule(kind: str, due_at: datetime | None, rule: Repeat | None) -> RuleOutcome:

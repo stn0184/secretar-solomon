@@ -53,6 +53,7 @@ from solomon.db.tasks import (
     TaskDetails,
     TaskEvent,
 )
+from solomon.services.repeat import moment_of, occurrence_seconds, series_precision
 from solomon.services.transcription import Transcript, TranscriptionResult
 from solomon.services.understanding import (
     Analysis,
@@ -428,6 +429,27 @@ def make_details(**fields: Any) -> TaskDetails:
     return TaskDetails(**{**base, **fields})
 
 
+class FakeNext:
+    """Вместо `repeat_next` в базе — заранее решённый следующий раз и вызовы.
+
+    Само правило (§13.2) здесь не повторяется: оно живёт в базе и
+    проверяется тестами PGlite (`supabase/tests/repeat.test.ts`).
+    """
+
+    def __init__(self, next_at: datetime | None = None, broken: bool = False) -> None:
+        self.next_at = next_at
+        self.broken = broken
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(
+        self, *, repeat: Mapping[str, Any], occurrence_at: datetime, after: datetime
+    ) -> datetime:
+        self.calls.append({"repeat": dict(repeat), "occurrence_at": occurrence_at, "after": after})
+        if self.broken or self.next_at is None:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return self.next_at
+
+
 class FakeEdits:
     """Хранилище правки словом (`EditStore` в `services/tasks.py`) без базы.
 
@@ -435,8 +457,11 @@ class FakeEdits:
     порядке, в каком их дал тест: нумерует сервис. `pick` и `reopen` ведут
     себя как `pick_task` и `reopen_task` (`techspec/03-schema.md` §3.4):
     второй выбор по тому же сообщению не пишется, неактивная задача не
-    правится, возврат активной — без записи. `broken` — имена методов,
-    которые отвечают отказом базы.
+    правится, возврат активной — без записи. Повторяющуюся задачу «сделал» и
+    пропуск переводят на `next_at`, только если она стоит на разе
+    `occurrence` (§13.3); `return_occurrence` возвращает её на прежний раз
+    так же, как функция базы. `broken` — имена методов, которые отвечают
+    отказом базы.
     """
 
     def __init__(
@@ -459,6 +484,7 @@ class FakeEdits:
         # Что записано: выбор кнопкой (сообщение, правка, ответ) и возврат.
         self.picks: list[tuple[str, dict[str, Any], str]] = []
         self.reopens: list[tuple[str, list[Planned]]] = []
+        self.returns: list[tuple[str, int, int, list[Planned]]] = []
 
     def _touch(self, name: str, *args: Any) -> None:
         self.calls.append((name, *args))
@@ -501,8 +527,20 @@ class FakeEdits:
         task = self.tasks.get(str(edit["task_id"]))
         if task is None or task.status != "active":
             return PickedMessage(id=stored.id, task_id=None, reply=stored.reply)
+        action = str(edit["action"])
+        if task.repeat is not None and action in ("done", "skip"):
+            occurrence = task.occurrence_at or task.due_at
+            if occurrence is None or edit.get("occurrence") != occurrence_seconds(occurrence):
+                return PickedMessage(id=stored.id, task_id=None, reply=stored.reply)
+            self.picks.append((message_id, dict(edit), reply))
+            next_at = datetime.fromisoformat(str(edit["next_at"]))
+            self.tasks[task.id] = replace(task, due_at=next_at, occurrence_at=next_at)
+            self.messages[key] = replace(stored, task_id=task.id, reply=reply)
+            return PickedMessage(id=stored.id, task_id=task.id, reply=reply)
         self.picks.append((message_id, dict(edit), reply))
-        status = {"done": "done", "cancel": "cancelled"}.get(str(edit["action"]), task.status)
+        status = {"done": "done", "cancel": "cancelled", "skip": "cancelled"}.get(
+            action, task.status
+        )
         self.tasks[task.id] = replace(task, status=status)
         self.messages[key] = replace(stored, task_id=task.id, reply=reply)
         return PickedMessage(id=stored.id, task_id=task.id, reply=reply)
@@ -518,6 +556,29 @@ class FakeEdits:
         reopened = replace(task, status="active")
         self.tasks[task_id] = reopened
         return reopened
+
+    async def return_occurrence(
+        self, task_id: str, back_to: int, moved_from: int, schedule: Sequence[Planned]
+    ) -> TaskDetails | None:
+        self._touch("return_occurrence", task_id, back_to, moved_from)
+        task = self.tasks.get(task_id)
+        if task is None:
+            return None
+        stands = task.occurrence_at is not None and (
+            occurrence_seconds(task.occurrence_at) == moved_from
+        )
+        if task.status != "active" or task.repeat is None or not stands:
+            return task
+        self.returns.append((task_id, back_to, moved_from, list(schedule)))
+        moment = moment_of(back_to)
+        returned = replace(
+            task,
+            due_at=moment,
+            occurrence_at=moment,
+            due_precision=series_precision(task.repeat),
+        )
+        self.tasks[task_id] = returned
+        return returned
 
 
 class FakeTranscriber:

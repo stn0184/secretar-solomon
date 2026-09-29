@@ -10,6 +10,10 @@ SQL-функции `reminder_plan`, и её зовут и бот, и правк�
 Здесь же цикл отправки (§6.2), кнопка «Сделано» (§6.3) и строка «Перенёс»
 (§11.4). Отправка приходит параметром-протоколом: сервис не знает ни про
 aiogram, ни про сеть, и тест подставляет свою запись вместо неё.
+
+Повторяющиеся задачи (`techspec/13-repeat.md`): тик сначала перекатывает
+пропущенные разы (§13.4), кнопка «Сделано» несёт раз и переводит задачу на
+следующий (§13.3) — и то и другое делает база.
 """
 
 from __future__ import annotations
@@ -28,7 +32,8 @@ from solomon.config import Settings
 from solomon.db import reminders as db_reminders
 from solomon.db.reminders import DueReminder, MovedTask, Planned
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import TaskDetails
+from solomon.db.tasks import ACTIVE_STATUS, TaskDetails
+from solomon.services.repeat import occurrence_seconds
 from solomon.services.understanding import Clock
 
 logger = logging.getLogger(__name__)
@@ -113,9 +118,13 @@ def latest(group: list[DueReminder]) -> DueReminder:
 
 
 class Notifier(Protocol):
-    """Отправка напоминания владельцу. Возвращает id сообщения в Telegram."""
+    """Отправка напоминания владельцу. Возвращает id сообщения в Telegram.
 
-    async def __call__(self, *, text: str, task_id: str) -> int: ...
+    `occurrence` — раз повторяющейся задачи в секундах Unix: он уезжает в
+    кнопку «Сделано» (§13.3); у разовой его нет.
+    """
+
+    async def __call__(self, *, text: str, task_id: str, occurrence: int | None = None) -> int: ...
 
 
 class DueLister(Protocol):
@@ -151,17 +160,33 @@ class Announcer(Protocol):
 
 
 class TaskCloser(Protocol):
-    """Закрытие задачи по кнопке вместе с её неотправленными напоминаниями."""
+    """Кнопка «Сделано»: разовую задачу закрыть, повторяющуюся перевести (§13.3).
 
-    async def __call__(self, *, owner_telegram_id: int, task_id: str) -> TaskDetails | None: ...
+    Возвращает задачу, какой она стала, — или какой была, если раз не тот.
+    """
+
+    async def __call__(
+        self, *, owner_telegram_id: int, task_id: str, occurrence: int | None = None
+    ) -> TaskDetails | None: ...
+
+
+class Roller(Protocol):
+    """Перекатывание пропущенных разов (§13.4). Возвращает, сколько задач ушло."""
+
+    async def __call__(self, *, owner_telegram_id: int, now: datetime) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
 class Completion:
-    """Чем кончилось нажатие «Сделано» и что сказать человеку."""
+    """Чем кончилось нажатие «Сделано» и что сказать человеку.
+
+    `mark` — отметка под напоминанием: у повторяющейся задачи она называет
+    следующий раз, какой вернула база (§13.3).
+    """
 
     ok: bool
     answer: str
+    mark: str = texts.DONE_MARK
 
 
 class ReminderService:
@@ -178,6 +203,7 @@ class ReminderService:
         clear_moved: MovedClearer,
         announce: Announcer,
         clock: Clock | None = None,
+        roll: Roller | None = None,
     ) -> None:
         self._settings = settings
         self._due = due
@@ -187,6 +213,9 @@ class ReminderService:
         self._moved = moved
         self._clear_moved = clear_moved
         self._announce = announce
+        # Без перекатывания пропущенный раз стоит до «Сделано» — как до этапа
+        # 011. Обычная сборка его подключает.
+        self._roll = roll
         self._clock = clock or self._now
 
     def _now(self) -> datetime:
@@ -213,10 +242,15 @@ class ReminderService:
                 telegram_message_id=telegram_message_id,
             )
 
-        async def close_task(*, owner_telegram_id: int, task_id: str) -> TaskDetails | None:
+        async def close_task(
+            *, owner_telegram_id: int, task_id: str, occurrence: int | None = None
+        ) -> TaskDetails | None:
             return await db_reminders.mark_task_done(
-                db, owner_telegram_id=owner_telegram_id, task_id=task_id
+                db, owner_telegram_id=owner_telegram_id, task_id=task_id, occurrence=occurrence
             )
+
+        async def roll(*, owner_telegram_id: int, now: datetime) -> int:
+            return await db_reminders.roll_repeats(db, owner_telegram_id=owner_telegram_id, now=now)
 
         async def moved(*, owner_telegram_id: int) -> list[MovedTask]:
             return await db_reminders.moved_tasks(db, owner_telegram_id=owner_telegram_id)
@@ -235,18 +269,22 @@ class ReminderService:
             moved=moved,
             clear_moved=clear_moved,
             announce=announce,
+            roll=roll,
         )
 
     async def tick(self, now: datetime | None = None) -> int:
-        """Один заход: созревшее (§6.2), потом строки «Перенёс» (§11.4).
+        """Один заход: перекатывание (§13.4), созревшее (§6.2), строки «Перенёс» (§11.4).
 
-        Порядок нарочно такой: напоминание, ушедшее в этом тике, уже помечено,
-        и «Напомню» в строке о переносе его не назовёт. Возвращает число
-        ушедших сообщений. Отказ базы на отборе выходит наружу — цикл его
-        ловит и живёт дальше; отказ на одной задаче не мешает остальным.
+        Порядок нарочно такой: новый раз получает свои ступени до выборки, и
+        созревшая уходит этим же тиком; напоминание, ушедшее в этом тике, уже
+        помечено, и «Напомню» в строке о переносе его не назовёт. Возвращает
+        число ушедших сообщений. Сбой перекатывания — строка в журнал, тик
+        идёт дальше. Отказ базы на отборе выходит наружу — цикл его ловит и
+        живёт дальше; отказ на одной задаче не мешает остальным.
         """
         moment = now or self._clock()
         owner = self._settings.owner_telegram_id
+        await self._roll_quietly(moment)
         due = await self._due(owner_telegram_id=owner, now=moment)
         sent = 0
         for task_id, group in by_task(due).items():
@@ -256,6 +294,18 @@ class ReminderService:
             if await self._announce_one(task, moment):
                 sent += 1
         return sent
+
+    async def _roll_quietly(self, now: datetime) -> None:
+        """Перевести просроченные разы на наступившие (§13.4); сбой — строка в журнал."""
+        if self._roll is None:
+            return
+        try:
+            rolled = await self._roll(owner_telegram_id=self._settings.owner_telegram_id, now=now)
+        except DatabaseError as error:
+            logger.error("Повторяющиеся задачи не перекатились: %s", error)
+            return
+        if rolled:
+            logger.info("Перекатилось повторяющихся задач: %s", rolled)
 
     async def _announce_one(self, task: MovedTask, now: datetime) -> bool:
         """Строка «Перенёс» и только потом снятие прочитанной отметки.
@@ -287,7 +337,8 @@ class ReminderService:
         """Строка из того, что лежит в базе сейчас, в поясе владельца (§11.4).
 
         Срок в прошлом — без «Напомню» (§6.4); ближайшее напоминание, которое
-        уже должно было уйти (бот лежал), тоже не обещается.
+        уже должно было уйти (бот лежал), тоже не обещается. У повторяющейся
+        задачи — строка «Повтор» (§13.6).
         """
         if task.due_at is None:
             return texts.moved_reply(title=task.title, due=None, remind_at=None)
@@ -298,7 +349,8 @@ class ReminderService:
             remind_at = texts.format_remind_at(
                 task.next_fire_at.astimezone(timezone), now.astimezone(timezone)
             )
-        return texts.moved_reply(title=task.title, due=due, remind_at=remind_at)
+        repeat = texts.repeat_words(task.repeat) if task.repeat is not None else None
+        return texts.moved_reply(title=task.title, due=due, remind_at=remind_at, repeat=repeat)
 
     async def _send_one(self, task_id: str, group: list[DueReminder], now: datetime) -> bool:
         """Одна задача — одно сообщение, и только потом отметка.
@@ -307,8 +359,13 @@ class ReminderService:
         раз: дубль лучше потерянного напоминания (инвариант 5).
         """
         speaker = latest(group)
+        occurrence = None
+        if speaker.repeat is not None and speaker.occurrence_at is not None:
+            occurrence = occurrence_seconds(speaker.occurrence_at)
         try:
-            message_id = await self._notify(text=self._text_for(speaker, now), task_id=task_id)
+            message_id = await self._notify(
+                text=self._text_for(speaker, now), task_id=task_id, occurrence=occurrence
+            )
         except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
             # Не ушло — sent_at не ставим, и следующий тик попробует снова.
             logger.warning("Напоминание по задаче %s не ушло: %s", task_id, error)
@@ -354,16 +411,23 @@ class ReminderService:
             await self.tick_quietly()
             await asyncio.sleep(interval_seconds)
 
-    async def complete(self, task_id: str) -> Completion:
+    async def complete(self, task_id: str, occurrence: int | None = None) -> Completion:
         """Нажата кнопка «Сделано»: закрыть задачу и снять её напоминания (§6.3).
 
         Владелец берётся из настроек: `task_id` приходит из callback, то есть
         снаружи, и доверять ему нельзя — база сверяет владельца сама и на
         чужую задачу отвечает «не нашёл» (инвариант 2).
+
+        Повторяющаяся задача не закрывается, а переходит на следующий раз
+        (§13.3): база переводит её, только если она стоит на разе
+        `occurrence`, и возвращает задачу — отметка называет срок из ответа,
+        и когда перевела она, и когда задача уже ушла дальше.
         """
         try:
             task = await self._close_task(
-                owner_telegram_id=self._settings.owner_telegram_id, task_id=task_id
+                owner_telegram_id=self._settings.owner_telegram_id,
+                task_id=task_id,
+                occurrence=occurrence,
             )
         except DatabaseError as error:
             logger.warning("Задача %s не закрыта: %s", task_id, error)
@@ -371,5 +435,14 @@ class ReminderService:
         if task is None:
             logger.info("Кнопка «Сделано» по неизвестной задаче %s", task_id)
             return Completion(ok=False, answer=texts.DONE_UNKNOWN)
+        if task.repeat is not None and task.status == ACTIVE_STATUS and task.due_at is not None:
+            timezone = self._settings.owner_timezone
+            due = texts.format_due(task.due_at.astimezone(timezone), task.due_precision)
+            logger.info("Задача %s по кнопке на следующем разе", task.id)
+            return Completion(
+                ok=True,
+                answer=texts.NEXT_ANSWER.format(due=due),
+                mark=texts.DONE_NEXT.format(due=due),
+            )
         logger.info("Задача %s закрыта кнопкой", task.id)
         return Completion(ok=True, answer=texts.DONE_ANSWER)

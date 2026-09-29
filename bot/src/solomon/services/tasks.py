@@ -25,6 +25,12 @@
 кнопками, выбор пишет `pick`; кнопка «Вернуть» — `reopen`. Чистые правила
 номеров, строк и правки для базы — в `services/edits.py`.
 
+Повторяющаяся задача (`techspec/13-repeat.md`) идёт теми же путями: правило
+пишется вместе со сроком первого раза, «сделал» и пропуск переводят её на
+следующий раз — его бот берёт у базы (`repeat_next`) заранее, вместе с
+планом, как расписание правки (§12.4), и ответ называет ровно записанное.
+Кнопка «Вернуть» под «Отметил» и «Пропускаю» возвращает прежний раз.
+
 Обработчик ничего не решает: он зовёт `record_from_message` или
 `record_from_voice` и отправляет то, что вернулось. Владелец берётся из
 настроек, а не из сообщения — чужие обновления до этого слоя не доходят
@@ -66,6 +72,16 @@ from solomon.db.tasks import (
 )
 from solomon.services import edits
 from solomon.services.reminders import Planner, database_planner, next_fire_at
+from solomon.services.repeat import (
+    NO_RULE,
+    RuleOutcome,
+    malformed_reason,
+    moment_of,
+    occurrence_seconds,
+    record_rule,
+    same_rule,
+    series_precision,
+)
 from solomon.services.transcription import (
     NotTranscribed,
     Transcriber,
@@ -186,6 +202,24 @@ class UnderstandingRecorder(Protocol):
     ) -> Task | None: ...
 
 
+class NextOccurrence(Protocol):
+    """Следующий раз повторяющейся задачи — у базы (`repeat_next`, §13.2).
+
+    Пояс владельца знает сборка. Строго позже `after`; отказ — `DatabaseError`.
+    """
+
+    async def __call__(
+        self, *, repeat: Mapping[str, Any], occurrence_at: datetime, after: datetime
+    ) -> datetime: ...
+
+
+async def no_next_occurrence(
+    *, repeat: Mapping[str, Any], occurrence_at: datetime, after: datetime
+) -> datetime:
+    """Сборка без базы: следующего раза не посчитать — как отказ базы."""
+    raise DatabaseError("repeat_next is not wired")
+
+
 class QuestionReader(Protocol):
     """Открытый вопрос владельца, заданный не раньше `since` (§10.2)."""
 
@@ -278,6 +312,10 @@ class EditStore(Protocol):
 
     async def reopen(self, task_id: str, schedule: Sequence[Planned]) -> TaskDetails | None: ...
 
+    async def return_occurrence(
+        self, task_id: str, back_to: int, moved_from: int, schedule: Sequence[Planned]
+    ) -> TaskDetails | None: ...
+
 
 class DatabaseEditStore:
     """`EditStore` поверх настоящей базы. Владелец — из настроек, а не из
@@ -326,19 +364,55 @@ class DatabaseEditStore:
             self._db, owner_telegram_id=self._owner, task_id=task_id, schedule=schedule
         )
 
+    async def return_occurrence(
+        self, task_id: str, back_to: int, moved_from: int, schedule: Sequence[Planned]
+    ) -> TaskDetails | None:
+        return await db_reminders.return_occurrence(
+            self._db,
+            owner_telegram_id=self._owner,
+            task_id=task_id,
+            back_to=back_to,
+            moved_from=moved_from,
+            schedule=schedule,
+        )
 
-def task_fields(understanding: Understanding) -> dict[str, Any]:
-    """Поля задачи для `record_understanding` — по именам колонок §3.3."""
+
+def rule_of(understanding: Understanding, due_at: datetime | None) -> RuleOutcome:
+    """Правило модели для записи задачи со сроком `due_at` (§13.5)."""
+    return record_rule(understanding.kind, due_at, understanding.repeat)
+
+
+def task_fields(understanding: Understanding, rule: RuleOutcome | None = None) -> dict[str, Any]:
+    """Поля задачи для `record_understanding` — по именам колонок §3.3.
+
+    `repeat` — правило без часа: час серии база возьмёт из срока (§13.2).
+    Правило не по форме даёт разовую задачу с пометкой (§13.5).
+    """
+    outcome = rule if rule is not None else rule_of(understanding, understanding.due_at)
     return {
         "title": understanding.title,
         "kind": understanding.kind,
         "due_at": understanding.due_at.isoformat() if understanding.due_at else None,
         "due_precision": understanding.due_precision,
+        "repeat": outcome.rule,
         "priority": understanding.priority,
         "promise": understanding.promise,
         "people": understanding.people,
-        "needs_review": understanding.needs_review,
+        "needs_review": understanding.needs_review or outcome.malformed,
     }
+
+
+def review_reason(understanding: Understanding, rule: RuleOutcome) -> str | None:
+    """Причина «Перепроверьте» в ответе: своя у модели и «не разобрал повтор»."""
+    own = understanding.review_reason if understanding.needs_review else None
+    if rule.malformed:
+        return malformed_reason(own)
+    return own
+
+
+def rule_words(rule: Mapping[str, Any] | None) -> str | None:
+    """Правило словами для строки «Повтор»; у разовой задачи строки нет."""
+    return texts.repeat_words(rule) if rule is not None else None
 
 
 def question_of(understanding: Understanding) -> str | None:
@@ -368,6 +442,9 @@ class Amendment:
     due_at: datetime | None
     due_precision: str | None
     priority: str
+    # Правило после ответа (§13.5) и что стало с правилом модели.
+    repeat: Mapping[str, Any] | None = None
+    rule: RuleOutcome = NO_RULE
 
 
 def amendment(asked: OpenQuestion, understanding: Understanding) -> Amendment:
@@ -377,6 +454,11 @@ def amendment(asked: OpenQuestion, understanding: Understanding) -> Amendment:
     значит «не менял», а не «стереть»: нет срока — срок задачи остаётся,
     `normal` — остаётся прежняя срочность, люди — дописываются к названным.
     `kind` из ответа не берётся: вид задачи ответ не меняет.
+
+    Ответ может дать правило вместе со сроком (§13.5): «каждый месяц
+    платить за квартиру» — «десятого». Правило уходит, когда оно новое или
+    сменился срок — тогда срок становится первым разом; правило не по
+    форме — пометка и причина, задача остаётся какой была.
     """
     fields: dict[str, Any] = {}
     title = understanding.title.strip()
@@ -396,7 +478,12 @@ def amendment(asked: OpenQuestion, understanding: Understanding) -> Amendment:
     added = [person for person in understanding.people if person not in asked.people]
     if added:
         fields["people"] = [*asked.people, *added]
-    fields["needs_review"] = understanding.needs_review
+    rule = record_rule(asked.kind, due_at, understanding.repeat)
+    repeat = asked.repeat if due_at is not None else None
+    if rule.rule is not None and ("due_at" in fields or not same_rule(asked.repeat, rule.rule)):
+        fields["repeat"] = rule.rule
+        repeat = rule.rule
+    fields["needs_review"] = understanding.needs_review or rule.malformed
     return Amendment(
         fields=fields,
         title=fields.get("title", asked.title),
@@ -404,6 +491,8 @@ def amendment(asked: OpenQuestion, understanding: Understanding) -> Amendment:
         due_at=due_at,
         due_precision=due_precision,
         priority=fields.get("priority", asked.priority),
+        repeat=repeat,
+        rule=rule,
     )
 
 
@@ -496,6 +585,7 @@ class TaskService:
         clock: Clock | None = None,
         open_question: QuestionReader | None = None,
         edit_store: EditStore | None = None,
+        repeat_next: NextOccurrence | None = None,
     ) -> None:
         self._settings = settings
         self._record_message = record_message
@@ -512,6 +602,9 @@ class TaskService:
         # нет.»): правка словом не находит задачу, а кнопкам нечего писать.
         # Обычная сборка хранилище подключает.
         self._edits = edit_store
+        # Следующий раз повторяющейся задачи считает база (§13.2). Без неё
+        # «сделал» и пропуск по такой задаче — честное «не смог записать».
+        self._repeat_next = repeat_next or no_next_occurrence
         # «Сейчас» внедряется: от него зависит расписание напоминаний, и
         # тесты не должны угадывать, который час (`services/reminders.py`).
         self._clock = clock or self._now
@@ -586,6 +679,17 @@ class TaskService:
                 db, owner_telegram_id=owner_telegram_id, since=since
             )
 
+        async def repeat_next(
+            *, repeat: Mapping[str, Any], occurrence_at: datetime, after: datetime
+        ) -> datetime:
+            return await db_reminders.repeat_next(
+                db,
+                repeat=repeat,
+                occurrence_at=occurrence_at,
+                after=after,
+                timezone=settings.owner_timezone.key,
+            )
+
         return cls(
             settings=settings,
             record_message=record_message,
@@ -595,6 +699,7 @@ class TaskService:
             planner=database_planner(settings, db),
             open_question=read_question,
             edit_store=DatabaseEditStore(settings, db),
+            repeat_next=repeat_next,
         )
 
     @classmethod
@@ -902,10 +1007,11 @@ class TaskService:
             reply = texts.understood_reply(
                 title=changed.title,
                 due=self._due_words(changed.due_at, changed.due_precision),
-                review_reason=understanding.review_reason if understanding.needs_review else None,
+                review_reason=review_reason(understanding, changed.rule),
                 # Срочность звучит, только если её изменил сам ответ.
                 priority=changed.priority if "priority" in changed.fields else "normal",
                 remind_at=self._remind_words(planned, now),
+                repeat=rule_words(changed.repeat),
             )
             amend = {
                 "task_id": asked.task_id,
@@ -919,7 +1025,8 @@ class TaskService:
                 understanding, understanding.edit, context.tasks, now, telegram_message_id
             )
 
-        task_row = task_fields(understanding) if understanding.kind in TASK_KINDS else None
+        rule = rule_of(understanding, understanding.due_at)
+        task_row = task_fields(understanding, rule) if understanding.kind in TASK_KINDS else None
         planned = []
         if task_row is not None:
             planned = await self._planner(
@@ -930,17 +1037,26 @@ class TaskService:
             )
         question = question_of(understanding)
         if question is not None:
+            # Правило не по форме — причина перед вопросом: пометка стоит и так.
+            said = f"{texts.REPEAT_DROPPED}. {question}" if rule.malformed else question
             reply = texts.asked_reply(
                 title=understanding.title,
-                question=question,
+                question=said,
                 due=self._due_words(understanding.due_at, understanding.due_precision),
                 remind_at=self._remind_words(planned, now),
+                repeat=rule_words(rule.rule),
             )
-            task = {**task_fields(understanding), "needs_review": True, "open_question": question}
+            task = {
+                **task_fields(understanding, rule),
+                "needs_review": True,
+                "open_question": question,
+            }
             return Decision(reply=reply, task=task, reminders=planned)
 
         return Decision(
-            reply=self._reply_for(understanding, planned, now), task=task_row, reminders=planned
+            reply=self._reply_for(understanding, planned, now, rule),
+            task=task_row,
+            reminders=planned,
         )
 
     async def _edit_context(
@@ -1093,17 +1209,19 @@ class TaskService:
         planned = await self._planner(
             due_at=due_at, due_precision=precision, kind=understanding.kind, now=now
         )
+        rule = rule_of(understanding, due_at)
         task = {
-            **task_fields(understanding),
+            **task_fields(understanding, rule),
             "due_at": due_at.isoformat(),
             "due_precision": precision,
         }
         reply = texts.not_found_reply(
             title=understanding.title,
             due=self._due_words(due_at, precision),
-            review_reason=understanding.review_reason if understanding.needs_review else None,
+            review_reason=review_reason(understanding, rule),
             priority=understanding.priority,
             remind_at=self._remind_words(planned, now),
+            repeat=rule_words(rule.rule),
         )
         return Decision(reply=reply, task=task, reminders=planned)
 
@@ -1117,9 +1235,21 @@ class TaskService:
         ничего не меняется, даже понятное, задача получает пометку и вопрос.
         План берётся у базы, только если срок сменился и не снят: иначе
         напоминания задачи остаются как есть или снимаются целиком.
+
+        Повторяющаяся задача (§13.3): «сделал» и пропуск переводят её на
+        следующий раз, «убрать» убирает серию. У разовой пропуск — то же, что
+        «убрать»: в базу он уходит пропуском, и база решает по задаче, какой
+        она будет в момент записи.
         """
-        if edit.action == "done" or edit.action == "cancel":
-            head = texts.CLOSED if edit.action == "done" else texts.CANCELLED
+        if edit.action in ("done", "skip") and task.repeat is not None:
+            return await self._advance(task, edit.action, task.repeat, now)
+        if edit.action in ("done", "cancel", "skip"):
+            if edit.action == "done":
+                head = texts.CLOSED
+            elif task.repeat is not None:
+                head = texts.CANCELLED_SERIES
+            else:
+                head = texts.CANCELLED
             back = Button(text=texts.REOPEN_BUTTON, data=edits.reopen_data(task.id))
             return Edited(
                 edit=edit_row(task, edit.action),
@@ -1127,12 +1257,14 @@ class TaskService:
                 buttons=(back,),
             )
         question = (understanding.question or "").strip()
+        change = edits.edit_changes(task, edit, self._settings.owner_timezone)
+        if not question and change.needs_start:
+            question = texts.REPEAT_START
         if question:
             return Edited(
                 edit=edit_row(task, "change", question=question),
                 reply=texts.UNCLEAR_EDIT.format(title=task.title, question=question),
             )
-        change = edits.edit_changes(task, edit, self._settings.owner_timezone)
         if not change.changes:
             # Задача всё равно пишется в `edit`: база проверит, что она
             # активна, и сообщение станет «о ней» (решение 6 плана).
@@ -1144,28 +1276,72 @@ class TaskService:
         people = change.people if "people" in change.changes else None
         planned: list[Planned] = []
         if change.due_changed and change.due_at is None:
-            reply = texts.DUE_REMOVED.format(title=change.title)
-        elif change.due_changed:
-            planned = await self._planner(
-                due_at=change.due_at, due_precision=change.due_precision, kind=task.kind, now=now
-            )
+            # Срок снят — снято и правило: повторять нечего (§13.5).
+            removed = texts.DUE_AND_REPEAT_REMOVED if task.repeat else texts.DUE_REMOVED
+            reply = removed.format(title=change.title)
+        else:
+            remind_at = None
+            if change.due_changed:
+                planned = await self._planner(
+                    due_at=change.due_at,
+                    due_precision=change.due_precision,
+                    kind=task.kind,
+                    now=now,
+                )
+                remind_at = self._remind_words(planned, now)
+            if change.repeat_removed:
+                head = texts.REPEAT_REMOVED
+            elif change.due_changed and not change.repeat_changed:
+                head = texts.MOVED_BY_WORD
+            else:
+                head = texts.FIXED
             reply = texts.edited_reply(
-                texts.MOVED_BY_WORD.format(title=change.title),
+                head.format(title=change.title),
                 self._due_words(change.due_at, change.due_precision),
-                self._remind_words(planned, now),
+                remind_at,
                 priority,
                 people,
-            )
-        else:
-            reply = texts.edited_reply(
-                texts.FIXED.format(title=change.title),
-                self._due_words(change.due_at, change.due_precision),
-                priority=priority,
-                people=people,
+                repeat=rule_words(change.repeat),
             )
         return Edited(
             edit=edit_row(task, "change", changes=change.changes, schedule=planned), reply=reply
         )
+
+    async def _advance(
+        self, task: TaskDetails, action: str, rule: Mapping[str, Any], now: datetime
+    ) -> Edited:
+        """«Сделал» или пропуск повторяющейся задачи — переход на следующий раз (§13.3).
+
+        Следующий раз и его план бот берёт у базы заранее и передаёт готовыми,
+        как расписание правки (§12.4): ответ называет ровно записанное. Раз, от
+        которого считал бот, уходит в `edit`: задача за время разбора ушла на
+        другой — база откажет целиком. Кнопка «Вернуть» несёт оба раза.
+        """
+        occurrence = task.occurrence_at or task.due_at
+        if occurrence is None:
+            raise DatabaseError(f"repeating task {task.id} has no occurrence")
+        next_at = await self._repeat_next(
+            repeat=rule, occurrence_at=occurrence, after=max(occurrence, now)
+        )
+        precision = series_precision(rule)
+        planned = await self._planner(
+            due_at=next_at, due_precision=precision, kind=task.kind, now=now
+        )
+        moved_from = occurrence_seconds(occurrence)
+        edit = edit_row(task, action, schedule=planned)
+        edit["occurrence"] = moved_from
+        edit["next_at"] = next_at.isoformat()
+        head = texts.DONE_REPEAT if action == "done" else texts.SKIPPED
+        reply = texts.advanced_reply(
+            head.format(title=task.title),
+            self._due_words(next_at, precision),
+            self._remind_words(planned, now),
+        )
+        back = Button(
+            text=texts.REOPEN_BUTTON,
+            data=edits.back_data(task.id, moved_from, occurrence_seconds(next_at)),
+        )
+        return Edited(edit=edit, reply=reply, buttons=(back,))
 
     async def pick(self, *, chat_id: int, telegram_message_id: int, task_id: str) -> PressOutcome:
         """Кнопка кандидата (§12.6): та же правка для выбранной задачи.
@@ -1252,6 +1428,51 @@ class TaskService:
             texts.REOPENED.format(title=reopened.title),
             self._due_words(reopened.due_at, reopened.due_precision),
             self._remind_words(planned, now),
+            repeat=rule_words(reopened.repeat),
+        )
+        return PressOutcome(message=reply, replace=True)
+
+    async def back(self, *, task_id: str, back_to: int, moved_from: int) -> PressOutcome:
+        """«Вернуть» под «Отметил» и «Пропускаю» (§13.3): задача — снова на разе `back_to`.
+
+        Раз возвращается в час и точность серии; план — у `reminder_plan` на
+        момент нажатия. База возвращает, только если задача активна,
+        повторяется и стоит на разе `moved_from`, — исход виден по разу в
+        ответе. Задача ушла дальше — ничего не меняется и подсказка;
+        удалена — «Не нашёл»; отказ базы — «Не смог вернуть».
+        """
+        store = self._edits
+        if store is None:
+            return PressOutcome(message=texts.NOT_REOPENED, replace=False)
+        now = self._clock()
+        try:
+            task = await store.task(task_id)
+            if task is None:
+                return PressOutcome(message=texts.DONE_UNKNOWN, replace=False)
+            if task.repeat is None:
+                return PressOutcome(message=texts.GONE_FURTHER, replace=False)
+            precision = series_precision(task.repeat)
+            planned = await self._planner(
+                due_at=moment_of(back_to), due_precision=precision, kind=task.kind, now=now
+            )
+            returned = await store.return_occurrence(task_id, back_to, moved_from, planned)
+        except DatabaseError as error:
+            logger.warning("Раз задачи не возвращён: %s", error)
+            return PressOutcome(message=texts.NOT_REOPENED, replace=False)
+        if returned is None:
+            return PressOutcome(message=texts.DONE_UNKNOWN, replace=False)
+        stands = returned.occurrence_at is not None and (
+            occurrence_seconds(returned.occurrence_at) == back_to
+        )
+        if not stands or returned.status != db_tasks.ACTIVE_STATUS or returned.repeat is None:
+            logger.info("Задача %s уже ушла дальше — раз не возвращён", returned.id)
+            return PressOutcome(message=texts.GONE_FURTHER, replace=False)
+        logger.info("Задача %s возвращена на прежний раз", returned.id)
+        reply = texts.edited_reply(
+            texts.REOPENED.format(title=returned.title),
+            self._due_words(returned.due_at, returned.due_precision),
+            self._remind_words(planned, now),
+            repeat=rule_words(returned.repeat),
         )
         return PressOutcome(message=reply, replace=True)
 
@@ -1270,7 +1491,11 @@ class TaskService:
         return texts.format_remind_at(nearest.astimezone(timezone), now.astimezone(timezone))
 
     def _reply_for(
-        self, understanding: Understanding, planned: list[Planned], now: datetime
+        self,
+        understanding: Understanding,
+        planned: list[Planned],
+        now: datetime,
+        rule: RuleOutcome,
     ) -> str:
         """Ответ человеку по видам. Дословно из модели — причина и текст записи.
 
@@ -1291,7 +1516,8 @@ class TaskService:
             kind=understanding.kind,
             title=understanding.title,
             due=self._due_words(understanding.due_at, understanding.due_precision),
-            review_reason=understanding.review_reason if understanding.needs_review else None,
+            review_reason=review_reason(understanding, rule),
             priority=understanding.priority,
             remind_at=self._remind_words(planned, now),
+            repeat=rule_words(rule.rule),
         )

@@ -33,14 +33,39 @@ logger = logging.getLogger(__name__)
 
 # Кнопка под напоминанием (`techspec/06-reminders.md` §6.3): в callback
 # уезжает только id задачи, и владельца из него не взять — он из настроек.
+# У повторяющейся задачи — ещё и раз в секундах Unix: `done:<id>:<раз>`
+# (`techspec/13-repeat.md` §13.3); кнопки до этапа 011 — `done:<id>`.
 DONE_PREFIX = "done:"
 
 
-def done_keyboard(task_id: str) -> InlineKeyboardMarkup:
+def done_data(task_id: str, occurrence: int | None = None) -> str:
+    """Callback «Сделано»: id задачи и, у повторяющейся, раз."""
+    if occurrence is None:
+        return f"{DONE_PREFIX}{task_id}"
+    return f"{DONE_PREFIX}{task_id}:{occurrence}"
+
+
+def parse_done(data: str) -> tuple[str, int | None] | None:
+    """Разобрать callback «Сделано»: задача и раз (или `None`). Кривой — `None`."""
+    task_id, _, occurrence = data.removeprefix(DONE_PREFIX).partition(":")
+    if not task_id:
+        return None
+    if not occurrence:
+        return task_id, None
+    if not (occurrence.isascii() and occurrence.isdigit()):
+        return None
+    return task_id, int(occurrence)
+
+
+def done_keyboard(task_id: str, occurrence: int | None = None) -> InlineKeyboardMarkup:
     """Одна кнопка «Сделано» под напоминанием."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=texts.DONE_BUTTON, callback_data=f"{DONE_PREFIX}{task_id}")]
+            [
+                InlineKeyboardButton(
+                    text=texts.DONE_BUTTON, callback_data=done_data(task_id, occurrence)
+                )
+            ]
         ]
     )
 
@@ -216,32 +241,41 @@ async def handle_done(callback: CallbackQuery, reminders: ReminderService | None
     Порядок: сначала база, потом сообщение и ответ на callback — иначе бот
     зачеркнул бы задачу, которую не закрыл (инвариант 4). Повторное нажатие
     безвредно: задача уже закрыта, а отметка в сообщении уже стоит, и
-    редактировать нечего.
+    редактировать нечего. У повторяющейся задачи раз из кнопки не даёт
+    перескочить через раз (§13.3), а отметка называет срок, какой вернула
+    база.
     """
-    task_id = (callback.data or "").removeprefix(DONE_PREFIX)
-    if reminders is None or not task_id:
+    parsed = parse_done(callback.data or "")
+    if reminders is None:
         logger.error("Кнопку «Сделано» некому обработать: бот собран без базы")
         await callback.answer(texts.NOT_CLOSED)
         return
+    if parsed is None:
+        logger.warning("Кнопка «Сделано» с непонятными данными: %r", callback.data)
+        await callback.answer(texts.DONE_UNKNOWN)
+        return
 
-    completion = await reminders.complete(task_id)
+    task_id, occurrence = parsed
+    completion = await reminders.complete(task_id, occurrence)
     if completion.ok:
-        await mark_done(callback.message)
+        await mark_done(callback.message, completion.mark)
     await callback.answer(completion.answer)
 
 
-async def mark_done(message: MaybeInaccessibleMessage | None) -> None:
-    """Убрать кнопку и дописать «✓ Сделано» под напоминанием.
+async def mark_done(message: MaybeInaccessibleMessage | None, mark: str = texts.DONE_MARK) -> None:
+    """Убрать кнопку и дописать отметку «✓ Сделано…» под напоминанием.
 
     Старое сообщение Telegram отдаёт без текста (`InaccessibleMessage`), и
     редактировать там нечего — задача уже закрыта, а это только отметка.
+    Отметка уже та же — редактировать тоже нечего.
     """
     if not isinstance(message, Message) or message.text is None:
         return
-    if message.text.endswith(texts.DONE_MARK):
+    text = texts.done_message(message.text, mark)
+    if text == message.text:
         return
     try:
-        await message.edit_text(texts.done_message(message.text), reply_markup=None)
+        await message.edit_text(text, reply_markup=None)
     except TelegramBadRequest as error:
         # Сообщение старое или уже отредактировано: задача закрыта, и это
         # важнее, чем вид напоминания.
@@ -289,6 +323,27 @@ async def handle_reopen(callback: CallbackQuery, tasks: TaskService | None) -> N
         await callback.answer(texts.DONE_UNKNOWN)
         return
     outcome = await tasks.reopen(task_id=task_id)
+    await answer_press(callback, outcome)
+
+
+async def handle_back(callback: CallbackQuery, tasks: TaskService | None) -> None:
+    """Нажата «Вернуть» под «Отметил» или «Пропускаю» (§13.3).
+
+    Задача возвращается на прежний раз — и только после ответа базы
+    сообщение меняется на «Вернул в работу». Ушла дальше или удалена —
+    подсказка, сообщение остаётся.
+    """
+    if tasks is None:
+        logger.error("Кнопку «Вернуть» некому обработать: бот собран без базы")
+        await callback.answer(texts.NOT_REOPENED)
+        return
+    parsed = edits.parse_back(callback.data or "")
+    if parsed is None:
+        logger.warning("Кнопка «Вернуть» с непонятными данными: %r", callback.data)
+        await callback.answer(texts.DONE_UNKNOWN)
+        return
+    task_id, moved_from, moved_to = parsed
+    outcome = await tasks.back(task_id=task_id, back_to=moved_from, moved_from=moved_to)
     await answer_press(callback, outcome)
 
 
@@ -343,4 +398,5 @@ def build_router() -> Router:
     router.callback_query.register(handle_done, F.data.startswith(DONE_PREFIX))
     router.callback_query.register(handle_pick, F.data.startswith(edits.PICK_PREFIX))
     router.callback_query.register(handle_reopen, F.data.startswith(edits.REOPEN_PREFIX))
+    router.callback_query.register(handle_back, F.data.startswith(edits.BACK_PREFIX))
     return router

@@ -365,12 +365,15 @@ class FakeNotifier:
     def __init__(self, broken: bool = False, events: list[str] | None = None) -> None:
         self.broken = broken
         self.sent: list[tuple[str, str]] = []
+        # Раз повторяющейся задачи для кнопки «Сделано» — по отправке (§13.3).
+        self.occurrences: list[int | None] = []
         self.events = events if events is not None else []
 
-    async def __call__(self, *, text: str, task_id: str) -> int:
+    async def __call__(self, *, text: str, task_id: str, occurrence: int | None = None) -> int:
         if self.broken:
             raise RuntimeError("Telegram: Bad Gateway")
         self.sent.append((task_id, text))
+        self.occurrences.append(occurrence)
         self.events.append("reminder")
         return 40 + len(self.sent)
 
@@ -428,11 +431,16 @@ class FakeCloser:
         self.task = task
         self.broken = broken
         self.calls: list[tuple[int, str]] = []
+        # Раз из кнопки — по нажатию; у кнопки до этапа 011 его нет (§13.3).
+        self.occurrences: list[int | None] = []
 
-    async def __call__(self, *, owner_telegram_id: int, task_id: str) -> TaskDetails | None:
+    async def __call__(
+        self, *, owner_telegram_id: int, task_id: str, occurrence: int | None = None
+    ) -> TaskDetails | None:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
         self.calls.append((owner_telegram_id, task_id))
+        self.occurrences.append(occurrence)
         return self.task
 
 
@@ -675,7 +683,13 @@ async def test_reminder_goes_to_the_owner_with_the_button(
     assert sent.text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
     assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
     assert sent.reply_markup.inline_keyboard[0][0].callback_data == "done:0e2f"
-    assert client.calls == ["due_reminders", "mark_reminders_sent", "moved_tasks"]
+    # Тик сначала перекатывает пропущенные разы (§13.4), потом отбирает созревшее.
+    assert client.calls == [
+        "roll_repeats",
+        "due_reminders",
+        "mark_reminders_sent",
+        "moved_tasks",
+    ]
 
 
 async def test_late_reminder_does_not_age_the_due_date() -> None:
@@ -899,7 +913,7 @@ async def test_moved_line_goes_to_the_owner_without_a_button(
     assert sent.chat_id == OWNER_ID
     assert sent.text.startswith("Перенёс: отправить расчёт клиенту.")
     assert sent.reply_markup is None
-    assert client.calls == ["due_reminders", "moved_tasks", "clear_due_moved"]
+    assert client.calls == ["roll_repeats", "due_reminders", "moved_tasks", "clear_due_moved"]
     assert client.params[-1] == {
         "owner_telegram_id": OWNER_ID,
         "task_id": "0e2f",

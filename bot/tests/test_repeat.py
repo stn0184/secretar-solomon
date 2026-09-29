@@ -167,6 +167,26 @@ def test_moment_of_seconds_is_the_occurrence_back() -> None:
     assert repeat.moment_of(1791205200) == datetime(2026, 10, 5, 13, 0, tzinfo=UTC)
 
 
+def test_same_rule_ignores_the_hour_and_empty_days() -> None:
+    """Правило из базы с часом серии — то же, что правило модели без часа (§13.5)."""
+    stored = {**canonical(), "time": "09:00"}
+    daily = {**canonical(every="day", weekdays=None), "time": None}
+
+    assert repeat.same_rule(stored, canonical())
+    assert repeat.same_rule(daily, canonical(every="day", weekdays=None))
+    assert repeat.same_rule({**daily, "weekdays": []}, canonical(every="day", weekdays=None))
+    assert not repeat.same_rule(stored, canonical(weekdays=[2]))
+    assert not repeat.same_rule(stored, canonical(interval=2))
+    assert not repeat.same_rule(None, canonical())
+
+
+def test_series_precision_follows_the_hour_of_the_rule() -> None:
+    """Точность раза — по часу серии: есть час — `time`, нет — `day` (§13.3)."""
+    assert repeat.series_precision({**canonical(), "time": "09:00"}) == "time"
+    assert repeat.series_precision({**canonical(), "time": None}) == "day"
+    assert repeat.series_precision(canonical()) == "day"
+
+
 # Общие примеры бота и приложения (§13.7): тот же список — в
 # `miniapp/src/lib/repeat.test.ts`.
 WORDS: list[tuple[dict[str, Any], str]] = [

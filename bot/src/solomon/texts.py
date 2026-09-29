@@ -257,6 +257,11 @@ HELP = (
     "О задаче со сроком напомню заранее и в срок; под напоминанием кнопка "
     "«Сделано» — нажмёте, и задача закроется. Напоминания приходят, пока я "
     "запущен: пропущенные придут при следующем запуске.\n\n"
+    "Задачу можно сделать повторяющейся словом: «каждый понедельник отправлять "
+    "отчёт», «по будням в 9 планёрка», «10-го каждый месяц платить за "
+    "квартиру». «Сделано» у такой задачи не закрывает её, а переводит на "
+    "следующий раз; «в этот раз не надо» — пропуск раза. Правило меняется "
+    "словом («теперь по вторникам», «больше не повторяй») и в приложении.\n\n"
     "Задачи видны в приложении — кнопка меню рядом с полем ввода. Там список "
     "по срокам и карточка с исходным сообщением (у голосового — с "
     "расшифровкой); задачу можно закрыть, изменить или удалить.\n\n"
@@ -312,9 +317,17 @@ def _retold(
     remind_at: str | None,
     priority: str,
     tail: str | None,
+    repeat: str | None = None,
 ) -> str:
-    """Пересказ по частям: суть, срок, когда напомню, приоритет, последняя фраза."""
+    """Пересказ по частям: суть, повтор, срок, когда напомню, приоритет, последняя фраза.
+
+    `repeat` — правило словами (`repeat_words`): строка «Повтор» встаёт после
+    головы и перед «Срок:» (`techspec/13-repeat.md` §13.7); у разовой задачи
+    её нет, и пересказ прежний.
+    """
     parts = [head]
+    if repeat:
+        parts.append(f"Повтор: {repeat}")
     if due:
         parts.append(f"Срок: {due}")
     if remind_at:
@@ -333,9 +346,10 @@ def recorded_reply(
     review_reason: str | None = None,
     priority: str = "normal",
     remind_at: str | None = None,
+    repeat: str | None = None,
 ) -> str:
-    """Подтверждение записи: суть, срок, когда напомню, приоритет (если не
-    обычный) и причина «перепроверьте».
+    """Подтверждение записи: суть, повтор, срок, когда напомню, приоритет (если
+    не обычный) и причина «перепроверьте».
 
     Строка «Напомню» есть только тогда, когда напоминание вправду
     запланировано (§6.4): обещать её без плана значило бы сказать о том,
@@ -345,11 +359,15 @@ def recorded_reply(
     (`techspec/05-ai.md` §5.4) — остальное собрано здесь.
     """
     head = RECORDED_BY_KIND.get(kind, RECORDED_BY_KIND["task"]).format(title=title)
-    return _retold(head, due, remind_at, priority, review_reason)
+    return _retold(head, due, remind_at, priority, review_reason, repeat)
 
 
 def asked_reply(
-    title: str, question: str, due: str | None = None, remind_at: str | None = None
+    title: str,
+    question: str,
+    due: str | None = None,
+    remind_at: str | None = None,
+    repeat: str | None = None,
 ) -> str:
     """Запись с уточняющим вопросом (`techspec/10-dialog.md` §10.1).
 
@@ -358,7 +376,9 @@ def asked_reply(
     говорит, чего не хватает, а лишняя фраза перед ним его заслонила бы.
     Вопрос уходит дословно от модели, как `review_reason`.
     """
-    return _retold(RECORDED_BY_KIND["task"].format(title=title), due, remind_at, "normal", question)
+    return _retold(
+        RECORDED_BY_KIND["task"].format(title=title), due, remind_at, "normal", question, repeat
+    )
 
 
 # Ответ на вопрос лёг в ту же задачу (§10.2): пересказ как при записи, но
@@ -372,9 +392,10 @@ def understood_reply(
     review_reason: str | None = None,
     priority: str = "normal",
     remind_at: str | None = None,
+    repeat: str | None = None,
 ) -> str:
     """«Понял: отправить расчёт клиенту. Срок: пятница, 25 сентября. Напомню: …»."""
-    return _retold(UNDERSTOOD.format(title=title), due, remind_at, priority, review_reason)
+    return _retold(UNDERSTOOD.format(title=title), due, remind_at, priority, review_reason, repeat)
 
 
 # Правка из приложения перенесла срок (`techspec/11-edit.md` §11.4): тот же
@@ -384,15 +405,18 @@ MOVED = "Перенёс: {title}"
 DUE_REMOVED = "Убрал срок: {title}. Напоминать не буду."
 
 
-def moved_reply(title: str, due: str | None, remind_at: str | None) -> str:
+def moved_reply(
+    title: str, due: str | None, remind_at: str | None, repeat: str | None = None
+) -> str:
     """«Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября. Напомню: …».
 
     `due` пуст — срок снят, и строка «Убрал срок». «Напомню» только тогда,
-    когда напоминание вправду впереди (§6.4).
+    когда напоминание вправду впереди (§6.4). У повторяющейся задачи —
+    строка «Повтор» (`techspec/13-repeat.md` §13.6).
     """
     if not due:
         return DUE_REMOVED.format(title=title)
-    return _retold(MOVED.format(title=title), due, remind_at, "normal", None)
+    return _retold(MOVED.format(title=title), due, remind_at, "normal", None, repeat)
 
 
 # Правка задачи словом (`techspec/12-chat-edit.md` §12.5): одной строкой,
@@ -408,11 +432,39 @@ NOTHING_TO_CHANGE = "Не понял, что поменять в задаче «
 NOT_FOUND_RECORDED = "Не нашёл открытой задачи — записал новую: {title}"
 NOT_FOUND = "Не нашёл открытой задачи «{title}» — ничего не менял."
 
+# Повторяющаяся задача (`techspec/13-repeat.md` §13.7): «сделал» и пропуск не
+# закрывают её, а переводят на следующий раз; убрать — всю серию.
+DONE_REPEAT = "Отметил: {title}"
+SKIPPED = "Пропускаю этот раз: {title}"
+REPEAT_REMOVED = "Больше не повторяю: {title}"
+DUE_AND_REPEAT_REMOVED = "Убрал срок и повтор: {title}. Напоминать не буду."
+CANCELLED_SERIES = "Убрал из списка со всеми повторами: {title}."
+# Правило назвали, а первого раза нет: у задачи нет срока, и он не назван.
+REPEAT_START = "С какого дня начать повтор?"
+# «Вернуть» под «Отметил» и «Пропускаю»: задача уже на другом разе.
+GONE_FURTHER = "Задача уже ушла дальше — ничего не менял."
+
+
+def advanced_reply(head: str, next_due: str | None, remind_at: str | None) -> str:
+    """«Отметил: …. Следующий раз: …. Напомню: …» — без строки «Повтор» (§13.7).
+
+    Следующий раз — тем же видом, что срок; «Напомню» — только о напоминании,
+    которое вправду впереди (§6.4).
+    """
+    parts = [head]
+    if next_due:
+        parts.append(f"Следующий раз: {next_due}")
+    if remind_at:
+        parts.append(f"Напомню: {remind_at}")
+    return ". ".join(parts)
+
+
 # Кнопки правки (§12.6): вопрос «какую задачу» называет действие.
 PICK_MOVE = "Какую задачу перенести {target}?"
 PICK_REMOVE_DUE = "С какой задачи снять срок?"
 PICK_DONE = "Какую задачу закрыть?"
 PICK_CANCEL = "Какую задачу убрать из списка?"
+PICK_SKIP = "Какую задачу пропустить в этот раз?"
 PICK_CHANGE = "Какую задачу поправить?"
 REOPEN_BUTTON = "Вернуть"
 PICKED_GONE = "Задачу уже закрыли или удалили — ничего не менял."
@@ -430,15 +482,19 @@ def edited_reply(
     remind_at: str | None = None,
     priority: str | None = None,
     people: Sequence[str] | None = None,
+    repeat: str | None = None,
 ) -> str:
     """Ответ на правку словом: «Перенёс: …», «Поправил: …», «Вернул в работу: …».
 
     `priority` и `people` — только когда правка их сменила: срочность
     звучит словом и тогда, когда она вернулась к обычной, люди — списком
     целиком (§12.5). «Напомню» — только о напоминании, которое вправду
-    впереди (§6.4).
+    впереди (§6.4). `repeat` — правило повторяющейся задачи словами: строка
+    «Повтор» перед «Срок:» (`techspec/13-repeat.md` §13.7).
     """
     parts = [head]
+    if repeat:
+        parts.append(f"Повтор: {repeat}")
     if due:
         parts.append(f"Срок: {due}")
     if remind_at:
@@ -456,9 +512,12 @@ def not_found_reply(
     review_reason: str | None = None,
     priority: str = "normal",
     remind_at: str | None = None,
+    repeat: str | None = None,
 ) -> str:
     """Перенос задачи, которой нет в списке, записан новой задачей (§12.3)."""
-    return _retold(NOT_FOUND_RECORDED.format(title=title), due, remind_at, priority, review_reason)
+    return _retold(
+        NOT_FOUND_RECORDED.format(title=title), due, remind_at, priority, review_reason, repeat
+    )
 
 
 # Напоминание и кнопка под ним (`techspec/06-reminders.md` §6.2, §6.3).
@@ -466,6 +525,10 @@ DONE_BUTTON = "Сделано"
 DONE_MARK = "✓ Сделано"
 DONE_ANSWER = "Задача закрыта."
 DONE_UNKNOWN = "Не нашёл эту задачу."
+# Повторяющаяся задача после «Сделано» (`techspec/13-repeat.md` §13.3): срок —
+# тот, какой вернула база, и когда перевела она, и когда задача ушла раньше.
+DONE_NEXT = "✓ Сделано. Следующий раз: {due}"
+NEXT_ANSWER = "Следующий раз: {due}"
 
 
 def reminder(title: str, due: str | None, overdue: bool) -> str:
@@ -481,9 +544,19 @@ def reminder(title: str, due: str | None, overdue: bool) -> str:
     return "\n".join(lines)
 
 
-def done_message(text: str) -> str:
-    """Сообщение напоминания после нажатия кнопки: та же суть и отметка."""
-    return f"{text}\n\n{DONE_MARK}"
+def done_message(text: str, mark: str = DONE_MARK) -> str:
+    """Сообщение напоминания после нажатия кнопки: та же суть и отметка.
+
+    Прежняя отметка заменяется: повтор нажатия у повторяющейся задачи
+    называет срок, какой вернула база, а не дописывает вторую строку.
+    """
+    return f"{without_mark(text)}\n\n{mark}"
+
+
+def without_mark(text: str) -> str:
+    """Текст напоминания без отметки «✓ Сделано…», если она уже стоит."""
+    head, separator, _ = text.rpartition(f"\n\n{DONE_MARK}")
+    return head if separator else text
 
 
 NOT_SAVED = "Не смог записать: база не ответила. Попробуйте ещё раз."

@@ -50,11 +50,11 @@ def build_reminders(settings: Settings, db: Client, bot: Bot) -> ReminderService
     это не напоминание.
     """
 
-    async def notify(*, text: str, task_id: str) -> int:
+    async def notify(*, text: str, task_id: str, occurrence: int | None = None) -> int:
         message = await bot.send_message(
             chat_id=settings.owner_telegram_id,
             text=text,
-            reply_markup=handlers.done_keyboard(task_id),
+            reply_markup=handlers.done_keyboard(task_id, occurrence),
         )
         return message.message_id
 

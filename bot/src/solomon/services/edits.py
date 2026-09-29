@@ -13,8 +13,9 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Literal
@@ -22,7 +23,10 @@ from zoneinfo import ZoneInfo
 
 from solomon import texts
 from solomon.db.tasks import TaskDetails, TaskEvent
+from solomon.services.repeat import clean_rule, same_rule
 from solomon.services.understanding import TaskEdit
+
+logger = logging.getLogger(__name__)
 
 # Сколько задач видит модель (§12.2): дальше 50-й правки словом нет.
 TASK_LIMIT = 50
@@ -39,9 +43,11 @@ DAY_DUE_TIME = time(18, 0)
 
 # Callback кнопок (§12.6). Telegram ограничивает его 64 байтами, поэтому в
 # нём только вид действия и id: `pick:<сообщение владельца>:<задача>`,
-# `reopen:<задача>`.
+# `reopen:<задача>`, `back:<задача>:<раз откуда>:<раз куда>` — «Вернуть»
+# повторяющейся задачи, разы в секундах Unix (`techspec/13-repeat.md` §13.3).
 PICK_PREFIX = "pick:"
 REOPEN_PREFIX = "reopen:"
+BACK_PREFIX = "back:"
 
 # На что ответили свайпом (§12.2): напоминание, другое сообщение бота, своё.
 SwipeTarget = Literal["reminder", "bot", "own"]
@@ -151,6 +157,11 @@ class Change:
     `changes` уходит в `edit` как есть: ключи ядра `change_task`, только
     то, что отличается от задачи. Остальное — по нему бот спрашивает план
     и собирает ответ «Перенёс» или «Поправил».
+
+    `repeat` — правило после правки (§13.5): снятый срок снимает и его.
+    `repeat_changed` — правило поставлено или сменилось, `repeat_removed` —
+    снято словом. `needs_start` — правило назвали, а первого раза нет:
+    у задачи нет срока, и он не назван; бот спрашивает, ничего не меняя.
     """
 
     changes: dict[str, Any]
@@ -160,6 +171,10 @@ class Change:
     priority: str
     people: tuple[str, ...]
     due_changed: bool
+    repeat: Mapping[str, Any] | None = None
+    repeat_changed: bool = False
+    repeat_removed: bool = False
+    needs_start: bool = False
 
 
 def _local(moment: datetime, timezone: ZoneInfo) -> datetime:
@@ -200,15 +215,53 @@ def _new_due(
     return {}, task.due_at, task.due_precision
 
 
+def _new_rule(task: TaskDetails, edit: TaskEdit) -> dict[str, Any] | None:
+    """Правило из правки — по форме и у задачи; иначе `None` и строка в журнал.
+
+    Вид словом не меняется, поэтому у идеи и желания правило не ставится
+    вовсе. Правило не по форме отбрасывается, остальная правка идёт (§13.5).
+    """
+    if edit.repeat is None:
+        return None
+    if task.kind != "task":
+        logger.warning("Правило повтора у %s не ставится: повторяется только задача", task.kind)
+        return None
+    rule = clean_rule(edit.repeat)
+    if rule is None:
+        logger.warning("Правило повтора в правке не по форме, отброшено: %s", edit.repeat)
+    return rule
+
+
 def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo) -> Change:
     """Слить правку модели с задачей: только отличия, пустое — «не менял» (§12.1).
 
     Люди — список целиком: «не Кузнецову, а Петрову» заменяет, а не
     дописывает (в отличие от ответа на вопрос, §10.2). Обещание словом не
     снимается — пустое значит «не менял». Вид не меняется вовсе.
+
+    Правило (§13.5): перенос срока без правила меняет только этот раз.
+    Новое правило уходит вместе со сроком, какой станет, — он первый раз,
+    и база возьмёт из него час серии; то же правило уходит снова, только
+    когда сменился срок («теперь в 11»). Новое правило главнее и снятия
+    правила, и снятия срока: из противоречивых значений — то, что ничего
+    не теряет.
     """
+    rule = _new_rule(task, edit)
+    if rule is not None and edit.due_removed:
+        edit = edit.model_copy(update={"due_removed": False})
     changes, due_at, due_precision = _new_due(task, edit, timezone)
     due_changed = bool(changes)
+    repeat: Mapping[str, Any] | None = task.repeat if due_at is not None else None
+    repeat_changed = repeat_removed = needs_start = False
+    if rule is not None:
+        if due_at is None:
+            needs_start = True
+        elif due_changed or not same_rule(task.repeat, rule):
+            changes["repeat"] = rule
+            repeat, repeat_changed = rule, True
+    elif edit.repeat_removed and task.repeat is not None and due_at is not None:
+        changes["repeat"] = None
+        repeat, repeat_removed = None, True
     title = (edit.title or "").strip()
     if title and title != task.title:
         changes["title"] = title
@@ -226,6 +279,10 @@ def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo) -> Chang
         priority=changes.get("priority", task.priority),
         people=tuple(changes.get("people", task.people)),
         due_changed=due_changed,
+        repeat=repeat,
+        repeat_changed=repeat_changed,
+        repeat_removed=repeat_removed,
+        needs_start=needs_start,
     )
 
 
@@ -237,6 +294,11 @@ def pick_data(telegram_message_id: int, task_id: str) -> str:
 def reopen_data(task_id: str) -> str:
     """Callback кнопки «Вернуть» (§12.6)."""
     return f"{REOPEN_PREFIX}{task_id}"
+
+
+def back_data(task_id: str, moved_from: int, moved_to: int) -> str:
+    """Callback «Вернуть» повторяющейся задачи: с какого раза ушла и на какой (§13.3)."""
+    return f"{BACK_PREFIX}{task_id}:{moved_from}:{moved_to}"
 
 
 def _task_id(value: str) -> str | None:
@@ -267,6 +329,23 @@ def parse_reopen(data: str) -> str | None:
     return _task_id(data.removeprefix(REOPEN_PREFIX))
 
 
+def parse_back(data: str) -> tuple[str, int, int] | None:
+    """Разобрать callback «Вернуть» повторяющейся: задача, раз откуда, раз куда.
+
+    Кривой — `None`: разы — только целые секунды без знака.
+    """
+    if not data.startswith(BACK_PREFIX):
+        return None
+    task, _, moments = data.removeprefix(BACK_PREFIX).partition(":")
+    moved_from, _, moved_to = moments.partition(":")
+    if not all(part.isascii() and part.isdigit() for part in (moved_from, moved_to)):
+        return None
+    task_id = _task_id(task)
+    if task_id is None:
+        return None
+    return task_id, int(moved_from), int(moved_to)
+
+
 def candidate_label(task: TaskDetails, timezone: ZoneInfo) -> str:
     """Надпись кнопки кандидата: суть до 40 знаков и короткий срок (§12.6)."""
     title = task.title
@@ -285,6 +364,8 @@ def pick_question(edit: TaskEdit, now: datetime, timezone: ZoneInfo) -> str:
         return texts.PICK_DONE
     if edit.action == "cancel":
         return texts.PICK_CANCEL
+    if edit.action == "skip":
+        return texts.PICK_SKIP
     if edit.due_at is not None:
         target = texts.format_move_target(
             _local(edit.due_at, timezone), edit.due_precision or "time", now.astimezone(timezone)

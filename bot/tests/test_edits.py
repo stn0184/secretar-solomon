@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from solomon import texts
 from solomon.db.tasks import TaskDetails, TaskEvent
 from solomon.services import edits
 from solomon.services.understanding import TaskEdit
@@ -36,6 +37,8 @@ def make_task(
     promise: str | None = None,
     people: tuple[str, ...] = (),
     status: str = "active",
+    repeat: dict[str, Any] | None = None,
+    occurrence_at: datetime | None = None,
 ) -> TaskDetails:
     return TaskDetails(
         id=task_id,
@@ -48,6 +51,8 @@ def make_task(
         promise=promise,
         people=people,
         created_at=created_at,
+        repeat=repeat,
+        occurrence_at=occurrence_at,
     )
 
 
@@ -356,6 +361,149 @@ def test_task_without_changes_keeps_its_due() -> None:
 
 
 # --- кнопки ------------------------------------------------------------------
+
+
+# --- повтор (§13.5) --------------------------------------------------------
+
+MONDAY_9 = datetime(2026, 10, 5, 9, 0, tzinfo=TZ)
+MONDAYS = {"every": "week", "interval": 1, "weekdays": [1], "month_day": None, "month": None}
+TUESDAYS = {**MONDAYS, "weekdays": [2]}
+
+
+def weekly(**fields: Any) -> TaskDetails:
+    """Повторяющаяся задача: каждый понедельник в 9, стоит на разе 5 октября."""
+    return make_task(
+        due_at=MONDAY_9,
+        due_precision="time",
+        repeat={**MONDAYS, "time": "09:00"},
+        occurrence_at=MONDAY_9,
+        **fields,
+    )
+
+
+def test_move_of_a_repeating_task_changes_only_this_time() -> None:
+    edit = make_edit(due_at="2026-10-06T11:00:00+05:00", due_precision="time")
+
+    change = edits.edit_changes(weekly(), edit, TZ)
+
+    assert change.changes == {"due_at": "2026-10-06T11:00:00+05:00"}
+    assert change.repeat == {**MONDAYS, "time": "09:00"}
+    assert not change.repeat_changed
+    assert not change.repeat_removed
+
+
+def test_new_rule_goes_with_its_first_time() -> None:
+    """«Теперь по вторникам»: правило и срок ближайшего вторника в час серии."""
+    edit = make_edit(repeat=TUESDAYS, due_at="2026-10-06T09:00:00+05:00", due_precision="time")
+
+    change = edits.edit_changes(weekly(), edit, TZ)
+
+    assert change.changes == {"due_at": "2026-10-06T09:00:00+05:00", "repeat": TUESDAYS}
+    assert change.repeat == TUESDAYS
+    assert change.repeat_changed
+    assert change.due_changed
+
+
+def test_same_rule_with_a_new_hour_is_sent_again() -> None:
+    """«Теперь в 11»: то же правило, срок в 11:00 — база возьмёт час серии из срока."""
+    edit = make_edit(repeat=MONDAYS, due_at="2026-10-05T11:00:00+05:00", due_precision="time")
+
+    change = edits.edit_changes(weekly(), edit, TZ)
+
+    assert change.changes == {"due_at": "2026-10-05T11:00:00+05:00", "repeat": MONDAYS}
+    assert change.repeat_changed
+
+
+def test_same_rule_without_a_new_due_is_no_change() -> None:
+    assert edits.edit_changes(weekly(), make_edit(repeat=MONDAYS), TZ).changes == {}
+
+
+def test_rule_for_a_one_off_task_takes_its_due_as_the_first_time() -> None:
+    """«Повторяй каждую неделю»: срок задачи и есть первый раз."""
+    task = make_task(due_at=MONDAY_9, due_precision="time")
+
+    change = edits.edit_changes(task, make_edit(repeat=MONDAYS), TZ)
+
+    assert change.changes == {"repeat": MONDAYS}
+    assert change.repeat == MONDAYS
+    assert change.repeat_changed
+    assert not change.due_changed
+
+
+def test_rule_without_any_due_needs_the_first_day() -> None:
+    change = edits.edit_changes(make_task(), make_edit(repeat=MONDAYS, title="планёрка"), TZ)
+
+    assert change.needs_start
+    assert "repeat" not in change.changes
+
+
+def test_rule_out_of_form_or_of_an_idea_is_dropped() -> None:
+    no_days = make_edit(repeat={**MONDAYS, "weekdays": []})
+    idea = make_task(kind="idea", due_at=MONDAY_9, due_precision="time")
+
+    assert edits.edit_changes(weekly(), no_days, TZ).changes == {}
+    assert edits.edit_changes(idea, make_edit(repeat=MONDAYS), TZ).changes == {}
+    assert not edits.edit_changes(idea, make_edit(repeat=MONDAYS), TZ).needs_start
+
+
+def test_removing_the_repeat_sends_null() -> None:
+    change = edits.edit_changes(weekly(), make_edit(repeat_removed=True), TZ)
+
+    assert change.changes == {"repeat": None}
+    assert change.repeat is None
+    assert change.repeat_removed
+    assert change.due_at == MONDAY_9
+
+
+def test_removing_a_repeat_that_is_not_there_is_no_change() -> None:
+    task = make_task(due_at=MONDAY_9, due_precision="time")
+
+    assert edits.edit_changes(task, make_edit(repeat_removed=True), TZ).changes == {}
+
+
+def test_new_rule_wins_over_removing_it_and_the_due() -> None:
+    """Из противоречивых значений — то, что ничего не теряет (§12.4)."""
+    edit = make_edit(repeat=TUESDAYS, repeat_removed=True, due_removed=True)
+
+    assert edits.edit_changes(weekly(), edit, TZ).changes == {"repeat": TUESDAYS}
+
+
+def test_removing_the_due_takes_the_repeat_along() -> None:
+    change = edits.edit_changes(weekly(), make_edit(due_removed=True), TZ)
+
+    assert change.changes == {"due_at": None}
+    assert change.repeat is None
+
+
+def test_skip_question_names_the_action() -> None:
+    assert edits.pick_question(make_edit(action="skip", task=None), NOW, TZ) == texts.PICK_SKIP
+
+
+def test_back_callback_fits_telegram_and_reads_back() -> None:
+    """«Вернуть» повторяющейся: задача, раз «откуда» и раз «куда» — 63 байта (§13.3)."""
+    data = edits.back_data(TASK_ID, 9_999_999_999, 9_999_999_999)
+
+    assert data == f"back:{TASK_ID}:9999999999:9999999999"
+    assert len(data.encode()) <= 64
+    assert edits.parse_back(data) == (TASK_ID, 9_999_999_999, 9_999_999_999)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "back:",
+        f"back:{TASK_ID}",
+        f"back:{TASK_ID}:1",
+        f"back:{TASK_ID}:1:",
+        f"back:{TASK_ID}:x:2",
+        f"back:{TASK_ID}:-1:2",
+        "back:not-a-uuid:1:2",
+        f"reopen:{TASK_ID}",
+        "",
+    ],
+)
+def test_broken_back_callback_is_nothing(data: str) -> None:
+    assert edits.parse_back(data) is None
 
 
 def test_pick_callback_fits_telegram_and_reads_back() -> None:
