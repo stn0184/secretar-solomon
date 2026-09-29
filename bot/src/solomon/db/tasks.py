@@ -28,9 +28,11 @@ REMINDERS_TABLE = "reminders"
 ACTIVE_STATUS = "active"
 TASK_COLUMNS = "id, title, status"
 # Поля задачи, которые нужны списку в промпте (`techspec/12-chat-edit.md`
-# §12.2), правке словом и кнопкам «какую задачу» и «Вернуть» (§12.6).
+# §12.2), правке словом и кнопкам «какую задачу» и «Вернуть» (§12.6), —
+# с правилом повтора и разом (`techspec/13-repeat.md` §13.2).
 DETAIL_COLUMNS = (
-    "id, title, kind, status, due_at, due_precision, priority, promise, people, created_at"
+    "id, title, kind, status, due_at, due_precision, priority, promise, people, created_at, "
+    "repeat, occurrence_at"
 )
 # Сообщение владельца, на которое ответили свайпом или по которому нажали
 # кнопку кандидата: текст, задача, разбор и ответ бота (§12.2, §12.6).
@@ -39,7 +41,7 @@ STORED_MESSAGE_COLUMNS = "id, text, task_id, analysis, reply"
 # с задачей (`techspec/10-dialog.md` §10.2).
 QUESTION_COLUMNS = (
     "id, title, kind, due_at, due_precision, priority, promise, people, "
-    "open_question, question_asked_at"
+    "open_question, question_asked_at, repeat"
 )
 
 # Вид сообщения (`techspec/03-schema.md` §3.2, §9.1): текст, голосовое,
@@ -75,6 +77,7 @@ class OpenQuestion:
     promise: str | None
     people: tuple[str, ...]
     asked_at: datetime
+    repeat: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +86,9 @@ class TaskDetails:
 
     Строка списка открытых задач в промпте, цель правки и кнопки «Вернуть»:
     суть, вид, срок, срочность, обещание, люди — и статус, потому что по
-    кнопке приходит и закрытая задача.
+    кнопке приходит и закрытая задача. `repeat` и `occurrence_at` — правило
+    повтора и раз, который задача сейчас представляет (§13.2); у разовой
+    оба пусты.
     """
 
     id: str
@@ -96,6 +101,8 @@ class TaskDetails:
     promise: str | None
     people: tuple[str, ...]
     created_at: datetime
+    repeat: Mapping[str, Any] | None = None
+    occurrence_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +192,24 @@ def _people(value: Any) -> tuple[str, ...]:
     return tuple(str(person) for person in value)
 
 
+def repeat_of(value: Any) -> dict[str, Any] | None:
+    """Правило повтора из строки (§13.2): объект или пусто; иное — отказ.
+
+    Форму правила держит база (`repeat_valid`), здесь — только вид: правило
+    строкой или списком читать вслепую нельзя.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise DatabaseError(f"В ответе базы не разобрать repeat: {value!r}.")
+    return dict(value)
+
+
+def optional_moment(value: Any, field: str) -> datetime | None:
+    """Время или пусто — `moment` для колонок, которые бывают `null`."""
+    return None if value is None else moment(value, field)
+
+
 def task_details_from_row(row: Any) -> TaskDetails:
     """Разобрать строку задачи целиком. Неполная — отказ: править её вслепую нельзя."""
     if not isinstance(row, Mapping):
@@ -202,6 +227,9 @@ def task_details_from_row(row: Any) -> TaskDetails:
             promise=_optional_text(row["promise"]),
             people=_people(row["people"]),
             created_at=moment(row["created_at"], "created_at"),
+            # Повтор читается мягко: строка без этих колонок — разовая задача.
+            repeat=repeat_of(row.get("repeat")),
+            occurrence_at=optional_moment(row.get("occurrence_at"), "occurrence_at"),
         )
     except KeyError as error:
         raise DatabaseError(f"В ответе базы нет поля задачи: {error}.") from error
@@ -261,6 +289,7 @@ def _open_question_from_row(row: Any) -> OpenQuestion | None:
             promise=_optional_text(row["promise"]),
             people=tuple(str(person) for person in people),
             asked_at=moment(row["question_asked_at"], "question_asked_at"),
+            repeat=repeat_of(row.get("repeat")),
         )
     except KeyError as error:
         raise DatabaseError(f"В ответе базы нет поля задачи: {error}.") from error

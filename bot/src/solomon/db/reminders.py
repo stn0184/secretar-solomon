@@ -12,6 +12,11 @@
 по которой минутный цикл пишет строку «Перенёс» (§11.4). И кнопка «Вернуть»
 под «Закрыл» и «Убрал из списка» (`techspec/12-chat-edit.md` §12.6) — она
 возвращает задачу в работу вместе с новым планом напоминаний.
+
+Повторяющиеся задачи (`techspec/13-repeat.md`): «Сделано» переводит задачу
+на следующий раз, следующий раз считает база (`repeat_next`), «Вернуть» под
+«Отметил» и «Пропускаю» — `return_occurrence`, пропущенный раз двигает
+`roll_repeats` в минутном цикле.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from typing import Any, Literal, get_args
 from supabase import Client
 
 from solomon.db.rpc import DatabaseError, ask, moment, single_row
-from solomon.db.tasks import Task, TaskDetails, task_details_from_row, task_from_row
+from solomon.db.tasks import TaskDetails, optional_moment, repeat_of, task_details_from_row
 
 DUE_REMINDERS_FUNCTION = "due_reminders"
 MARK_REMINDERS_SENT_FUNCTION = "mark_reminders_sent"
@@ -34,6 +39,9 @@ REMINDER_PLAN_FUNCTION = "reminder_plan"
 SAVE_OWNER_TIMEZONE_FUNCTION = "save_owner_timezone"
 MOVED_TASKS_FUNCTION = "moved_tasks"
 CLEAR_DUE_MOVED_FUNCTION = "clear_due_moved"
+REPEAT_NEXT_FUNCTION = "repeat_next"
+RETURN_OCCURRENCE_FUNCTION = "return_occurrence"
+ROLL_REPEATS_FUNCTION = "roll_repeats"
 
 Stage = Literal["before", "due"]
 
@@ -109,7 +117,8 @@ class MovedTask:
 
     Всё, из чего строка «Перенёс» собирается в момент отправки: суть, срок,
     каким он лежит в базе сейчас, и ближайшее неотправленное напоминание.
-    `due_moved_at` — прочитанная отметка: снимается ровно она.
+    `due_moved_at` — прочитанная отметка: снимается ровно она. У
+    повторяющейся задачи — правило: строка называет и повтор (§13.6).
     """
 
     id: str
@@ -118,6 +127,8 @@ class MovedTask:
     due_precision: str | None
     due_moved_at: datetime
     next_fire_at: datetime | None
+    repeat: Mapping[str, Any] | None = None
+    occurrence_at: datetime | None = None
 
 
 def _moved_from_row(row: Any) -> MovedTask:
@@ -134,6 +145,8 @@ def _moved_from_row(row: Any) -> MovedTask:
             due_precision=None if row["due_precision"] is None else str(row["due_precision"]),
             due_moved_at=moment(row["due_moved_at"], "due_moved_at"),
             next_fire_at=None if next_fire_at is None else moment(next_fire_at, "next_fire_at"),
+            repeat=repeat_of(row.get("repeat")),
+            occurrence_at=optional_moment(row.get("occurrence_at"), "occurrence_at"),
         )
     except KeyError as error:
         raise DatabaseError(f"В ответе базы нет поля переноса: {error}.") from error
@@ -174,7 +187,8 @@ class DueReminder:
     """Созревшее напоминание вместе с полями задачи, о которой оно (§3.5).
 
     Поля задачи приходят тем же запросом: текст напоминания собирается из
-    них, и второй поход в базу на каждое напоминание был бы лишним.
+    них, и второй поход в базу на каждое напоминание был бы лишним. Раз
+    `occurrence_at` уходит в кнопку «Сделано» повторяющейся задачи (§13.3).
     """
 
     id: str
@@ -184,6 +198,8 @@ class DueReminder:
     title: str
     due_at: datetime | None
     due_precision: str | None
+    repeat: Mapping[str, Any] | None = None
+    occurrence_at: datetime | None = None
 
 
 def _reminder_from_row(row: Any) -> DueReminder:
@@ -200,6 +216,8 @@ def _reminder_from_row(row: Any) -> DueReminder:
             title=str(row["title"]),
             due_at=None if due_at is None else moment(due_at, "due_at"),
             due_precision=None if row["due_precision"] is None else str(row["due_precision"]),
+            repeat=repeat_of(row.get("repeat")),
+            occurrence_at=optional_moment(row.get("occurrence_at"), "occurrence_at"),
         )
     except KeyError as error:
         raise DatabaseError(f"В ответе базы нет поля напоминания: {error}.") from error
@@ -240,17 +258,104 @@ async def mark_sent(
     await ask(lambda: db.rpc(MARK_REMINDERS_SENT_FUNCTION, params).execute().data)
 
 
-async def mark_task_done(db: Client, *, owner_telegram_id: int, task_id: str) -> Task | None:
-    """Закрыть задачу и снять её неотправленные напоминания одной транзакцией.
-
-    `None` — задачи нет или она чужая: база сверяет владельца сама, поэтому
-    подставленный в callback чужой `task_id` не закрывает ничего (§6.3).
-    """
-    params = {"owner_telegram_id": owner_telegram_id, "task_id": task_id}
-    data = single_row(await ask(lambda: db.rpc(MARK_TASK_DONE_FUNCTION, params).execute().data))
-    if data is None or (isinstance(data, Mapping) and data.get("id") is None):
+def _task_or_none(data: Any) -> TaskDetails | None:
+    """Строка задачи из функции базы; пустая составная строка — задачи нет."""
+    row = single_row(data)
+    if row is None or (isinstance(row, Mapping) and row.get("id") is None):
         return None
-    return task_from_row(data)
+    return task_details_from_row(row)
+
+
+async def mark_task_done(
+    db: Client, *, owner_telegram_id: int, task_id: str, occurrence: int | None = None
+) -> TaskDetails | None:
+    """«Сделано» под напоминанием: разовую закрыть, повторяющуюся перевести (§6.3, §13.3).
+
+    Разовая закрывается, её неотправленные напоминания снимаются — одной
+    транзакцией. Повторяющаяся переходит на следующий раз с планом нового
+    раза; `occurrence` — раз из кнопки в секундах Unix: задача стоит на
+    другом — база отдаёт её как есть, и второе нажатие через раз не
+    перескакивает. Без раза (кнопка до повторов) переходит текущий раз.
+
+    Возвращает задачу, какой её оставила база; `None` — задачи нет или она
+    чужая: база сверяет владельца сама, поэтому подставленный в callback
+    чужой `task_id` не трогает ничего.
+    """
+    params: dict[str, Any] = {"owner_telegram_id": owner_telegram_id, "task_id": task_id}
+    if occurrence is not None:
+        params["occurrence"] = occurrence
+    return _task_or_none(await ask(lambda: db.rpc(MARK_TASK_DONE_FUNCTION, params).execute().data))
+
+
+async def repeat_next(
+    db: Client,
+    *,
+    repeat: Mapping[str, Any],
+    occurrence_at: datetime,
+    after: datetime,
+    timezone: str,
+) -> datetime:
+    """Следующий раз серии строго позже `after` — у базы (§13.2).
+
+    Правило одно на бота и базу: бот зовёт его, чтобы назвать следующий раз
+    в ответе «Отметил» и «Пропускаю» до записи (§13.3). Данных функция не
+    читает, владельца не знает. Пусто — правило не посчиталось: отказ.
+    """
+    params = {
+        "repeat": dict(repeat),
+        "occurrence_at": occurrence_at.isoformat(),
+        "after": after.isoformat(),
+        "timezone": timezone,
+    }
+    data = await ask(lambda: db.rpc(REPEAT_NEXT_FUNCTION, params).execute().data)
+    if data is None:
+        raise DatabaseError("База не посчитала следующий раз.")
+    return moment(data, "repeat_next")
+
+
+async def return_occurrence(
+    db: Client,
+    *,
+    owner_telegram_id: int,
+    task_id: str,
+    back_to: int,
+    moved_from: int,
+    schedule: Sequence[Planned],
+) -> TaskDetails | None:
+    """«Вернуть» под «Отметил» и «Пропускаю»: задачу — на раз `back_to` (§13.3).
+
+    Разы — секунды Unix из кнопки. База возвращает задачу, только если она
+    активна, повторяется и стоит на разе `moved_from`; иначе отдаёт её как
+    есть — по разу в ответе видно, вернула она или задача ушла дальше.
+    `schedule` — план раза `back_to` на момент нажатия. `None` — задачи нет
+    или она чужая.
+    """
+    params = {
+        "owner_telegram_id": owner_telegram_id,
+        "task_id": task_id,
+        "back_to": back_to,
+        "moved_from": moved_from,
+        "schedule": [item.as_row() for item in schedule],
+    }
+    return _task_or_none(
+        await ask(lambda: db.rpc(RETURN_OCCURRENCE_FUNCTION, params).execute().data)
+    )
+
+
+async def roll_repeats(db: Client, *, owner_telegram_id: int, now: datetime) -> int:
+    """Перевести пропущенные разы повторяющихся задач владельца (§13.4).
+
+    Задача, чей раз прошёл и чей следующий раз уже начался, переходит на
+    последний наступивший раз с обеими ступенями напоминаний. «Сейчас» —
+    время тика, как у `due_reminders`. Возвращает, сколько задач перешло.
+    """
+    params = {"owner_telegram_id": owner_telegram_id, "now": now.isoformat()}
+    rows = await ask(lambda: db.rpc(ROLL_REPEATS_FUNCTION, params).execute().data)
+    if rows is None:
+        return 0
+    if not isinstance(rows, list):
+        raise DatabaseError("База вернула не список перекатанных задач.")
+    return len(rows)
 
 
 async def reopen_task(
@@ -272,7 +377,4 @@ async def reopen_task(
         "task_id": task_id,
         "schedule": [item.as_row() for item in schedule],
     }
-    data = single_row(await ask(lambda: db.rpc(REOPEN_TASK_FUNCTION, params).execute().data))
-    if data is None or (isinstance(data, Mapping) and data.get("id") is None):
-        return None
-    return task_details_from_row(data)
+    return _task_or_none(await ask(lambda: db.rpc(REOPEN_TASK_FUNCTION, params).execute().data))

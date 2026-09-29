@@ -95,6 +95,22 @@ DETAILS = TaskDetails(
     people=("Рената",),
     created_at=datetime(2026, 9, 28, 10, 0, tzinfo=TZ),
 )
+# «Каждый понедельник» — правило, как его отдаёт база (§13.2).
+WEEKLY: dict[str, Any] = {
+    "every": "week",
+    "interval": 1,
+    "weekdays": [1],
+    "month_day": None,
+    "month": None,
+    "time": None,
+}
+REPEAT_ROW = {
+    **DETAIL_ROW,
+    "due_at": "2026-10-12T18:00:00+05:00",
+    "due_precision": "day",
+    "repeat": WEEKLY,
+    "occurrence_at": "2026-10-12T18:00:00+05:00",
+}
 EDIT = {
     "task_id": TASK_ID,
     "action": "change",
@@ -489,6 +505,25 @@ async def test_due_reminders_asks_about_the_owner_and_the_moment() -> None:
     assert due[0].title == "купить лампочку"
 
 
+async def test_due_reminder_carries_the_rule_and_the_occurrence() -> None:
+    """Раз уходит в кнопку «Сделано» (§13.3); у разовой оба поля пусты."""
+    fake = FakeClient(
+        data=[
+            {**REMINDER_ROW, "repeat": WEEKLY, "occurrence_at": "2026-09-25T18:00:00+05:00"},
+            {**REMINDER_ROW, "id": "c28d", "repeat": None, "occurrence_at": None},
+        ]
+    )
+
+    due = await db_reminders.due_reminders(
+        as_client(fake), owner_telegram_id=OWNER_ID, now=datetime.now(TZ)
+    )
+
+    assert due[0].repeat == WEEKLY
+    assert due[0].occurrence_at == datetime(2026, 9, 25, 18, 0, tzinfo=TZ)
+    assert due[1].repeat is None
+    assert due[1].occurrence_at is None
+
+
 async def test_due_reminders_without_rows_is_an_empty_tick() -> None:
     fake = FakeClient(data=None)
 
@@ -528,18 +563,40 @@ async def test_mark_sent_passes_ids_and_the_telegram_message() -> None:
 
 
 async def test_mark_task_done_returns_the_closed_task() -> None:
-    fake = FakeClient(data={**ROW, "status": "done"})
+    """Кнопка без раза (§6.3): раз в базу не уходит — старый вызов работает."""
+    fake = FakeClient(data={**DETAIL_ROW, "status": "done"})
 
     task = await db_reminders.mark_task_done(
-        as_client(fake), owner_telegram_id=OWNER_ID, task_id="0e2f"
+        as_client(fake), owner_telegram_id=OWNER_ID, task_id=TASK_ID
     )
 
     assert fake.calls[0] == (
         "rpc",
         "mark_task_done",
-        {"owner_telegram_id": OWNER_ID, "task_id": "0e2f"},
+        {"owner_telegram_id": OWNER_ID, "task_id": TASK_ID},
     )
-    assert task == Task(id="0e2f", title="купить лампочку", status="done")
+    assert task is not None
+    assert task.status == "done"
+    assert task.repeat is None
+
+
+async def test_mark_task_done_sends_the_occurrence_and_reads_the_next_one() -> None:
+    """Кнопка с разом (§13.3): раз — секунды Unix; ответ — задача на следующем разе."""
+    fake = FakeClient(data=[REPEAT_ROW])
+
+    task = await db_reminders.mark_task_done(
+        as_client(fake), owner_telegram_id=OWNER_ID, task_id=TASK_ID, occurrence=1790002800
+    )
+
+    assert fake.calls[0] == (
+        "rpc",
+        "mark_task_done",
+        {"owner_telegram_id": OWNER_ID, "task_id": TASK_ID, "occurrence": 1790002800},
+    )
+    assert task is not None
+    assert task.status == "active"
+    assert task.repeat == WEEKLY
+    assert task.occurrence_at == datetime(2026, 10, 12, 18, 0, tzinfo=TZ)
 
 
 async def test_mark_task_done_returns_nothing_for_a_foreign_task() -> None:
@@ -569,6 +626,18 @@ async def test_moved_tasks_are_asked_for_this_owner() -> None:
     assert task.next_fire_at == datetime(2026, 10, 2, 9, 0, tzinfo=TZ)
 
 
+async def test_moved_task_carries_the_repeat() -> None:
+    """У повторяющейся задачи строка «Перенёс» называет повтор (§13.6)."""
+    fake = FakeClient(
+        data=[{**MOVED_ROW, "repeat": WEEKLY, "occurrence_at": "2026-10-05T13:00:00+00:00"}]
+    )
+
+    moved = await db_reminders.moved_tasks(as_client(fake), owner_telegram_id=OWNER_ID)
+
+    assert moved[0].repeat == WEEKLY
+    assert moved[0].occurrence_at == datetime(2026, 10, 5, 18, 0, tzinfo=TZ)
+
+
 async def test_moved_task_without_due_has_no_reminder() -> None:
     """Срок снят: ни срока, ни ближайшего напоминания — и это не отказ."""
     fake = FakeClient(
@@ -595,6 +664,118 @@ async def test_moved_row_without_the_mark_is_a_failure() -> None:
 
     with pytest.raises(DatabaseError):
         await db_reminders.moved_tasks(as_client(fake), owner_telegram_id=OWNER_ID)
+
+
+async def test_repeat_next_asks_the_database_and_reads_the_moment() -> None:
+    """Следующий раз считает база (§13.2): правило, раз, «после» и пояс уходят явно."""
+    fake = FakeClient(data="2026-10-12T13:00:00+00:00")
+    occurrence = datetime(2026, 10, 5, 18, 0, tzinfo=TZ)
+    after = datetime(2026, 10, 5, 20, 0, tzinfo=TZ)
+
+    found = await db_reminders.repeat_next(
+        as_client(fake),
+        repeat=WEEKLY,
+        occurrence_at=occurrence,
+        after=after,
+        timezone="Asia/Yekaterinburg",
+    )
+
+    assert fake.calls[0] == (
+        "rpc",
+        "repeat_next",
+        {
+            "repeat": WEEKLY,
+            "occurrence_at": occurrence.isoformat(),
+            "after": after.isoformat(),
+            "timezone": "Asia/Yekaterinburg",
+        },
+    )
+    assert found == datetime(2026, 10, 12, 18, 0, tzinfo=TZ)
+
+
+async def test_repeat_next_without_an_answer_is_a_failure() -> None:
+    """Пусто — правило не посчиталось: «Следующий раз» назвать нечем."""
+    fake = FakeClient(data=None)
+
+    with pytest.raises(DatabaseError):
+        await db_reminders.repeat_next(
+            as_client(fake),
+            repeat=WEEKLY,
+            occurrence_at=datetime.now(TZ),
+            after=datetime.now(TZ),
+            timezone="Asia/Yekaterinburg",
+        )
+
+
+async def test_return_occurrence_sends_both_moments_and_the_plan() -> None:
+    """«Вернуть» (§13.3): владелец явно, разы — секунды Unix, план — готовый."""
+    fake = FakeClient(data=REPEAT_ROW)
+    planned = [Planned(stage="due", fire_at=datetime(2026, 10, 12, 18, 0, tzinfo=TZ))]
+
+    task = await db_reminders.return_occurrence(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        task_id=TASK_ID,
+        back_to=1790002800,
+        moved_from=1790607600,
+        schedule=planned,
+    )
+
+    assert fake.calls[0] == (
+        "rpc",
+        "return_occurrence",
+        {
+            "owner_telegram_id": OWNER_ID,
+            "task_id": TASK_ID,
+            "back_to": 1790002800,
+            "moved_from": 1790607600,
+            "schedule": [item.as_row() for item in planned],
+        },
+    )
+    assert task is not None
+    assert task.occurrence_at == datetime(2026, 10, 12, 18, 0, tzinfo=TZ)
+
+
+async def test_return_occurrence_of_a_gone_task_is_none() -> None:
+    fake = FakeClient(data={"id": None})
+
+    assert (
+        await db_reminders.return_occurrence(
+            as_client(fake),
+            owner_telegram_id=OWNER_ID,
+            task_id=TASK_ID,
+            back_to=1,
+            moved_from=2,
+            schedule=[],
+        )
+        is None
+    )
+
+
+async def test_roll_repeats_asks_for_the_owner_and_counts_the_moved() -> None:
+    """Перекатывание (§13.4): владелец и «сейчас» — явно; ответ — сколько перешло."""
+    fake = FakeClient(data=[REPEAT_ROW, REPEAT_ROW])
+    now = datetime(2026, 10, 13, 0, 1, tzinfo=TZ)
+
+    rolled = await db_reminders.roll_repeats(as_client(fake), owner_telegram_id=OWNER_ID, now=now)
+
+    assert fake.calls[0] == (
+        "rpc",
+        "roll_repeats",
+        {"owner_telegram_id": OWNER_ID, "now": now.isoformat()},
+    )
+    assert rolled == 2
+
+
+async def test_roll_repeats_without_rows_moved_nothing() -> None:
+    fake = FakeClient(data=None)
+
+    assert (
+        await db_reminders.roll_repeats(
+            as_client(fake), owner_telegram_id=OWNER_ID, now=datetime.now(TZ)
+        )
+        == 0
+    )
 
 
 async def test_clear_due_moved_sends_the_seen_mark_back() -> None:
@@ -705,6 +886,18 @@ async def test_open_question_reads_the_due_of_the_task() -> None:
     assert found.due_precision == "day"
 
 
+async def test_open_question_reads_the_rule_of_the_task() -> None:
+    """«Понял: … Повтор: …» называет правило, которое у задачи уже есть (§13.7)."""
+    fake = FakeClient(data=[{**QUESTION_ROW, "repeat": WEEKLY}])
+
+    found = await db_tasks.open_question(
+        as_client(fake), owner_telegram_id=OWNER_ID, since=ASKED_AT
+    )
+
+    assert found is not None
+    assert found.repeat == WEEKLY
+
+
 async def test_no_open_question_is_none() -> None:
     fake = FakeClient(data=[])
 
@@ -746,6 +939,26 @@ async def test_open_tasks_are_asked_for_this_owner_in_prompt_order() -> None:
     orders = [call for call in fake.calls if call[0] == "order"]
     assert orders == [("order", "due_at", False, False), ("order", "created_at", True)]
     assert ("limit", 50) in fake.calls
+
+
+async def test_open_task_carries_the_rule_and_the_occurrence() -> None:
+    """Строка блока 5 называет повтор (§13.5) — правило приходит с задачей."""
+    fake = FakeClient(data=[REPEAT_ROW])
+
+    found = await db_tasks.list_open_tasks(as_client(fake), owner_telegram_id=OWNER_ID, limit=50)
+
+    assert "repeat" in fake.calls[1][1][0]
+    assert "occurrence_at" in fake.calls[1][1][0]
+    assert found[0].repeat == WEEKLY
+    assert found[0].occurrence_at == datetime(2026, 10, 12, 18, 0, tzinfo=TZ)
+
+
+async def test_open_task_with_a_broken_rule_is_a_failure() -> None:
+    """Правило строкой читать вслепую нельзя — отказ, а не разовая задача."""
+    fake = FakeClient(data=[{**DETAIL_ROW, "repeat": "каждый понедельник"}])
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.list_open_tasks(as_client(fake), owner_telegram_id=OWNER_ID, limit=50)
 
 
 async def test_open_task_without_due_has_none() -> None:

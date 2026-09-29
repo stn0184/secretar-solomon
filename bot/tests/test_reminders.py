@@ -21,7 +21,7 @@ from supabase import Client
 from solomon import texts
 from solomon.db.reminders import DueReminder, MovedTask, Planned
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import Task
+from solomon.db.tasks import TaskDetails
 from solomon.handlers import done_keyboard
 from solomon.runner import build_dispatcher
 from solomon.runner import build_reminders as build_reminders_service
@@ -45,6 +45,7 @@ from tests.conftest import (
     FakeUnderstandings,
     RecordingSession,
     make_callback_update,
+    make_details,
     make_settings,
     make_understanding,
 )
@@ -423,12 +424,12 @@ class FakeAnnouncer:
 class FakeCloser:
     """`mark_task_done` без базы: что закрыли и что база на это ответила."""
 
-    def __init__(self, task: Task | None = None, broken: bool = False) -> None:
+    def __init__(self, task: TaskDetails | None = None, broken: bool = False) -> None:
         self.task = task
         self.broken = broken
         self.calls: list[tuple[int, str]] = []
 
-    async def __call__(self, *, owner_telegram_id: int, task_id: str) -> Task | None:
+    async def __call__(self, *, owner_telegram_id: int, task_id: str) -> TaskDetails | None:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
         self.calls.append((owner_telegram_id, task_id))
@@ -582,7 +583,7 @@ async def test_done_button_closes_the_task_and_marks_the_message(
     bot: Bot, session: RecordingSession
 ) -> None:
     """Нажата кнопка: задача закрыта, кнопка убрана, внизу «✓ Сделано» (§6.3)."""
-    closer = FakeCloser(Task(id="0e2f", title="отправить расчёт", status="done"))
+    closer = FakeCloser(make_details(id="0e2f", title="отправить расчёт", status="done"))
     dispatcher = build_dispatcher_with(closer)
 
     await dispatcher.feed_update(bot, make_callback_update("done:0e2f"))
@@ -596,7 +597,7 @@ async def test_done_button_closes_the_task_and_marks_the_message(
 
 async def test_second_press_changes_nothing(bot: Bot, session: RecordingSession) -> None:
     """Повтор безвреден: задача уже закрыта, отметка уже стоит (§6.3)."""
-    closer = FakeCloser(Task(id="0e2f", title="отправить расчёт", status="done"))
+    closer = FakeCloser(make_details(id="0e2f", title="отправить расчёт", status="done"))
     dispatcher = build_dispatcher_with(closer)
     marked = "Напоминаю: отправить расчёт\n\n✓ Сделано"
 
@@ -633,7 +634,7 @@ async def test_callback_from_a_stranger_never_reaches_the_handler(
     bot: Bot, session: RecordingSession
 ) -> None:
     """Калитка владельца режет чужой callback до обработчика (§6.3, инвариант 2)."""
-    closer = FakeCloser(Task(id="0e2f", title="отправить расчёт", status="done"))
+    closer = FakeCloser(make_details(id="0e2f", title="отправить расчёт", status="done"))
     dispatcher = build_dispatcher_with(closer)
 
     await dispatcher.feed_update(bot, make_callback_update("done:0e2f", from_id=STRANGER_ID))

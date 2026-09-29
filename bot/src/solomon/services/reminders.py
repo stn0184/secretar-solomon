@@ -28,7 +28,7 @@ from solomon.config import Settings
 from solomon.db import reminders as db_reminders
 from solomon.db.reminders import DueReminder, MovedTask, Planned
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import Task
+from solomon.db.tasks import TaskDetails
 from solomon.services.understanding import Clock
 
 logger = logging.getLogger(__name__)
@@ -153,7 +153,7 @@ class Announcer(Protocol):
 class TaskCloser(Protocol):
     """Закрытие задачи по кнопке вместе с её неотправленными напоминаниями."""
 
-    async def __call__(self, *, owner_telegram_id: int, task_id: str) -> Task | None: ...
+    async def __call__(self, *, owner_telegram_id: int, task_id: str) -> TaskDetails | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +213,7 @@ class ReminderService:
                 telegram_message_id=telegram_message_id,
             )
 
-        async def close_task(*, owner_telegram_id: int, task_id: str) -> Task | None:
+        async def close_task(*, owner_telegram_id: int, task_id: str) -> TaskDetails | None:
             return await db_reminders.mark_task_done(
                 db, owner_telegram_id=owner_telegram_id, task_id=task_id
             )
