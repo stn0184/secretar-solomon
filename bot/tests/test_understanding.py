@@ -37,9 +37,11 @@ from solomon.services.understanding import (
     ModelAnswer,
     ModelCall,
     NotUnderstood,
+    Repeat,
     TaskEdit,
     Understanding,
     UnderstandingService,
+    Verdict,
     anthropic_call,
     build_system_prompt,
     build_user_message,
@@ -704,18 +706,26 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 # --------------------------------------------------------------- живой прогон
 
 # Десять русских сообщений с ожидаемым разбором, три примера памяти, три
-# примера диалога и восемь примеров правки словом: этим владелец смотрит, как
-# помощник понимает. Прогон ходит в модель по-настоящему, поэтому в воротах
-# не участвует — `pyproject.toml`, маркер `live`.
+# примера диалога, девять примеров повтора и тринадцать примеров правки словом
+# (пять — по повторяющейся задаче): этим владелец смотрит, как помощник
+# понимает. Прогон ходит в модель по-настоящему, поэтому в воротах не
+# участвует — `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 24
-EDIT_COUNT = 8
+FIXTURE_COUNT = 38
+EDIT_COUNT = 13
+REPEAT_COUNT = 9
+# Поля правила в ожидании примера: час серии ставит база, модель его не шлёт.
+RULE_FIELDS = {"every", "interval", "weekdays", "month_day", "month"}
 # «Сейчас» для живого прогона: среда, 10:30. Даты в примерах посчитаны от
 # него, иначе «в пятницу» значило бы разное в разные дни.
 LIVE_MOMENT = (2026, 9, 16, 10, 30)
+# Сколько примеров разбирается разом: все тридцать восемь сразу упираются в
+# лимит запросов, а ключ — тот же, что у работающего бота.
+LIVE_CONCURRENCY = 4
 # Из десяти обычных примеров двум разрешено разойтись: модель — не таблица.
 # Примеры памяти (поле `facts`) сходятся строго — по виду и по статусу,
-# примеры диалога (поле `dialog`) — по вопросу и признаку ответа.
+# примеры диалога (поле `dialog`) — по вопросу и признаку ответа, примеры
+# повтора (поле `repeat`) — по виду, правилу, пометке и вопросу.
 MIN_MATCHING_KINDS = 8
 MEMORY_EXPECTATIONS = ("fact", "guess", "none")
 # Диалог (`techspec/10-dialog.md`): бот спрашивает, сообщение отвечает на
@@ -790,6 +800,7 @@ def tasks_for(case: dict[str, Any]) -> list[TaskDetails] | None:
                 due_precision=raw.get("due_precision"),
                 priority=raw.get("priority", "normal"),
                 people=tuple(raw.get("people", ())),
+                repeat=raw.get("repeat"),
             )
         )
     return tasks
@@ -812,6 +823,43 @@ def model_edit(**fields: Any) -> dict[str, Any]:
         "people": None,
     }
     return {**base, **fields}
+
+
+def rule_of(repeat: Repeat | None) -> dict[str, Any] | None:
+    """Правило ответа модели в виде ожидания фикстуры: дни недели по порядку."""
+    if repeat is None:
+        return None
+    return {
+        "every": repeat.every,
+        "interval": repeat.interval,
+        "weekdays": sorted(repeat.weekdays),
+        "month_day": repeat.month_day,
+        "month": repeat.month,
+    }
+
+
+def repeat_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
+    """Чем пример повтора разошёлся с ожиданием; `None` — сошёлся.
+
+    Сходятся вид и правило целиком (`null` — правила быть не должно);
+    `review` — пометка «Перепроверьте» стоит; `question` — вопрос задан,
+    а первый раз не угадан.
+    """
+    text = case["text"]
+    if got.kind != case["kind"]:
+        return f"{text}: ждали {case['kind']}, получили {got.kind}"
+    expected = case["repeat"]
+    actual = rule_of(got.repeat)
+    if actual != expected:
+        return f"{text}: ждали повтор {expected}, получили {actual}"
+    if case.get("review") and not got.needs_review:
+        return f"{text}: ждали пометку, needs_review = false"
+    if case.get("question"):
+        if not got.question:
+            return f"{text}: ждали вопрос, question пуст"
+        if got.due_at is not None:
+            return f"{text}: первого раза не посчитать, а срок угадан: {got.due_at}"
+    return None
 
 
 def dialog_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
@@ -843,7 +891,8 @@ def edit_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) 
     Ожидание `null` — правки быть не должно (пересланное, обычное поручение).
     Иначе сходятся действие и номер задачи; `candidates` — как множество;
     `due_date` — день нового срока в поясе владельца; `question` — вопрос
-    задан, а новый срок не угадан.
+    задан, а новый срок не угадан. Правило (`repeat`) сверяется целиком, а
+    снятие — флагом `repeat_removed`: не названы — модель их не трогает.
     """
     expected = case["edit"]
     text = case["text"]
@@ -864,6 +913,12 @@ def edit_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) 
         actual = edit.due_at.astimezone(timezone).date().isoformat() if edit.due_at else None
         if actual != due_date:
             return f"{text}: ждали срок {due_date}, получили {actual}"
+    rule = rule_of(edit.repeat)
+    if rule != expected.get("repeat"):
+        return f"{text}: ждали правило {expected.get('repeat')}, получили {rule}"
+    removed = bool(expected.get("repeat_removed"))
+    if edit.repeat_removed != removed:
+        return f"{text}: ждали repeat_removed = {removed}, получили {edit.repeat_removed}"
     if expected.get("question"):
         if not got.question:
             return f"{text}: ждали вопрос, question пуст"
@@ -887,7 +942,7 @@ def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     return None if status == expected else f"{case['text']}: ждали {expected}, получили {status}"
 
 
-def test_fixtures_are_twenty_four_examples_with_expected_fields() -> None:
+def test_fixtures_have_the_expected_count_and_fields() -> None:
     fixtures = load_fixtures()
 
     assert len(fixtures) == FIXTURE_COUNT
@@ -913,9 +968,9 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
     assert len(edits) == EDIT_COUNT
     assert all(case.get("open_tasks") for case in edits)
     assert not any("open_tasks" in case for case in fixtures if "edit" not in case)
-    assert not any({"facts", "dialog"} & set(case) for case in edits)
+    assert not any({"facts", "dialog", "repeat"} & set(case) for case in edits)
     expected = [case["edit"] for case in edits if case["edit"] is not None]
-    assert {edit["action"] for edit in expected} == {"change", "done", "cancel"}
+    assert {edit["action"] for edit in expected} == {"change", "done", "cancel", "skip"}
     assert any(edit.get("due_date") and edit["task"] for edit in expected)
     assert any(len(edit.get("candidates", [])) > 1 for edit in expected)
     assert any(edit.get("candidates") == [] for edit in expected)
@@ -928,6 +983,43 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
         tasks = tasks_for(case)
         assert (tasks is None) == ("forwarded_from" in case), case["text"]
         assert tasks is None or all(task.status == "active" for task in tasks)
+
+
+def test_repeat_fixtures_cover_the_cases_of_the_stage() -> None:
+    """Повтор (`techspec/13-repeat.md`): недели, будни, число и последний день
+    месяца, год; вопрос без числа; пометки неподдержанного и конца серии. По
+    повторяющейся задаче — «сделал», пропуск, новое правило, снятие правила и
+    «отменилась» как пропуск."""
+    fixtures = load_fixtures()
+    plain = [case for case in fixtures if "repeat" in case]
+
+    assert len(plain) == REPEAT_COUNT
+    assert not any({"facts", "dialog", "edit", "open_tasks"} & set(case) for case in plain)
+    rules = [case["repeat"] for case in plain if case["repeat"] is not None]
+    assert all(set(rule) == RULE_FIELDS for rule in rules)
+    assert all(rule["weekdays"] == sorted(rule["weekdays"]) for rule in rules)
+    assert {rule["every"] for rule in rules} == {"week", "month", "year"}
+    assert [1, 2, 3, 4, 5] in [rule["weekdays"] for rule in rules]
+    assert -1 in [rule["month_day"] for rule in rules]
+    asked = [case for case in plain if case.get("question")]
+    assert [case["repeat"] for case in asked] == [None]
+    unsupported = [case for case in plain if case.get("review") and case["repeat"] is None]
+    assert len(unsupported) == 2
+    assert any(case.get("review") and case["repeat"] is not None for case in plain)
+
+    repeating = [
+        case
+        for case in fixtures
+        if "edit" in case and any(task.get("repeat") for task in case["open_tasks"])
+    ]
+    expected = [case["edit"] for case in repeating]
+    assert [edit["action"] for edit in expected].count("skip") == 2
+    assert {edit["action"] for edit in expected} == {"done", "skip", "change"}
+    assert any(edit.get("repeat") and edit.get("due_date") for edit in expected)
+    assert any(edit.get("repeat_removed") for edit in expected)
+    for case in repeating:
+        tasks = tasks_for(case)
+        assert tasks is not None and any(task.repeat for task in tasks), case["text"]
 
 
 def test_edit_mismatch_checks_action_task_and_due() -> None:
@@ -1011,6 +1103,88 @@ def test_memory_mismatch_checks_kind_and_status() -> None:
     assert memory_mismatch({**case, "facts": "none"}, remembered) is not None
 
 
+def test_repeat_mismatch_checks_rule_review_and_question() -> None:
+    """Повтор новой задачи: вид, правило целиком, пометка и вопрос (§13.1)."""
+    monday = {
+        "text": "каждый понедельник отправлять отчёт",
+        "kind": "task",
+        "repeat": {
+            "every": "week",
+            "interval": 1,
+            "weekdays": [1],
+            "month_day": None,
+            "month": None,
+        },
+    }
+    rule = {"every": "week", "interval": 1, "weekdays": [1], "month_day": None, "month": None}
+
+    assert repeat_mismatch(monday, make_understanding(repeat=rule)) is None
+    assert repeat_mismatch(monday, make_understanding()) is not None
+    assert repeat_mismatch(monday, make_understanding(repeat={**rule, "weekdays": [2]})) is not None
+    assert repeat_mismatch(monday, make_understanding(repeat={**rule, "interval": 2})) is not None
+    assert repeat_mismatch(monday, make_understanding(kind="idea", repeat=rule)) is not None
+
+    weekdays = {**monday, "repeat": {**rule, "weekdays": [1, 2, 3, 4, 5]}}
+    shuffled = make_understanding(repeat={**rule, "weekdays": [5, 4, 3, 2, 1]})
+    assert repeat_mismatch(weekdays, shuffled) is None
+
+    twice = {"text": "пить таблетки в 9 и в 18", "kind": "task", "repeat": None, "review": True}
+    flagged = make_understanding(needs_review=True, review_reason="Так не повторяю")
+    assert repeat_mismatch(twice, flagged) is None
+    assert repeat_mismatch(twice, make_understanding()) is not None
+    assert repeat_mismatch(twice, make_understanding(needs_review=True, repeat=rule)) is not None
+
+    monthly = {"text": "каждый месяц платить", "kind": "task", "repeat": None, "question": True}
+    asked = make_understanding(question="Какого числа каждый месяц?")
+    tomorrow = datetime(2026, 9, 17, 18, 0, tzinfo=TZ)
+    assert repeat_mismatch(monthly, asked) is None
+    assert repeat_mismatch(monthly, make_understanding()) is not None
+    guessed = make_understanding(question="Какого числа?", due_at=tomorrow, due_precision="day")
+    assert repeat_mismatch(monthly, guessed) is not None
+
+
+def test_edit_mismatch_checks_the_rule_and_its_removal() -> None:
+    """Правка повторяющейся: новое правило сверяется целиком, снятие — флагом,
+    а там, где правило не меняли, модель его трогать не должна (§13.5)."""
+    rule = {"every": "week", "interval": 1, "weekdays": [2], "month_day": None, "month": None}
+    tuesday = datetime(2026, 9, 22, 10, 0, tzinfo=TZ)
+    change = {
+        "text": "планёрку теперь по вторникам",
+        "edit": {"action": "change", "task": 1, "repeat": rule, "due_date": "2026-09-22"},
+    }
+    changed = model_edit(task=1, repeat=rule, due_at=tuesday, due_precision="time")
+
+    assert edit_mismatch(change, make_understanding(edit=changed), TZ) is None
+    unchanged = make_understanding(edit=model_edit(task=1, due_at=tuesday))
+    assert edit_mismatch(change, unchanged, TZ) is not None
+    other = model_edit(task=1, repeat={**rule, "weekdays": [3]}, due_at=tuesday)
+    assert edit_mismatch(change, make_understanding(edit=other), TZ) is not None
+
+    stop = {
+        "text": "больше не повторяй",
+        "edit": {"action": "change", "task": 1, "repeat_removed": True},
+    }
+    removed = make_understanding(edit=model_edit(task=1, repeat_removed=True))
+    assert edit_mismatch(stop, removed, TZ) is None
+    assert edit_mismatch(stop, make_understanding(edit=model_edit(task=1)), TZ) is not None
+
+    done = {"text": "сделал", "edit": {"action": "done", "task": 1}}
+    assert (
+        edit_mismatch(done, make_understanding(edit=model_edit(action="done", task=1)), TZ) is None
+    )
+    touched = model_edit(action="done", task=1, repeat_removed=True)
+    assert edit_mismatch(done, make_understanding(edit=touched), TZ) is not None
+    ruled = model_edit(action="done", task=1, repeat=rule)
+    assert edit_mismatch(done, make_understanding(edit=ruled), TZ) is not None
+
+    skip = {"text": "планёрка отменилась", "edit": {"action": "skip", "task": 1}}
+    assert (
+        edit_mismatch(skip, make_understanding(edit=model_edit(action="skip", task=1)), TZ) is None
+    )
+    cancelled = make_understanding(edit=model_edit(action="cancel", task=1))
+    assert edit_mismatch(skip, cancelled, TZ) is not None
+
+
 def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Нет ключа — живой прогон пропускается, а не падает."""
 
@@ -1027,29 +1201,30 @@ def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -
 async def test_live_model_understands_the_fixtures() -> None:
     """Вживую: kind сходится хотя бы у восьми обычных примеров, даты — у всех,
     примеры памяти — строго по виду и статусу записей, диалога — по вопросу
-    и признаку ответа, правки — по действию, задаче и сроку. Блок открытых
-    задач — как у бота: пустой список, если пример своего не дал, и никакого
-    у пересланного; правки там, где её не ждали, быть не должно."""
+    и признаку ответа, повтора — по виду, правилу, пометке и вопросу, правки —
+    по действию, задаче, сроку и правилу. Блок открытых задач — как у бота:
+    пустой список, если пример своего не дал, и никакого у пересланного;
+    правки там, где её не ждали, быть не должно."""
     settings = live_settings()
     now = datetime(*LIVE_MOMENT, tzinfo=settings.owner_timezone)
     client = create_anthropic_client(settings)
     call = anthropic_call(client)
     fixtures = load_fixtures()
+    gate = asyncio.Semaphore(LIVE_CONCURRENCY)
+
+    async def analyze(case: dict[str, Any]) -> Verdict:
+        async with gate:
+            return await service_for(settings, call, now, case).analyze(
+                case["text"],
+                forwarded_from=case.get("forwarded_from"),
+                open_question=asked_for(case),
+                tasks=tasks_for(case),
+                last_task=case.get("last_task"),
+                swipe=case.get("swipe"),
+            )
 
     try:
-        verdicts = await asyncio.gather(
-            *(
-                service_for(settings, call, now, case).analyze(
-                    case["text"],
-                    forwarded_from=case.get("forwarded_from"),
-                    open_question=asked_for(case),
-                    tasks=tasks_for(case),
-                    last_task=case.get("last_task"),
-                    swipe=case.get("swipe"),
-                )
-                for case in fixtures
-            )
-        )
+        verdicts = await asyncio.gather(*(analyze(case) for case in fixtures))
     finally:
         await client.close()
 
@@ -1057,6 +1232,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     dates: list[str] = []
     memory: list[str] = []
     dialog: list[str] = []
+    repeats: list[str] = []
     edits: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
@@ -1075,6 +1251,10 @@ async def test_live_model_understands_the_fixtures() -> None:
             mismatch = dialog_mismatch(case, got)
             if mismatch:
                 dialog.append(mismatch)
+        elif "repeat" in case:
+            mismatch = repeat_mismatch(case, got)
+            if mismatch:
+                repeats.append(mismatch)
         else:
             general += 1
             if got.kind != case["kind"]:
@@ -1090,6 +1270,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not dates, "Даты разошлись:\n" + "\n".join(dates)
     assert not memory, "Память разошлась:\n" + "\n".join(memory)
     assert not dialog, "Диалог разошёлся:\n" + "\n".join(dialog)
+    assert not repeats, "Повтор разошёлся:\n" + "\n".join(repeats)
     assert not edits, "Правка разошлась:\n" + "\n".join(edits)
     matched = general - len(kinds)
     assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)
