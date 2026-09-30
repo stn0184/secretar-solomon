@@ -36,11 +36,12 @@
 | `owner_telegram_id` | bigint | владелец (§3.1) |
 | `chat_id` | bigint | чат Telegram, откуда пришло |
 | `telegram_message_id` | bigint | id сообщения в этом чате |
-| `kind` | text, `check in ('text', 'voice', 'video_note')` | вид сообщения (§9.1); фото добавит своё значение |
-| `text` | text, `default ''` | текст сообщения как есть; у голоса — расшифровка, пустая до неё (§9.3) |
-| `telegram_file_id` | text, nullable | у голоса и кружка — файл в Telegram, по нему можно скачать снова |
+| `kind` | text, `check in ('text', 'voice', 'video_note', 'photo')` | вид сообщения: голос — §9.1, снимок (фото или картинка файлом) — §14.1 |
+| `text` | text, `default ''` | текст сообщения как есть; у голоса — расшифровка, пустая до неё (§9.3); у снимка — подпись, без подписи пустая строка (§14.1) |
+| `telegram_file_id` | text, nullable | у голоса, кружка и снимка — файл в Telegram (у фото — выбранный размер), по нему можно скачать снова; сам снимок не хранится (§14.6) |
 | `duration_seconds` | int, nullable | длительность звука — мера стоимости распознавания |
 | `transcript_confidence` | numeric, nullable | уверенность распознавания 0–1 (§9.4) |
+| `photo_text` | text, nullable | что модель прочитала со снимка, до 500 знаков (§14.3); у текста и голоса пусто |
 | `received_at` | timestamptz, `default now()` | когда бот его получил |
 | `analysis` | jsonb, nullable | что модель поняла: её ответ по схеме §5.3 целиком |
 | `ai_model` | text, nullable | какая модель разбирала |
@@ -150,7 +151,8 @@ record_understanding(message_id uuid, owner_telegram_id bigint,
                      transcript text default null,
                      transcript_confidence numeric default null,
                      amend jsonb default null,
-                     edit jsonb default null)
+                     edit jsonb default null,
+                     photo_text text default null)
   returns tasks
 ```
 
@@ -288,6 +290,15 @@ pick_task(owner_telegram_id bigint, message_id uuid, edit jsonb,
 не `null` — становится `text` сообщения (§9.3); `null` — текст не трогается.
 Прежние сигнатуры обеих функций без аргументов голоса удалены той же
 миграцией: две перегрузки PostgREST различать нечем.
+
+`photo_text` (этап 012, §14.5) — что модель прочитала со снимка: не
+`null` — пишется в `messages.photo_text` тем же `update`, что разбор и
+ответ; `null` — колонка не трогается, поэтому вызов текста и голоса без
+этого аргумента работает как раньше, а повтор без него прочитанного не
+стирает. Снимок, который не скачался или не разобран без подписи
+(§14.2), пишется как «не расслышал»: ни разбора, ни задачи — вопрос
+остаётся открытым. Миграция этапа 012 — `20260930100000_photo.sql`;
+четырнадцатиаргументная версия удалена ею же, права прежние.
 
 ### 3.5 `reminders` — напоминания
 

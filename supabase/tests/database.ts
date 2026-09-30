@@ -151,3 +151,31 @@ export async function asRole<T>(
     await db.query("select set_config('request.jwt.claims', '', false)");
   }
 }
+
+/**
+ * Строка `messages`, как её видят тесты: вид, текст, файл, разбор и то,
+ * что модель прочитала со снимка (`photo_text`, §14.5).
+ */
+export interface MessageRow {
+  id: string;
+  kind: string;
+  text: string;
+  telegram_file_id: string | null;
+  duration_seconds: number | null;
+  photo_text: string | null;
+  reply: string | null;
+  analysis: unknown;
+  task_id: string | null;
+}
+
+/** Сообщение по `id` — ровно одна строка, иначе тест падает. */
+export async function messageRow(db: PGlite, id: string): Promise<MessageRow> {
+  const { rows } = await db.query<MessageRow>(
+    `select id, kind, text, telegram_file_id, duration_seconds, photo_text, reply,
+            analysis, task_id
+       from public.messages where id = $1`,
+    [id],
+  );
+  assert.equal(rows.length, 1, `сообщение ${id}: ждали одну строку, пришло ${rows.length}`);
+  return rows[0]!;
+}

@@ -108,7 +108,7 @@
 
 Этап L — сначала `plan.md` в папке этапа.
 
-- [ ] Миграция: `messages_kind_check` с `photo`; колонка
+- [x] Миграция: `messages_kind_check` с `photo`; колонка
       `messages.photo_text`; `record_understanding` с необязательным
       `photo_text` — пишется в строку сообщения той же транзакцией;
       прежняя сигнатура удаляется (PostgREST не различает перегрузки),
