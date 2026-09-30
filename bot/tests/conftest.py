@@ -58,8 +58,12 @@ from solomon.services.transcription import Transcript, TranscriptionResult
 from solomon.services.understanding import (
     Analysis,
     AskedQuestion,
+    ImageType,
+    NotUnderstood,
     OpenTask,
+    PhotoAnalysis,
     PhotoUnderstanding,
+    PhotoVerdict,
     SpeechQuality,
     Understanding,
     Verdict,
@@ -77,6 +81,9 @@ _DEFAULT_TASK = Task(id="0e2f", title="купить лампочку", status="a
 # Что «слышит» подменённый транскрайбер, если тест не сказал иного.
 SPOKEN = "в пятницу отправить расчёт клиенту"
 AUDIO = b"OggS\x00fake-opus"
+# Что «скачивается» вместо снимка: начало JPEG, дальше — не картинка. Модель
+# в тестах подменена, и разбирать байты некому.
+IMAGE = b"\xff\xd8\xff\xe0fake-jpeg"
 
 
 class RecordingSession(BaseSession):
@@ -239,6 +246,7 @@ class FakeUnderstandings:
         transcript_confidence: float | None = None,
         amend: Mapping[str, Any] | None = None,
         edit: Mapping[str, Any] | None = None,
+        photo_text: str | None = None,
     ) -> Task | None:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -258,6 +266,7 @@ class FakeUnderstandings:
                 "transcript_confidence": transcript_confidence,
                 "amend": amend,
                 "edit": edit,
+                "photo_text": photo_text,
             }
         )
         if message_id in self._with_task:
@@ -379,9 +388,16 @@ def make_photo_understanding(**fields: Any) -> PhotoUnderstanding:
 
 
 class FakeAnalyst:
-    """Вместо Claude — заранее решённый вердикт и список того, что спросили."""
+    """Вместо Claude — заранее решённый вердикт и список того, что спросили.
 
-    def __init__(self, verdict: Understanding | Verdict) -> None:
+    `photo` — вердикт по снимку (§14.3); без него снимок модель «не разобрала».
+    """
+
+    def __init__(
+        self,
+        verdict: Understanding | Verdict,
+        photo: PhotoUnderstanding | PhotoVerdict | None = None,
+    ) -> None:
         self.verdict: Verdict = (
             Analysis(
                 understanding=verdict,
@@ -400,6 +416,19 @@ class FakeAnalyst:
         self.tasks: list[list[OpenTask] | None] = []
         self.last_tasks: list[int | None] = []
         self.swipes: list[str | None] = []
+        self.photo_verdict: PhotoVerdict = (
+            PhotoAnalysis(
+                understanding=photo,
+                model="claude-opus-5",
+                input_tokens=1900,
+                output_tokens=310,
+            )
+            if isinstance(photo, PhotoUnderstanding)
+            else photo or NotUnderstood(reason="снимка тест не ждал")
+        )
+        # Снимки, с которыми звали модель: байты, вид, подпись и отправитель.
+        # Открытый вопрос снимка ложится в общий `questions`.
+        self.photos: list[tuple[bytes, ImageType, str, str | None]] = []
 
     async def analyze(
         self,
@@ -418,6 +447,19 @@ class FakeAnalyst:
         self.last_tasks.append(last_task)
         self.swipes.append(swipe)
         return self.verdict
+
+    async def analyze_photo(
+        self,
+        image: bytes,
+        *,
+        media_type: ImageType,
+        caption: str,
+        forwarded_from: str | None = None,
+        open_question: AskedQuestion | None = None,
+    ) -> PhotoVerdict:
+        self.photos.append((image, media_type, caption, forwarded_from))
+        self.questions.append(open_question)
+        return self.photo_verdict
 
 
 def make_details(**fields: Any) -> TaskDetails:
@@ -609,6 +651,11 @@ class FakeTranscriber:
 async def load_audio() -> bytes:
     """Скачивание из Telegram без сети: те же байты каждый раз."""
     return AUDIO
+
+
+async def load_image() -> bytes:
+    """Скачивание снимка без сети: те же байты каждый раз."""
+    return IMAGE
 
 
 def make_settings() -> Settings:

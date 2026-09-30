@@ -44,10 +44,11 @@ QUESTION_COLUMNS = (
     "open_question, question_asked_at, repeat"
 )
 
-# Вид сообщения (`techspec/03-schema.md` §3.2, §9.1): текст, голосовое,
-# видео-кружок. Голосовые виды — те, у которых есть файл и длительность.
+# Вид сообщения (`techspec/03-schema.md` §3.2, §9.1, §14.1): текст,
+# голосовое, видео-кружок, снимок. Голосовые виды — те, у которых есть файл и
+# длительность; у снимка файл есть, а длительности нет.
 SpeechKind = Literal["voice", "video_note"]
-MessageKind = Literal["text"] | SpeechKind
+MessageKind = Literal["text", "photo"] | SpeechKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +316,8 @@ async def record_message(
 
     У голоса и кружка `text` пуст до расшифровки, а `telegram_file_id` и
     `duration_seconds` заполнены (§9.3): по файлу звук можно скачать снова.
+    У снимка `text` — подпись (пустая, если её нет), файл есть, длительности
+    нет (§14.2).
     """
     params = {
         "owner_telegram_id": owner_telegram_id,
@@ -348,6 +351,7 @@ async def record_understanding(
     transcript_confidence: float | None = None,
     amend: Mapping[str, Any] | None = None,
     edit: Mapping[str, Any] | None = None,
+    photo_text: str | None = None,
 ) -> Task | None:
     """Шаг второй: разбор, ответ бота, задача, напоминания и память — одной транзакцией.
 
@@ -374,6 +378,11 @@ async def record_understanding(
     задача. Не активная, чужая или удалённая — отказ базы, и откатывается
     всё, включая разбор и память.
 
+    `photo_text` — что прочитано со снимка (`techspec/14-photo.md` §14.2):
+    ложится в строку сообщения той же транзакцией. В запрос он уходит, только
+    когда есть: вызов текста и голоса не меняется и работает на базе и до
+    миграции снимка.
+
     Открытые вопросы владельца база снимает сама (§3.4) — любой записью,
     кроме «не расслышал»: без разбора, задачи и поправки вопрос остаётся.
     """
@@ -393,6 +402,8 @@ async def record_understanding(
         "amend": amend,
         "edit": edit,
     }
+    if photo_text is not None:
+        params["photo_text"] = photo_text
     data = single_row(
         await ask(lambda: db.rpc(RECORD_UNDERSTANDING_FUNCTION, params).execute().data)
     )

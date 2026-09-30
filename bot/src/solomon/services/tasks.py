@@ -46,7 +46,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
@@ -93,7 +93,10 @@ from solomon.services.understanding import (
     Analysis,
     AskedQuestion,
     Clock,
+    ImageType,
     OpenTask,
+    PhotoAnalysis,
+    PhotoVerdict,
     SpeechQuality,
     TaskEdit,
     Understanding,
@@ -179,7 +182,8 @@ class UnderstandingRecorder(Protocol):
     """Второй шаг: разбор, ответ бота и задача одной транзакцией.
 
     `transcript` — расшифровка голоса: тем же вызовом становится текстом
-    сообщения (§9.3). `edit` — правка задачи словом (§12.4).
+    сообщения (§9.3). `edit` — правка задачи словом (§12.4). `photo_text` —
+    прочитанное со снимка (§14.2).
     """
 
     async def __call__(
@@ -199,6 +203,7 @@ class UnderstandingRecorder(Protocol):
         transcript_confidence: float | None = None,
         amend: Mapping[str, Any] | None = None,
         edit: Mapping[str, Any] | None = None,
+        photo_text: str | None = None,
     ) -> Task | None: ...
 
 
@@ -241,12 +246,26 @@ class Analyst(Protocol):
         swipe: str | None = None,
     ) -> Verdict: ...
 
+    async def analyze_photo(
+        self,
+        image: bytes,
+        *,
+        media_type: ImageType,
+        caption: str,
+        forwarded_from: str | None = None,
+        open_question: AskedQuestion | None = None,
+    ) -> PhotoVerdict: ...
+
 
 # Скачивание звука из Telegram. Приходит из обработчика замыканием над
 # `bot.download`, чтобы сервис не знал про aiogram — как отправка напоминаний
 # приходит в `services/reminders.py`. Байты живут в памяти и на диск не
 # пишутся (§9.2).
 AudioLoader = Callable[[], Awaitable[bytes]]
+
+# Скачивание снимка — так же, замыканием из обработчика; байты уходят модели
+# и после запроса не хранятся (`techspec/14-photo.md` §14.2).
+ImageLoader = Callable[[], Awaitable[bytes]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -655,6 +674,7 @@ class TaskService:
             transcript_confidence: float | None = None,
             amend: Mapping[str, Any] | None = None,
             edit: Mapping[str, Any] | None = None,
+            photo_text: str | None = None,
         ) -> Task | None:
             return await db_tasks.record_understanding(
                 db,
@@ -672,6 +692,7 @@ class TaskService:
                 transcript_confidence=transcript_confidence,
                 amend=amend,
                 edit=edit,
+                photo_text=photo_text,
             )
 
         async def read_question(*, owner_telegram_id: int, since: datetime) -> OpenQuestion | None:
@@ -799,6 +820,100 @@ class TaskService:
             transcript=heard,
         )
 
+    async def record_from_photo(
+        self,
+        *,
+        chat_id: int,
+        telegram_message_id: int,
+        file_id: str,
+        media_type: ImageType,
+        caption: str,
+        load_image: ImageLoader,
+        forwarded_from: str | None = None,
+    ) -> RecordOutcome:
+        """Принять снимок: сохранить, скачать, разобрать одним запросом (§14.2).
+
+        Как у голоса: подпись и файл в базе до того, как кто-то посмотрел на
+        снимок (инвариант 5), файл не качается, пока база не подтвердила
+        запись, а повтор обновления отвечает сохранённым ответом — без
+        скачивания и модели. Правки у снимка нет (§14.3): ни списка задач,
+        ни свайпа; открытый вопрос модель видит.
+        """
+        try:
+            saved = await self._record_message(
+                owner_telegram_id=self._settings.owner_telegram_id,
+                chat_id=chat_id,
+                telegram_message_id=telegram_message_id,
+                text=caption,
+                kind="photo",
+                telegram_file_id=file_id,
+            )
+        except DatabaseError as error:
+            logger.warning("Снимок не записан: %s", error)
+            return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+
+        if saved.reply:
+            return self._repeated(saved.id, saved.reply)
+
+        image = await self._load_image(load_image)
+        if image is None:
+            return await self._unrecorded(saved, texts.PHOTO_NOT_OPENED, "снимок не скачан")
+
+        asked = await self._open_question()
+        verdict = await self._analyst.analyze_photo(
+            image,
+            media_type=media_type,
+            caption=caption,
+            forwarded_from=forwarded_from,
+            open_question=asked,
+        )
+        if not isinstance(verdict, PhotoAnalysis):
+            said = caption.strip()
+            if not said:
+                # Записывать нечего: без разбора и задачи вопрос остаётся (§3.4).
+                return await self._unrecorded(saved, texts.PHOTO_NOT_UNDERSTOOD, verdict.reason)
+            # Подпись — слова человека: как текст при отказе модели (§5.4).
+            decision = Decision(
+                reply=texts.RECORDED_AS_IS.format(text=summarize(said)),
+                task=literal_fields(said),
+                reminders=[],
+            )
+            return await self._write(saved, decision, analysis=None, facts=[], verdict=None)
+
+        understanding = verdict.understanding
+        dropped = [name for name in ("edit", "facts") if getattr(understanding, name)]
+        if dropped:
+            # Текст на снимке — данные, а не команда (инвариант 3): задачи
+            # снимок не правит и память не пишет, что бы модель ни отдала.
+            logger.info("У снимка %s отброшены: %s", saved.id, ", ".join(dropped))
+        photo = understanding.model_copy(update={"edit": None, "facts": []})
+
+        if (asked is None or not photo.answers_question) and photo.kind not in TASK_KINDS:
+            # Поручения нет — задачи и подсказки тоже. Разбор записывается:
+            # вопрос снимается, как любым другим сообщением (§10.3).
+            reply = texts.PHOTO_ABOUT_ME if photo.kind == "about_me" else texts.PHOTO_NO_ERRAND
+            decision = Decision(reply=reply, task=None, reminders=[])
+        else:
+            try:
+                decision = await self._decide(
+                    photo, asked, self._clock(), NO_EDIT, telegram_message_id
+                )
+            except DatabaseError as error:
+                logger.warning("Расписание не получено, разбор снимка не записан: %s", error)
+                return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+            if photo.more_tasks and (decision.task is not None or decision.amend is not None):
+                more = texts.more_on_photo(photo.more_tasks)
+                decision = replace(decision, reply=f"{decision.reply}\n\n{more}")
+
+        return await self._write(
+            saved,
+            decision,
+            analysis=photo.model_dump(mode="json"),
+            facts=[],
+            verdict=verdict,
+            photo_text=photo.photo_text,
+        )
+
     def _repeated(self, message_id: str, reply: str) -> RecordOutcome:
         """Повтор того же обновления: ответ уже давали, модель не зовём.
 
@@ -821,14 +936,31 @@ class TaskService:
             return NotTranscribed(reason=f"download: {type(error).__name__}")
         return await self._transcriber.transcribe(audio)
 
-    async def _not_heard(self, saved: SavedMessage, result: NotTranscribed) -> RecordOutcome:
-        """Расшифровки нет: ответ в `reply`, задачи и разбора нет (§9.3).
+    async def _load_image(self, load_image: ImageLoader) -> bytes | None:
+        """Скачать снимок в память; отказ скачивания — `None`, причина в журнал.
 
-        Открытый вопрос остаётся: запись без разбора, задачи и поправки база
-        его не снимает (§3.4), и повтор, о котором бот просит, дойдёт до
-        модели вместе с вопросом (§10.3).
+        Граница с Telegram, как у голоса (`_hear`): какие исключения оттуда
+        придут, сервис не знает, и любое из них — «не смог открыть».
         """
-        reply = texts.NOT_HEARD
+        try:
+            return await load_image()
+        except Exception as error:  # noqa: BLE001 - граница Telegram, см. `_hear`
+            logger.warning("Снимок не скачан из Telegram: %s: %s", type(error).__name__, error)
+            return None
+
+    async def _not_heard(self, saved: SavedMessage, result: NotTranscribed) -> RecordOutcome:
+        """Расшифровки нет: ответ в `reply`, задачи и разбора нет (§9.3)."""
+        return await self._unrecorded(saved, texts.NOT_HEARD, result.reason)
+
+    async def _unrecorded(self, saved: SavedMessage, reply: str, reason: str) -> RecordOutcome:
+        """Разбирать нечего: ответ в `reply`, ни разбора, ни задачи (§9.3, §14.2).
+
+        Так кончаются нерасслышанный голос, нескачанный снимок и снимок без
+        подписи, который модель не разобрала. Открытый вопрос остаётся:
+        запись без разбора, задачи и поправки база его не снимает (§3.4), и
+        повтор, о котором бот просит, дойдёт до модели вместе с вопросом
+        (§10.3).
+        """
         try:
             await self._record_understanding(
                 message_id=saved.id,
@@ -844,10 +976,10 @@ class TaskService:
             )
         except DatabaseError as error:
             # Сообщение с файлом уже в базе, и «сохранил» — правда. Без
-            # записанного ответа повтор обновления распознает заново; это не
+            # записанного ответа повтор обновления разберёт заново; это не
             # потеря, а лишний запрос.
-            logger.warning("Ответ «не расслышал» не записан: %s", error)
-        logger.info("Не расслышал сообщение %s: %s", saved.id, result.reason)
+            logger.warning("Ответ без разбора не записан: %s", error)
+        logger.info("Сообщение %s без разбора: %s", saved.id, reason)
         return RecordOutcome(ok=False, message=reply)
 
     async def _open_question(self) -> OpenQuestion | None:
@@ -914,33 +1046,49 @@ class TaskService:
                 # напоминаний — тихой потерей: честнее не записать (§11.3).
                 logger.warning("Расписание не получено, разбор не записан: %s", error)
                 return RecordOutcome(ok=False, message=texts.NOT_SAVED)
-            analysis: Mapping[str, Any] | None = understanding.model_dump(mode="json")
-            facts = fact_rows(understanding)
-            ai_model: str | None = verdict.model
-            input_tokens: int | None = verdict.input_tokens
-            output_tokens: int | None = verdict.output_tokens
-        else:
-            # Разбора не случилось: записываем буквально и говорим об этом.
-            # Срока у такой задачи нет, значит и напоминать не о чем.
-            decision = Decision(
-                reply=texts.RECORDED_AS_IS.format(text=summarize(text)),
-                task=literal_fields(text),
-                reminders=[],
+            return await self._write(
+                saved,
+                decision,
+                analysis=understanding.model_dump(mode="json"),
+                facts=fact_rows(understanding),
+                verdict=verdict,
+                transcript=transcript,
             )
-            analysis = None
-            facts = []
-            ai_model = None
-            input_tokens = None
-            output_tokens = None
+        # Разбора не случилось: записываем буквально и говорим об этом.
+        # Срока у такой задачи нет, значит и напоминать не о чем.
+        decision = Decision(
+            reply=texts.RECORDED_AS_IS.format(text=summarize(text)),
+            task=literal_fields(text),
+            reminders=[],
+        )
+        return await self._write(
+            saved, decision, analysis=None, facts=[], verdict=None, transcript=transcript
+        )
 
+    async def _write(
+        self,
+        saved: SavedMessage,
+        decision: Decision,
+        *,
+        analysis: Mapping[str, Any] | None,
+        facts: Sequence[Mapping[str, Any]],
+        verdict: Analysis | PhotoAnalysis | None,
+        transcript: Transcript | None = None,
+        photo_text: str | None = None,
+    ) -> RecordOutcome:
+        """Второй шаг и ответ — общий хвост текста, голоса и снимка.
+
+        `verdict` — ответ модели, из него модель и токены (§3.2); `None` —
+        разбора не было, и записан текст «как есть».
+        """
         try:
             recorded = await self._record_understanding(
                 message_id=saved.id,
                 owner_telegram_id=self._settings.owner_telegram_id,
                 analysis=analysis,
-                ai_model=ai_model,
-                ai_input_tokens=input_tokens,
-                ai_output_tokens=output_tokens,
+                ai_model=verdict.model if verdict is not None else None,
+                ai_input_tokens=verdict.input_tokens if verdict is not None else None,
+                ai_output_tokens=verdict.output_tokens if verdict is not None else None,
                 reply=decision.reply,
                 task=decision.task,
                 reminders=[item.as_row() for item in decision.reminders],
@@ -949,6 +1097,7 @@ class TaskService:
                 transcript_confidence=transcript.confidence if transcript is not None else None,
                 amend=decision.amend,
                 edit=decision.edit,
+                photo_text=photo_text,
             )
         except DatabaseError as error:
             # Правку база отклоняет и тогда, когда задачу закрыли или удалили,

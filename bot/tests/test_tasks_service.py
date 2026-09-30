@@ -26,9 +26,16 @@ from solomon.services.tasks import (
     summarize,
 )
 from solomon.services.transcription import NotTranscribed, Transcript
-from solomon.services.understanding import NotUnderstood, Understanding, format_open_question
+from solomon.services.understanding import (
+    FactItem,
+    NotUnderstood,
+    PhotoUnderstanding,
+    Understanding,
+    format_open_question,
+)
 from tests.conftest import (
     AUDIO,
+    IMAGE,
     OWNER_ID,
     OWNER_TIMEZONE,
     SPOKEN,
@@ -39,9 +46,12 @@ from tests.conftest import (
     FakeTranscriber,
     FakeUnderstandings,
     load_audio,
+    load_image,
+    make_photo_understanding,
     make_settings,
     make_understanding,
 )
+from tests.test_edits import make_edit
 
 SETTINGS = make_settings()
 FRIDAY_EVENING = datetime(2026, 9, 18, 19, 0, tzinfo=ZoneInfo(OWNER_TIMEZONE))
@@ -1178,3 +1188,350 @@ async def test_repeated_update_does_not_read_the_question() -> None:
     assert outcome.message == "Понял: …"
     assert questions.calls == []
     assert analyst.calls == []
+
+
+# --- Снимки (`techspec/14-photo.md`) ------------------------------------------
+
+READ = "Приглашение: родительское собрание 7 октября в 18:30, кабинет 214."
+MEETING_DUE = datetime(2026, 10, 7, 18, 30, tzinfo=ZoneInfo(OWNER_TIMEZONE))
+MORE = ["купить хлеб", "позвонить маме"]
+MORE_HINT = (
+    "На снимке ещё: «купить хлеб», «позвонить маме». Нужны — напишите или надиктуйте отдельно."
+)
+
+
+def meeting(**fields: object) -> PhotoUnderstanding:
+    """Модель, прочитавшая со снимка приглашение на собрание."""
+    base: dict[str, object] = {
+        "title": "сходить на родительское собрание",
+        "due_at": MEETING_DUE,
+        "due_precision": "time",
+        "photo_text": READ,
+    }
+    return make_photo_understanding(**{**base, **fields})
+
+
+def photo_analyst(photo: PhotoUnderstanding | NotUnderstood) -> FakeAnalyst:
+    """Модель, которая видит только снимок: текст тест не присылает."""
+    return FakeAnalyst(NotUnderstood(reason="текста тест не ждал"), photo=photo)
+
+
+async def record_photo(
+    service: TaskService,
+    load: Callable[[], Awaitable[bytes]] = load_image,
+    caption: str = "",
+    forwarded_from: str | None = None,
+) -> RecordOutcome:
+    """Одно фото из Telegram: меняется только то, что важно тесту."""
+    return await service.record_from_photo(
+        chat_id=42,
+        telegram_message_id=7,
+        file_id="photo-1",
+        media_type="image/jpeg",
+        caption=caption,
+        load_image=load,
+        forwarded_from=forwarded_from,
+    )
+
+
+async def broken_image() -> bytes:
+    raise OSError("file is too big")
+
+
+async def test_photo_is_saved_before_download_and_becomes_a_task() -> None:
+    """Порядок §14.2: сообщение с файлом → скачивание → разбор → задача."""
+    analyst = photo_analyst(meeting())
+    planner = FakePlanner([Planned(stage="due", fire_at=MEETING_DUE)])
+    service, messages, understandings = build_service(analyst, planner=planner)
+
+    outcome = await record_photo(service)
+
+    assert outcome.ok
+    assert outcome.message == (
+        "Записал: сходить на родительское собрание. Срок: среда, 7 октября, 18:30. "
+        "Напомню: 7 октября в 18:30"
+    )
+    # Прочитанное в чат не уходит: оно видно в приложении (§14.4).
+    assert READ not in outcome.message
+    assert messages.calls == [
+        {
+            "owner_telegram_id": OWNER_ID,
+            "chat_id": 42,
+            "telegram_message_id": 7,
+            "text": "",
+            "kind": "photo",
+            "telegram_file_id": "photo-1",
+            "duration_seconds": None,
+        }
+    ]
+    assert analyst.photos == [(IMAGE, "image/jpeg", "", None)]
+    assert analyst.calls == []
+    saved = understandings.calls[0]
+    assert saved["photo_text"] == READ
+    assert saved["ai_model"] == "claude-opus-5"
+    assert saved["ai_input_tokens"] == 1900
+    assert saved["ai_output_tokens"] == 310
+    assert saved["transcript"] is None
+    assert saved["reply"] == outcome.message
+    assert saved["reminders"] == [{"stage": "due", "fire_at": MEETING_DUE.isoformat()}]
+    task = saved["task"]
+    assert isinstance(task, dict)
+    assert task["title"] == "сходить на родительское собрание"
+    assert str(task["due_at"]).startswith("2026-10-07T18:30")
+
+
+async def test_caption_is_the_text_of_the_message_and_reaches_the_model() -> None:
+    analyst = photo_analyst(meeting())
+    service, messages, _ = build_service(analyst)
+
+    await record_photo(service, caption="купить такие же", forwarded_from="Рената")
+
+    assert messages.calls[0]["text"] == "купить такие же"
+    assert analyst.photos == [(IMAGE, "image/jpeg", "купить такие же", "Рената")]
+
+
+async def test_more_errands_on_the_photo_are_named_in_a_second_paragraph() -> None:
+    """Задача одна, остальные — подсказкой вторым абзацем (§14.4)."""
+    service, _, understandings = build_service(photo_analyst(meeting(more_tasks=MORE)))
+
+    outcome = await record_photo(service)
+
+    head, hint = outcome.message.split("\n\n")
+    assert head.startswith("Записал: сходить на родительское собрание")
+    assert hint == MORE_HINT
+    assert understandings.calls[0]["reply"] == outcome.message
+    assert len(understandings.calls) == 1
+
+
+async def test_question_on_the_photo_keeps_the_hint_after_it() -> None:
+    """Задача с вопросом — тоже запись: подсказка идёт после вопроса (§10.1)."""
+    photo = meeting(due_at=None, due_precision=None, question="К какому сроку?", more_tasks=MORE)
+    service, _, understandings = build_service(photo_analyst(photo))
+
+    outcome = await record_photo(service)
+
+    head, hint = outcome.message.split("\n\n")
+    assert head.endswith("К какому сроку?")
+    assert hint == MORE_HINT
+    task = understandings.calls[0]["task"]
+    assert isinstance(task, dict)
+    assert task["open_question"] == "К какому сроку?"
+
+
+@pytest.mark.parametrize(
+    ("kind", "reply"),
+    [
+        ("chat", "На снимке поручения не нашёл — ничего не записал."),
+        ("about_me", "Со снимка в память не записываю — скажите словами, что запомнить."),
+    ],
+)
+async def test_photo_without_an_errand_records_nothing_and_says_so(kind: str, reply: str) -> None:
+    """Ни задачи, ни памяти, ни подсказки — даже если модель их отдала (§14.4)."""
+    photo = meeting(
+        kind=kind,
+        more_tasks=MORE,
+        facts=[FactItem(category="car", text="Машина — Toyota Camry")],
+    )
+    service, _, understandings = build_service(photo_analyst(photo))
+
+    outcome = await record_photo(service)
+
+    assert outcome.ok
+    assert outcome.message == reply
+    saved = understandings.calls[0]
+    assert saved["reply"] == reply
+    assert saved["task"] is None
+    assert saved["reminders"] == []
+    assert saved["facts"] == []
+    # Разбор записан: так снимок снимает открытый вопрос, как любое сообщение.
+    analysis = saved["analysis"]
+    assert isinstance(analysis, dict)
+    assert analysis["kind"] == kind
+    assert analysis["facts"] == []
+    assert saved["photo_text"] == READ
+
+
+async def test_edit_and_facts_of_the_photo_are_dropped(caplog: pytest.LogCaptureFixture) -> None:
+    """Текст-указание на снимке задач не правит, в память не пишет (§14.3)."""
+    photo = meeting(
+        edit=make_edit(action="done", task=1),
+        facts=[FactItem(category="family", text="Сына зовут Миша")],
+    )
+    service, _, understandings = build_service(photo_analyst(photo))
+
+    with caplog.at_level(logging.INFO, logger="solomon.services.tasks"):
+        outcome = await record_photo(service)
+
+    assert outcome.message.startswith("Записал: сходить на родительское собрание")
+    saved = understandings.calls[0]
+    assert saved["edit"] is None
+    assert saved["amend"] is None
+    assert saved["facts"] == []
+    analysis = saved["analysis"]
+    assert isinstance(analysis, dict)
+    assert analysis["edit"] is None
+    assert analysis["facts"] == []
+    assert analysis["more_tasks"] == []
+    assert "отброшены" in caplog.text
+
+
+async def test_download_failure_says_the_photo_was_not_opened() -> None:
+    """Файл не скачался: сообщение в базе, модель не зовётся, задачи нет (§14.2)."""
+    analyst = photo_analyst(meeting())
+    service, messages, understandings = build_service(analyst)
+
+    outcome = await record_photo(service, load=broken_image)
+
+    assert not outcome.ok
+    assert outcome.message == "Не смог открыть снимок. Сообщение сохранил — пришлите его ещё раз."
+    assert "Записал" not in outcome.message
+    assert messages.calls[0]["telegram_file_id"] == "photo-1"
+    assert analyst.photos == []
+    saved = understandings.calls[0]
+    assert saved["reply"] == outcome.message
+    assert saved["analysis"] is None
+    assert saved["task"] is None
+    assert saved["amend"] is None
+    assert saved["photo_text"] is None
+
+
+@pytest.mark.parametrize("caption", ["", "   "])
+async def test_model_failure_without_caption_records_no_task(caption: str) -> None:
+    analyst = photo_analyst(NotUnderstood(reason="модель недоступна: APITimeoutError"))
+    service, _, understandings = build_service(analyst)
+
+    outcome = await record_photo(service, caption=caption)
+
+    assert not outcome.ok
+    assert outcome.message == (
+        "Не разобрал снимок. Сообщение сохранил — пришлите ещё раз или опишите словами."
+    )
+    assert analyst.photos == [(IMAGE, "image/jpeg", caption, None)]
+    saved = understandings.calls[0]
+    assert saved["reply"] == outcome.message
+    assert saved["analysis"] is None
+    assert saved["ai_model"] is None
+    assert saved["task"] is None
+
+
+async def test_model_failure_with_caption_records_the_caption_as_is() -> None:
+    """Подпись — слова человека: записывается «как есть», как текст (§5.4)."""
+    analyst = photo_analyst(NotUnderstood(reason="модель недоступна: APITimeoutError"))
+    service, _, understandings = build_service(analyst)
+
+    outcome = await record_photo(service, caption="  купить такие же ")
+
+    assert outcome.ok
+    assert outcome.message == texts.RECORDED_AS_IS.format(text="купить такие же")
+    saved = understandings.calls[0]
+    assert saved["analysis"] is None
+    assert saved["photo_text"] is None
+    task = saved["task"]
+    assert isinstance(task, dict)
+    assert task["title"] == "купить такие же"
+    assert task["needs_review"] is True
+
+
+async def test_repeated_photo_update_answers_from_the_saved_reply() -> None:
+    """Повтор виден на первом шаге: снимок не скачивается, модель не зовётся."""
+    analyst = photo_analyst(meeting())
+    download = CountedDownload()
+    messages = FakeMessages(message=SavedMessage(id="9a71", reply="Записал: …"))
+    service, _, understandings = build_service(analyst, messages=messages)
+
+    outcome = await record_photo(service, load=download)
+
+    assert outcome.message == "Записал: …"
+    assert download.calls == 0
+    assert analyst.photos == []
+    assert understandings.calls == []
+
+
+async def test_database_failure_before_download_does_not_download() -> None:
+    download = CountedDownload()
+    service, _, _ = build_service(photo_analyst(meeting()), messages=FakeMessages(broken=True))
+
+    outcome = await record_photo(service, load=download)
+
+    assert not outcome.ok
+    assert outcome.message == texts.NOT_SAVED
+    assert download.calls == 0
+
+
+async def test_database_failure_after_the_model_says_nothing_was_saved() -> None:
+    service, _, _ = build_service(
+        photo_analyst(meeting(more_tasks=MORE)), understandings=FakeUnderstandings(broken=True)
+    )
+
+    outcome = await record_photo(service)
+
+    assert not outcome.ok
+    assert outcome.message == texts.NOT_SAVED
+
+
+async def test_photo_answering_the_question_amends_the_task() -> None:
+    """Скриншот со сроком после «К какому сроку?» — ответ путём §10.2."""
+    photo = make_photo_understanding(
+        title=ASKED.title,
+        answers_question=True,
+        due_at=FRIDAY_DUE,
+        due_precision="day",
+        photo_text="Переписка: «жду расчёт до пятницы».",
+        more_tasks=["купить хлеб"],
+    )
+    analyst = photo_analyst(photo)
+    service, questions, understandings = build_dialog_service(analyst)
+
+    outcome = await record_photo(service)
+
+    assert analyst.questions == [ASKED]
+    head, hint = outcome.message.split("\n\n")
+    assert head.startswith("Понял: отправить расчёт клиенту. Срок: пятница, 18 сентября")
+    assert hint == "На снимке ещё: «купить хлеб». Нужны — напишите или надиктуйте отдельно."
+    saved = understandings.calls[0]
+    assert saved["task"] is None
+    amend = saved["amend"]
+    assert isinstance(amend, dict)
+    assert amend["task_id"] == ASKED.task_id
+    assert saved["photo_text"] == "Переписка: «жду расчёт до пятницы»."
+    assert questions.asked is None
+
+
+async def test_photo_without_an_errand_while_asked_lifts_the_question() -> None:
+    service, questions, understandings = build_dialog_service(photo_analyst(meeting(kind="chat")))
+
+    outcome = await record_photo(service)
+
+    assert outcome.message == "На снимке поручения не нашёл — ничего не записал."
+    assert understandings.calls[0]["amend"] is None
+    assert questions.asked is None
+
+
+async def test_photo_that_was_not_opened_keeps_the_question() -> None:
+    """Бот просит прислать снимок ещё раз — повтор должен застать вопрос (§14.2)."""
+    service, questions, _ = build_dialog_service(photo_analyst(meeting()))
+
+    await record_photo(service, load=broken_image)
+
+    assert questions.asked == ASKED
+
+
+async def test_photo_the_model_could_not_read_keeps_the_question() -> None:
+    analyst = photo_analyst(NotUnderstood(reason="ответ не по схеме"))
+    service, questions, _ = build_dialog_service(analyst)
+
+    await record_photo(service)
+
+    assert analyst.questions == [ASKED]
+    assert questions.asked == ASKED
+
+
+async def test_caption_recorded_as_is_while_asked_lifts_the_question() -> None:
+    """Как у текста (§10.3): подпись стала задачей, вопрос снят."""
+    analyst = photo_analyst(NotUnderstood(reason="ответ не по схеме"))
+    service, questions, understandings = build_dialog_service(analyst)
+
+    await record_photo(service, caption="в пятницу")
+
+    assert isinstance(understandings.calls[0]["task"], dict)
+    assert questions.asked is None

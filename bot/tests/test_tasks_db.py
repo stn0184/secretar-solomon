@@ -411,6 +411,71 @@ async def test_record_understanding_sends_the_transcript_and_its_confidence() ->
     assert params["transcript_confidence"] == 0.93
 
 
+async def test_record_message_sends_the_photo_with_its_caption() -> None:
+    """Снимок пишется до разбора: вид, файл и подпись, длительности нет (§14.2)."""
+    fake = FakeClient(data={**MESSAGE_ROW, "text": "купить такие же", "kind": "photo"})
+
+    await db_tasks.record_message(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        chat_id=42,
+        telegram_message_id=7,
+        text="купить такие же",
+        kind="photo",
+        telegram_file_id="photo-1",
+    )
+
+    params = fake.calls[0][2]
+    assert params["kind"] == "photo"
+    assert params["telegram_file_id"] == "photo-1"
+    assert params["text"] == "купить такие же"
+    assert params["duration_seconds"] is None
+
+
+async def test_record_understanding_sends_what_was_read_from_the_photo() -> None:
+    """Прочитанное со снимка ложится тем же вызовом, что разбор и задача (§14.2)."""
+    fake = FakeClient(data=ROW)
+
+    await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a71",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=1900,
+        ai_output_tokens=310,
+        reply="Записал: купить лампочку",
+        task=TASK_FIELDS,
+        reminders=[],
+        facts=[],
+        photo_text="Этикетка лампочки: цоколь E14, 7 Вт.",
+    )
+
+    params = fake.calls[0][2]
+    assert params["photo_text"] == "Этикетка лампочки: цоколь E14, 7 Вт."
+
+
+async def test_record_understanding_without_photo_text_calls_the_function_as_before() -> None:
+    """Текст и голос зовут функцию без `photo_text`: так они пишутся и на старой базе."""
+    fake = FakeClient(data=ROW)
+
+    await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a71",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=45,
+        reply="Записал: купить лампочку",
+        task=TASK_FIELDS,
+        reminders=[],
+        facts=[],
+    )
+
+    assert "photo_text" not in fake.calls[0][2]
+
+
 async def test_record_understanding_without_task_returns_nothing() -> None:
     """Разговор: разбор записан, задачи нет — и это не отказ базы."""
     fake = FakeClient(data=None)
