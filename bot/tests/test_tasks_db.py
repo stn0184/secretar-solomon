@@ -180,6 +180,14 @@ class FakeQuery:
         self.client.calls.append(("gte", column, value))
         return self
 
+    def lt(self, column: str, value: Any) -> FakeQuery:
+        self.client.calls.append(("lt", column, value))
+        return self
+
+    def neq(self, column: str, value: Any) -> FakeQuery:
+        self.client.calls.append(("neq", column, value))
+        return self
+
     def limit(self, size: int) -> FakeQuery:
         self.client.calls.append(("limit", size))
         return self
@@ -474,6 +482,52 @@ async def test_record_understanding_without_photo_text_calls_the_function_as_bef
     )
 
     assert "photo_text" not in fake.calls[0][2]
+
+
+async def test_record_understanding_sends_the_found_task_of_a_duplicate() -> None:
+    """Дубль (§15.3): задачи нет, сообщение ведёт на найденную — тем же вызовом."""
+    fake = FakeClient(data=ROW)
+
+    task = await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a71",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=45,
+        reply="Это уже записано: купить лампочку.",
+        task=None,
+        reminders=[],
+        facts=[],
+        same_task=TASK_ID,
+    )
+
+    params = fake.calls[0][2]
+    assert params["same_task"] == TASK_ID
+    assert params["task"] is None
+    assert task is not None
+
+
+async def test_record_understanding_without_a_duplicate_calls_the_function_as_before() -> None:
+    """Без дубля `same_task` в запрос не уходит: так вызов работает и до миграции 013."""
+    fake = FakeClient(data=ROW)
+
+    await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a71",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=45,
+        reply="Записал: купить лампочку",
+        task=TASK_FIELDS,
+        reminders=[],
+        facts=[],
+    )
+
+    assert "same_task" not in fake.calls[0][2]
 
 
 async def test_record_understanding_without_task_returns_nothing() -> None:
@@ -1253,6 +1307,93 @@ async def test_pick_task_without_a_row_is_a_failure() -> None:
         )
 
 
+async def test_record_separately_sends_the_task_the_plan_and_the_reply() -> None:
+    """«Записать отдельно» (§15.4): задача, план и ответ — одним вызовом."""
+    fake = FakeClient(data={"id": "9a71", "task_id": TASK_ID, "reply": "Записал: встреча"})
+    plan = [{"stage": "due", "fire_at": "2026-10-02T17:00:00+05:00"}]
+
+    saved = await db_tasks.record_separately(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        message_id="9a71",
+        task=TASK_FIELDS,
+        reminders=plan,
+        reply="Записал: встреча",
+    )
+
+    assert saved == PickedMessage(id="9a71", task_id=TASK_ID, reply="Записал: встреча")
+    assert fake.calls[0] == (
+        "rpc",
+        "record_separately",
+        {
+            "owner_telegram_id": OWNER_ID,
+            "message_id": "9a71",
+            "task": TASK_FIELDS,
+            "reminders": plan,
+            "reply": "Записал: встреча",
+        },
+    )
+
+
+async def test_record_separately_without_a_row_is_a_failure() -> None:
+    fake = FakeClient(data=None)
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.record_separately(
+            as_client(fake),
+            owner_telegram_id=OWNER_ID,
+            message_id="9a71",
+            task=TASK_FIELDS,
+            reminders=[],
+            reply="Записал: встреча",
+        )
+
+
+async def test_same_minute_asks_for_the_owner_the_minute_and_the_order() -> None:
+    """Накладка (§15.5): свои активные со сроком со временем в ту же минуту, старые первыми."""
+    fake = FakeClient(data=[{"title": "созвон с Ренатой"}, {"title": "стрижка"}])
+    due = datetime(2026, 10, 2, 21, 0, 30, tzinfo=TZ)
+
+    titles = await db_tasks.same_minute_titles(
+        as_client(fake), owner_telegram_id=OWNER_ID, due_at=due, exclude_task_id=TASK_ID
+    )
+
+    assert titles == ["созвон с Ренатой", "стрижка"]
+    assert ("table", "tasks") in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("eq", "status", "active") in fake.calls
+    assert ("eq", "due_precision", "time") in fake.calls
+    assert ("gte", "due_at", "2026-10-02T21:00:00+05:00") in fake.calls
+    assert ("lt", "due_at", "2026-10-02T21:01:00+05:00") in fake.calls
+    assert ("neq", "id", TASK_ID) in fake.calls
+    assert [call for call in fake.calls if call[0] == "order"] == [("order", "created_at", False)]
+
+
+async def test_same_minute_of_a_new_task_excludes_nothing() -> None:
+    fake = FakeClient(data=[])
+
+    titles = await db_tasks.same_minute_titles(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        due_at=datetime(2026, 10, 2, 21, 0, tzinfo=TZ),
+    )
+
+    assert titles == []
+    assert not [call for call in fake.calls if call[0] == "neq"]
+
+
+@pytest.mark.parametrize("data", [None, [{"id": "x"}], ["строка"]])
+async def test_broken_same_minute_answer_is_a_failure(data: Any) -> None:
+    fake = FakeClient(data=data)
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.same_minute_titles(
+            as_client(fake),
+            owner_telegram_id=OWNER_ID,
+            due_at=datetime(2026, 10, 2, 21, 0, tzinfo=TZ),
+        )
+
+
 async def test_reopen_task_sends_the_plan_and_returns_the_task() -> None:
     """«Вернуть» (§12.6): план на момент нажатия уходит в базу тем же вызовом."""
     fake = FakeClient(data=DETAIL_ROW)
@@ -1299,6 +1440,8 @@ def test_owner_is_required_by_every_query() -> None:
         db_tasks.reminder_task_id,
         db_tasks.message_by_telegram_id,
         db_tasks.pick_task,
+        db_tasks.record_separately,
+        db_tasks.same_minute_titles,
         db_reminders.reopen_task,
         db_reminders.due_reminders,
         db_reminders.mark_sent,

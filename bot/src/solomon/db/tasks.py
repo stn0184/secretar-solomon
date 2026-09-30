@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from supabase import Client
@@ -22,10 +22,17 @@ from solomon.db.rpc import DatabaseError, ask, moment, single_row
 RECORD_MESSAGE_FUNCTION = "record_message"
 RECORD_UNDERSTANDING_FUNCTION = "record_understanding"
 PICK_TASK_FUNCTION = "pick_task"
+RECORD_SEPARATELY_FUNCTION = "record_separately"
 TASKS_TABLE = "tasks"
 MESSAGES_TABLE = "messages"
 REMINDERS_TABLE = "reminders"
 ACTIVE_STATUS = "active"
+# Точность срока «со временем» (§3.3): только такие сроки сравниваются на
+# накладку (`techspec/15-duplicates.md` §15.5).
+TIME_PRECISION = "time"
+# Верхняя граница выборки накладки: абзац называет три задачи и считает
+# остальные, а больше сотни дел в одну минуту не бывает.
+SAME_MINUTE_LIMIT = 100
 TASK_COLUMNS = "id, title, status"
 # Поля задачи, которые нужны списку в промпте (`techspec/12-chat-edit.md`
 # §12.2), правке словом и кнопкам «какую задачу» и «Вернуть» (§12.6), —
@@ -136,11 +143,14 @@ class StoredMessage:
 
 @dataclass(frozen=True, slots=True)
 class PickedMessage:
-    """Строка сообщения после `pick_task` (§3.4): чья правка в ней лежит.
+    """Строка сообщения после `pick_task` или `record_separately` (§3.4):
+    чья запись в ней лежит.
 
-    `task_id` и `reply` совпали с переданными — правку записал этот вызов;
-    `task_id` другой — её сделали раньше; пуст — выбранную задачу уже
-    закрыли, убрали или удалили, и ничего не записано.
+    У `pick_task`: `task_id` и `reply` совпали с переданными — правку записал
+    этот вызов; `task_id` другой — её сделали раньше; пуст — выбранную задачу
+    уже закрыли, убрали или удалили, и ничего не записано. У
+    `record_separately` `reply` — ответ той записи, что легла: этого нажатия
+    или прежнего.
     """
 
     id: str
@@ -352,6 +362,7 @@ async def record_understanding(
     amend: Mapping[str, Any] | None = None,
     edit: Mapping[str, Any] | None = None,
     photo_text: str | None = None,
+    same_task: str | None = None,
 ) -> Task | None:
     """Шаг второй: разбор, ответ бота, задача, напоминания и память — одной транзакцией.
 
@@ -383,6 +394,12 @@ async def record_understanding(
     когда есть: вызов текста и голоса не меняется и работает на базе и до
     миграции снимка.
 
+    `same_task` — задача, которую сообщение дублирует
+    (`techspec/15-duplicates.md` §15.3): новой задачи нет, сообщение ведёт
+    на найденную, возвращается она же. Её закрыли или убрали, пока модель
+    думала, — отказ базы и откат всего. Уходит, только когда есть, как
+    `photo_text`.
+
     Открытые вопросы владельца база снимает сама (§3.4) — любой записью,
     кроме «не расслышал»: без разбора, задачи и поправки вопрос остаётся.
     """
@@ -404,6 +421,8 @@ async def record_understanding(
     }
     if photo_text is not None:
         params["photo_text"] = photo_text
+    if same_task is not None:
+        params["same_task"] = same_task
     data = single_row(
         await ask(lambda: db.rpc(RECORD_UNDERSTANDING_FUNCTION, params).execute().data)
     )
@@ -412,6 +431,43 @@ async def record_understanding(
     if data is None or (isinstance(data, Mapping) and data.get("id") is None):
         return None
     return task_from_row(data)
+
+
+async def same_minute_titles(
+    db: Client,
+    *,
+    owner_telegram_id: int,
+    due_at: datetime,
+    exclude_task_id: str | None = None,
+) -> list[str]:
+    """Суть задач владельца, стоящих на ту же минуту (`techspec/15-duplicates.md` §15.5).
+
+    Только активные и только со сроком со временем: у сроков «на день» 18:00
+    — условность, а не время встречи. Сама задача (`exclude_task_id`) в
+    сравнение не входит. Раньше записанные — первыми: абзац называет их.
+    """
+    minute = due_at.replace(second=0, microsecond=0)
+
+    def query() -> Any:
+        request = (
+            db.table(TASKS_TABLE)
+            .select("title")
+            .eq("owner_telegram_id", owner_telegram_id)
+            .eq("status", ACTIVE_STATUS)
+            .eq("due_precision", TIME_PRECISION)
+            .gte("due_at", minute.isoformat())
+            .lt("due_at", (minute + timedelta(minutes=1)).isoformat())
+        )
+        if exclude_task_id is not None:
+            request = request.neq("id", exclude_task_id)
+        return request.order("created_at", desc=False).limit(SAME_MINUTE_LIMIT).execute().data
+
+    titles = []
+    for row in _rows(await ask(query), "задач"):
+        if not isinstance(row, Mapping) or row.get("title") is None:
+            raise DatabaseError("В ответе базы нет сути задачи.")
+        titles.append(str(row["title"]))
+    return titles
 
 
 async def list_active_tasks(db: Client, *, owner_telegram_id: int, limit: int) -> list[Task]:
@@ -635,6 +691,41 @@ async def pick_task(
         "reply": reply,
     }
     data = single_row(await ask(lambda: db.rpc(PICK_TASK_FUNCTION, params).execute().data))
+    if not isinstance(data, Mapping) or data.get("id") is None:
+        raise DatabaseError("База не вернула сообщение.")
+    return PickedMessage(
+        id=str(data["id"]),
+        task_id=_optional_text(data.get("task_id")),
+        reply=_optional_text(data.get("reply")),
+    )
+
+
+async def record_separately(
+    db: Client,
+    *,
+    owner_telegram_id: int,
+    message_id: str,
+    task: Mapping[str, Any],
+    reminders: Sequence[Mapping[str, Any]],
+    reply: str,
+) -> PickedMessage:
+    """«Записать отдельно» (`techspec/15-duplicates.md` §15.4): задача из
+    сообщения-дубля, её напоминания, `messages.task_id` и `reply` — одной
+    транзакцией.
+
+    Форма `task` и `reminders` — та же, что у `record_understanding`. Задача
+    по этому сообщению уже заведена (второе нажатие) — база ничего не пишет
+    и возвращает сообщение как есть, с прежним ответом. Чужое или
+    несуществующее сообщение — отказ базы.
+    """
+    params = {
+        "owner_telegram_id": owner_telegram_id,
+        "message_id": message_id,
+        "task": dict(task),
+        "reminders": [dict(item) for item in reminders],
+        "reply": reply,
+    }
+    data = single_row(await ask(lambda: db.rpc(RECORD_SEPARATELY_FUNCTION, params).execute().data))
     if not isinstance(data, Mapping) or data.get("id") is None:
         raise DatabaseError("База не вернула сообщение.")
     return PickedMessage(

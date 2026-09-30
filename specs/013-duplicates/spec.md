@@ -135,7 +135,7 @@
       `supabase/tests/duplicates.test.ts`, новые сигнатуры — в
       `supabase/tests/database.ts`; `techspec/03-schema.md` §3.4 — тем
       же коммитом.
-- [ ] Бот, база (`db/tasks.py`): `same_task` в `record_understanding`,
+- [x] Бот, база (`db/tasks.py`): `same_task` в `record_understanding`,
       `record_separately`, запрос накладки — активные задачи владельца
       со сроком со временем в ту же минуту, без самой задачи, раньше
       записанные первыми.
