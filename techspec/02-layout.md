@@ -30,6 +30,7 @@ bot/                     Telegram-бот, Python 3.12, long polling
       facts.py           память о пользователе: известные факты для промпта
   tests/                 pytest; сеть не трогается
     fixtures/            примеры для живого прогона (маркер live)
+      photos/            шесть синтетических снимков и draw.py, что их нарисовал (pillow — через uv run --with)
 
 miniapp/                 Mini App внутри Telegram, React + TS + Vite
   index.html             подключает telegram-web-app.js

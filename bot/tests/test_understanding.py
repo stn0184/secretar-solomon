@@ -1666,7 +1666,7 @@ PHOTOS = Path(__file__).parent / "fixtures" / "photos"
 
 @dataclass(frozen=True, slots=True)
 class PhotoCase:
-    """Снимок живого прогона и что от него ждут (`specs/012-photo/plan.md`).
+    """Снимок живого прогона и что от него ждут (`specs/archive/012-photo/plan.md`).
 
     `kinds` — допустимые виды: этикетка с «купить такие же» законно и
     задача, и желание; `None` — вид не проверяется. `due` — срок до минуты
