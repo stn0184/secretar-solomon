@@ -183,7 +183,8 @@ class UnderstandingRecorder(Protocol):
 
     `transcript` — расшифровка голоса: тем же вызовом становится текстом
     сообщения (§9.3). `edit` — правка задачи словом (§12.4). `photo_text` —
-    прочитанное со снимка (§14.2).
+    прочитанное со снимка (§14.2). `same_task` — задача, которую сообщение
+    повторяет (`techspec/15-duplicates.md` §15.3): новой не заводится.
     """
 
     async def __call__(
@@ -204,6 +205,7 @@ class UnderstandingRecorder(Protocol):
         amend: Mapping[str, Any] | None = None,
         edit: Mapping[str, Any] | None = None,
         photo_text: str | None = None,
+        same_task: str | None = None,
     ) -> Task | None: ...
 
 
@@ -254,6 +256,7 @@ class Analyst(Protocol):
         caption: str,
         forwarded_from: str | None = None,
         open_question: AskedQuestion | None = None,
+        tasks: Sequence[OpenTask] | None = None,
     ) -> PhotoVerdict: ...
 
 
@@ -287,13 +290,16 @@ class EditContext:
     """Подсказки модели для правки (§12.2): список, последняя задача, свайп.
 
     `tasks` — открытые задачи в порядке номеров (`edits.number_tasks`);
-    `None` — блока 5 в промпте нет, и правки не бывает (пересланное, сбой
-    чтения). `swipe` — готовая строка перед текстом сообщения.
+    `None` — блока 5 в промпте нет, и не бывает ни правки, ни дубля (сбой
+    чтения). `swipe` — готовая строка перед текстом сообщения. `edits` —
+    правка разрешена: у пересланного и снимка список есть только для сверки
+    дублей (`techspec/15-duplicates.md` §15.2), и их `edit` бот не слушает.
     """
 
     tasks: list[TaskDetails] | None
     last_task: int | None
     swipe: str | None
+    edits: bool = True
 
 
 NO_EDIT = EditContext(tasks=None, last_task=None, swipe=None)
@@ -525,6 +531,8 @@ class Decision:
     amend: Mapping[str, Any] | None = None
     edit: Mapping[str, Any] | None = None
     buttons: tuple[Button, ...] = ()
+    # Дубль (§15.3): задача, о которой сообщение, — новой нет.
+    same_task: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,6 +683,7 @@ class TaskService:
             amend: Mapping[str, Any] | None = None,
             edit: Mapping[str, Any] | None = None,
             photo_text: str | None = None,
+            same_task: str | None = None,
         ) -> Task | None:
             return await db_tasks.record_understanding(
                 db,
@@ -693,6 +702,7 @@ class TaskService:
                 amend=amend,
                 edit=edit,
                 photo_text=photo_text,
+                same_task=same_task,
             )
 
         async def read_question(*, owner_telegram_id: int, since: datetime) -> OpenQuestion | None:
@@ -836,8 +846,9 @@ class TaskService:
         Как у голоса: подпись и файл в базе до того, как кто-то посмотрел на
         снимок (инвариант 5), файл не качается, пока база не подтвердила
         запись, а повтор обновления отвечает сохранённым ответом — без
-        скачивания и модели. Правки у снимка нет (§14.3): ни списка задач,
-        ни свайпа; открытый вопрос модель видит.
+        скачивания и модели. Правки у снимка нет (§14.3), свайпа тоже;
+        открытый вопрос модель видит, список задач — только для сверки
+        дублей (`techspec/15-duplicates.md` §15.2).
         """
         try:
             saved = await self._record_message(
@@ -859,13 +870,14 @@ class TaskService:
         if image is None:
             return await self._unrecorded(saved, texts.PHOTO_NOT_OPENED, "снимок не скачан")
 
-        asked = await self._open_question()
+        asked, context = await asyncio.gather(self._open_question(), self._check_context())
         verdict = await self._analyst.analyze_photo(
             image,
             media_type=media_type,
             caption=caption,
             forwarded_from=forwarded_from,
             open_question=asked,
+            tasks=context.tasks,
         )
         if not isinstance(verdict, PhotoAnalysis):
             said = caption.strip()
@@ -896,12 +908,14 @@ class TaskService:
         else:
             try:
                 decision = await self._decide(
-                    photo, asked, self._clock(), NO_EDIT, telegram_message_id
+                    photo, asked, self._clock(), context, telegram_message_id
                 )
             except DatabaseError as error:
                 logger.warning("Расписание не получено, разбор снимка не записан: %s", error)
                 return RecordOutcome(ok=False, message=texts.NOT_SAVED)
-            if photo.more_tasks and (decision.task is not None or decision.amend is not None):
+            if photo.more_tasks and any(
+                part is not None for part in (decision.task, decision.amend, decision.same_task)
+            ):
                 more = texts.more_on_photo(photo.more_tasks)
                 decision = replace(decision, reply=f"{decision.reply}\n\n{more}")
 
@@ -1098,10 +1112,12 @@ class TaskService:
                 amend=decision.amend,
                 edit=decision.edit,
                 photo_text=photo_text,
+                same_task=decision.same_task,
             )
         except DatabaseError as error:
-            # Правку база отклоняет и тогда, когда задачу закрыли или удалили,
-            # пока модель думала (§12.3): откат целиком, честное «не смог».
+            # Правку и дубль база отклоняет и тогда, когда задачу закрыли или
+            # удалили, пока модель думала (§12.3, §15.3): откат целиком,
+            # честное «не смог».
             logger.warning("Разбор не записан: %s", error)
             return RecordOutcome(ok=False, message=texts.NOT_SAVED)
 
@@ -1112,6 +1128,8 @@ class TaskService:
             logger.info(
                 "Правка словом: %s задачи %s", decision.edit["action"], decision.edit["task_id"]
             )
+        elif decision.same_task is not None:
+            logger.info("Дубль задачи %s: новой задачи нет", decision.same_task)
         elif recorded is None:
             logger.info("Задачи нет: сообщение %s сохранено с разбором", saved.id)
         elif decision.amend is not None:
@@ -1128,8 +1146,8 @@ class TaskService:
         context: EditContext,
         telegram_message_id: int,
     ) -> Decision:
-        """Четыре пути разбора: ответ на вопрос, правка словом, запись с
-        вопросом, обычная запись.
+        """Пять путей разбора: ответ на вопрос, правка словом, дубль, запись
+        с вопросом, обычная запись.
 
         Ответ дополняет задачу, по которой спрашивали (§10.2): напоминания
         планируются заново по сроку, какой у неё станет, и уходят в `amend`, а
@@ -1138,8 +1156,9 @@ class TaskService:
         отвечать не на что — это обычная запись.
 
         Правка — только при блоке 5 в промпте (§12.2): без него `edit` модель
-        отдать не могла, а если отдала, бот её не слушает. Ответ на открытый
-        вопрос главнее правки (§12.1).
+        отдать не могла, а если отдала, бот её не слушает; у пересланного и
+        снимка список есть, но правки нет всё равно (§15.2). Ответ на
+        открытый вопрос главнее правки (§12.1), оба главнее дубля (§15.3).
 
         План берётся у базы, только когда есть что планировать — задача или
         поправка; у разговора и сведения о себе задачи нет, и звать базу
@@ -1169,9 +1188,21 @@ class TaskService:
             }
             return Decision(reply=reply, task=None, reminders=[], amend=amend)
 
-        if understanding.edit is not None and context.tasks is not None:
+        if understanding.edit is not None and context.tasks is not None and context.edits:
             return await self._decide_edit(
                 understanding, understanding.edit, context.tasks, now, telegram_message_id
+            )
+
+        same = self._duplicate_of(understanding, context.tasks)
+        if same is not None:
+            reply = texts.duplicate_reply(
+                title=same.title,
+                due=self._due_words(same.due_at, same.due_precision),
+                repeat=rule_words(same.repeat),
+            )
+            apart = Button(text=texts.APART_BUTTON, data=edits.apart_data(telegram_message_id))
+            return Decision(
+                reply=reply, task=None, reminders=[], buttons=(apart,), same_task=same.id
             )
 
         rule = rule_of(understanding, understanding.due_at)
@@ -1213,13 +1244,14 @@ class TaskService:
     ) -> EditContext:
         """Подсказки для правки (§12.2) — или их отсутствие.
 
-        Пересланное правкой не бывает: блока 5 нет, свайп не читается. Без
-        хранилища — пустой список. Не прочитался список — блока нет, и разбор
-        идёт как до правки словом (поручение важнее контекста); не
-        прочиталась последняя задача или свайп — нет только этой строки.
+        Пересланное правкой не бывает: список — только для сверки дублей
+        (§15.2), свайп и последняя задача не читаются. Без хранилища —
+        пустой список. Не прочитался список — блока нет, и разбор идёт как до
+        правки словом (поручение важнее контекста); не прочиталась последняя
+        задача или свайп — нет только этой строки.
         """
         if forwarded_from is not None:
-            return NO_EDIT
+            return await self._check_context()
         store = self._edits
         if store is None:
             return EditContext(tasks=[], last_task=None, swipe=None)
@@ -1244,13 +1276,52 @@ class TaskService:
         )
         return EditContext(tasks=tasks, last_task=last_task, swipe=line)
 
+    async def _check_context(self) -> EditContext:
+        """Список для сверки дублей без правки — пересланное и снимок (§15.2).
+
+        Без хранилища — пустой список, и блока у них нет; сбой чтения — тоже
+        нет блока, и дубль не ищется.
+        """
+        store = self._edits
+        if store is None:
+            return EditContext(tasks=[], last_task=None, swipe=None, edits=False)
+        tasks = await self._open_tasks(store)
+        if tasks is None:
+            return NO_EDIT
+        logger.info("Список для сверки дублей: задач %s", len(tasks))
+        return EditContext(tasks=tasks, last_task=None, swipe=None, edits=False)
+
     async def _open_tasks(self, store: EditStore) -> list[TaskDetails] | None:
         """Открытые задачи по номерам; база не ответила — `None`, блока нет."""
         try:
             return edits.number_tasks(await store.open_tasks(edits.TASK_LIMIT))
         except DatabaseError as error:
-            logger.error("Открытые задачи не прочитаны, разбор без правки: %s", error)
+            logger.error("Открытые задачи не прочитаны, разбор без правки и дубля: %s", error)
             return None
+
+    @staticmethod
+    def _duplicate_of(
+        understanding: Understanding, tasks: Sequence[TaskDetails] | None
+    ) -> TaskDetails | None:
+        """Задача, которую повторяет сообщение (§15.3), — или `None`.
+
+        Номер модели переводится в задачу по тому же списку, что ушёл в
+        промпт. Номер вне списка, списка нет или вид не поручение — `same_as`
+        не слушается: строка в журнал, сообщение идёт обычным путём.
+        """
+        number = understanding.same_as
+        if number is None:
+            return None
+        task = edits.task_by_number(tasks, number) if tasks is not None else None
+        if task is None or understanding.kind not in TASK_KINDS:
+            logger.info(
+                "Дубль №%s не принят: вид %s, задач в списке %s",
+                number,
+                understanding.kind,
+                len(tasks) if tasks is not None else "нет",
+            )
+            return None
+        return task
 
     async def _last_events(self, store: EditStore, since: datetime) -> list[TaskEvent | None]:
         """Два события разговора за час (§12.2). Любой отказ — ни одного.

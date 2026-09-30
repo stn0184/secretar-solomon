@@ -535,6 +535,22 @@ def test_broken_reopen_callback_is_nothing(data: str) -> None:
     assert edits.parse_reopen(data) is None
 
 
+def test_apart_callback_fits_telegram_and_reads_back() -> None:
+    """«Записать отдельно» (§15.4): в callback — только сообщение владельца."""
+    data = edits.apart_data(9_999_999_999)
+
+    assert data == "apart:9999999999"
+    assert len(data.encode()) <= 64
+    assert edits.parse_apart(data) == 9_999_999_999
+
+
+@pytest.mark.parametrize(
+    "data", ["apart:", "apart:x", "apart:-1", "apart:1:2", "apart:١٢", f"reopen:{TASK_ID}", ""]
+)
+def test_broken_apart_callback_is_nothing(data: str) -> None:
+    assert edits.parse_apart(data) is None
+
+
 def test_candidate_button_carries_the_title_and_a_short_due() -> None:
     by_hour = make_task(due_at=datetime(2026, 10, 2, 17, 0, tzinfo=TZ), due_precision="time")
     by_day = make_task(due_at=datetime(2026, 10, 2, 18, 0, tzinfo=TZ), due_precision="day")

@@ -402,6 +402,21 @@ def understood_reply(
     return _retold(UNDERSTOOD.format(title=title), due, remind_at, priority, review_reason, repeat)
 
 
+# Дубль (`techspec/15-duplicates.md` §15.3): новой задачи нет, ответ — о
+# найденной. Кнопка под ним заводит задачу всё-таки отдельно (§15.4).
+ALREADY_RECORDED = "Это уже записано: {title}"
+APART_BUTTON = "Записать отдельно"
+
+
+def duplicate_reply(title: str, due: str | None = None, repeat: str | None = None) -> str:
+    """«Это уже записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00».
+
+    Суть, повтор и срок — найденной задачи. Ни «Напомню», ни приоритета:
+    напоминания у неё прежние, а срочность из сообщения в неё не пишется.
+    """
+    return _retold(ALREADY_RECORDED.format(title=title), due, None, "normal", None, repeat)
+
+
 # Правка из приложения перенесла срок (`techspec/11-edit.md` §11.4): тот же
 # пересказ, что у ответа на вопрос, но словом «Перенёс». Срок сняли — одна
 # фраза, и обещаний больше нет.

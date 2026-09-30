@@ -250,6 +250,7 @@ class FakeUnderstandings:
         amend: Mapping[str, Any] | None = None,
         edit: Mapping[str, Any] | None = None,
         photo_text: str | None = None,
+        same_task: str | None = None,
     ) -> Task | None:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -270,6 +271,7 @@ class FakeUnderstandings:
                 "amend": amend,
                 "edit": edit,
                 "photo_text": photo_text,
+                "same_task": same_task,
             }
         )
         if message_id in self._with_task:
@@ -431,7 +433,8 @@ class FakeAnalyst:
             else photo or NotUnderstood(reason="снимка тест не ждал")
         )
         # Снимки, с которыми звали модель: байты, вид, подпись и отправитель.
-        # Открытый вопрос снимка ложится в общий `questions`.
+        # Открытый вопрос и список задач снимка (§15.2) ложатся в общие
+        # `questions` и `tasks`.
         self.photos: list[tuple[bytes, ImageType, str, str | None]] = []
 
     async def analyze(
@@ -460,9 +463,11 @@ class FakeAnalyst:
         caption: str,
         forwarded_from: str | None = None,
         open_question: AskedQuestion | None = None,
+        tasks: Sequence[OpenTask] | None = None,
     ) -> PhotoVerdict:
         self.photos.append((image, media_type, caption, forwarded_from))
         self.questions.append(open_question)
+        self.tasks.append(None if tasks is None else list(tasks))
         # Снимок модель смотрит дольше текста; пауза — как у `FakeTranscriber`:
         # без неё «печатает…» не успел бы отправиться ни разу.
         await asyncio.sleep(0.05)

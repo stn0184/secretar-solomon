@@ -44,10 +44,13 @@ DAY_DUE_TIME = time(18, 0)
 # Callback кнопок (§12.6). Telegram ограничивает его 64 байтами, поэтому в
 # нём только вид действия и id: `pick:<сообщение владельца>:<задача>`,
 # `reopen:<задача>`, `back:<задача>:<раз откуда>:<раз куда>` — «Вернуть»
-# повторяющейся задачи, разы в секундах Unix (`techspec/13-repeat.md` §13.3).
+# повторяющейся задачи, разы в секундах Unix (`techspec/13-repeat.md` §13.3);
+# `apart:<сообщение владельца>` — «Записать отдельно» под дублем
+# (`techspec/15-duplicates.md` §15.4).
 PICK_PREFIX = "pick:"
 REOPEN_PREFIX = "reopen:"
 BACK_PREFIX = "back:"
+APART_PREFIX = "apart:"
 
 # На что ответили свайпом (§12.2): напоминание, другое сообщение бота, своё.
 SwipeTarget = Literal["reminder", "bot", "own"]
@@ -301,6 +304,11 @@ def back_data(task_id: str, moved_from: int, moved_to: int) -> str:
     return f"{BACK_PREFIX}{task_id}:{moved_from}:{moved_to}"
 
 
+def apart_data(telegram_message_id: int) -> str:
+    """Callback «Записать отдельно»: сообщение владельца, признанное дублем (§15.4)."""
+    return f"{APART_PREFIX}{telegram_message_id}"
+
+
 def _task_id(value: str) -> str | None:
     """id задачи из callback — только настоящий uuid: остальное в базу не идёт."""
     try:
@@ -327,6 +335,17 @@ def parse_reopen(data: str) -> str | None:
     if not data.startswith(REOPEN_PREFIX):
         return None
     return _task_id(data.removeprefix(REOPEN_PREFIX))
+
+
+def parse_apart(data: str) -> int | None:
+    """Разобрать callback «Записать отдельно». Кривой — `None`: номер
+    сообщения — только цифры ASCII без знака."""
+    if not data.startswith(APART_PREFIX):
+        return None
+    message = data.removeprefix(APART_PREFIX)
+    if not (message.isascii() and message.isdigit()):
+        return None
+    return int(message)
 
 
 def parse_back(data: str) -> tuple[str, int, int] | None:

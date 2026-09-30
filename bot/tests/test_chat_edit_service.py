@@ -201,17 +201,19 @@ async def test_service_without_a_store_sees_an_empty_list() -> None:
     assert outcome.message == texts.NOT_FOUND.format(title="встреча")
 
 
-async def test_forwarded_message_has_no_block_and_its_edit_is_dropped() -> None:
-    """Пересланное (§12.2): блока 5 нет, `edit` отбрасывается, запись — новая."""
+async def test_forwarded_message_gets_only_the_list_and_its_edit_is_dropped() -> None:
+    """Пересланное (§12.2, §15.2): список — только для сверки дублей, без
+    последней задачи и свайпа; `edit` отбрасывается, запись — новая."""
     service, analyst, understandings, _, store = build(
         edited(1, action="done", top_title="прислать смету")
     )
 
     outcome = await say(service, "пришлю смету", forwarded_from="Аня")
 
-    assert analyst.tasks == [None]
+    assert analyst.tasks == [[MEETING, REPORT, LAMP]]
+    assert analyst.last_tasks == [None]
     assert analyst.swipes == [None]
-    assert store.calls == []
+    assert store.calls == [("open_tasks", 50)]
     assert saved_edit(understandings) is None
     assert saved(understandings, "task")["title"] == "прислать смету"
     assert outcome.message.startswith("Записал: прислать смету")
