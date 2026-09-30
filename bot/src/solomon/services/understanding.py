@@ -149,6 +149,7 @@ class Understanding(BaseModel):
     question: str | None
     answers_question: bool
     edit: TaskEdit | None
+    same_as: int | None
     facts: list[FactItem]
 
 
@@ -266,10 +267,12 @@ question — один короткий вопрос владельцу по-ру
 answers_question — true, только если ниже есть блок «Открытый вопрос» и
 сообщение на него отвечает; без блока — всегда false.
 
-edit — правка уже записанной задачи, и только если ниже есть блок с
-открытыми задачами (он есть и тогда, когда задач нет); без блока — всегда
-edit = null. Если сообщение отвечает на открытый вопрос, это
-answers_question = true, а не правка: edit = null.
+edit — правка уже записанной задачи, same_as — номер задачи, которую
+сообщение повторяет; оба — только если ниже есть блок с открытыми задачами
+(у своего сообщения он есть и тогда, когда задач нет). Без блока — всегда
+edit = null и same_as = null. Если сообщение отвечает на открытый вопрос,
+это answers_question = true, а не правка и не дубль: edit = null и
+same_as = null.
 
 В facts — новые сведения о самом человеке, каждое одной короткой фразой,
 как строка справочника: «Машина — Toyota Camry», «Сын Миша ходит в садик»,
@@ -478,10 +481,37 @@ action = change без новых значений и один вопрос в q
 Поля верхнего уровня (kind, title, due_at и остальные) заполняйте так, будто
 сообщение — новое поручение: они нужны, если задачи в списке нет.
 Не правка, edit = null:
-- новое поручение, похожее на записанное: «купить молоко» при «купить
-  молоко» в списке — вторая задача, дубли не ищите;
+- новое поручение, похожее на записанное: то же дело — дубль (same_as,
+  правила ниже); «купить молоко в субботу» при «купить молоко» на пятницу —
+  новая задача, а не перенос;
 - рассказ о задаче без просьбы что-то поменять («встреча была тяжёлой») —
   разговор."""
+
+# Правила дубля (`techspec/15-duplicates.md` §15.1–15.2): идут в блоке 5
+# каждого сообщения — у своего после правил правки, у пересланного и снимка
+# вместо них.
+DUPLICATE_RULES = """Если сообщение заводит поручение, которое уже есть в этом списке, — это
+дубль: same_as — номер задачи из списка. Дубль — то же дело или событие, и
+срок в сообщении не назван или тот же: тот же день, а время, если названо и
+там и там, — то же. Слова, срочность, люди и вид не важны: «созвон с
+Ренатой в 21:00» при «встреча с Ренатой (срок: …, 21:00)» — дубль; «купить
+молоко» при «купить молоко (срок: пятница…)» — тоже.
+Не дубль, same_as = null:
+- назван другой срок — новое поручение, даже если дело то же;
+- у задачи со строкой «повтор: …» назван не ближайший раз, а другой день —
+  новое поручение: сравнивается только её срок;
+- правка задачи и ответ на открытый вопрос: same_as — только при
+  edit = null и answers_question = false.
+При дубле поля верхнего уровня (kind, title, due_at и остальные) заполняйте
+так, будто сообщение — новое поручение, а question = null: задача уже есть,
+спрашивать не о чем."""
+
+# У снимка (§15.2): со списком сверяется только главное поручение.
+PHOTO_DUPLICATE_RULE = """У снимка same_as — о главном поручении, выбранном по правилам снимка;
+more_tasks со списком не сверяйте."""
+
+# Пометка короткого блока: пересланное и снимок задач не правят (§12.1).
+SHORT_BLOCK_NOTE = "Это сообщение задач не меняет: edit = null."
 
 
 def _open_task_line(number: int, task: OpenTask, timezone: ZoneInfo) -> str:
@@ -507,26 +537,43 @@ def _open_task_line(number: int, task: OpenTask, timezone: ZoneInfo) -> str:
 
 
 def format_open_tasks(
-    tasks: Sequence[OpenTask] | None, last_task: int | None, timezone: ZoneInfo
+    tasks: Sequence[OpenTask] | None,
+    last_task: int | None,
+    timezone: ZoneInfo,
+    *,
+    short: bool = False,
+    photo: bool = False,
 ) -> str:
-    """Блок 5 «Открытые задачи» (§5.2, §12.2). `None` — блока нет.
+    """Блок 5 «Открытые задачи» (§5.2, §12.2, §15.2). `None` — блока нет.
 
     `tasks` приходят уже в порядке `edits.number_tasks`: номер строки —
     место в этом списке, по нему бот потом переводит номер модели в задачу.
-    Пустой список — строка «Открытых задач нет.» и те же правила: «перенеси
-    встречу» при пустом списке — тоже правка, просто задача не найдётся.
+    Полный блок — строки, последняя задача в разговоре, правила правки и
+    правила дубля. Пустой список — строка «Открытых задач нет.» и те же
+    правила: «перенеси встречу» при пустом списке — тоже правка, просто
+    задача не найдётся.
+
+    `short` — пересланное и снимок: строки, пометка «задач не меняет» и
+    правила дубля, без правил правки и без последней задачи; задач нет —
+    блока нет, сверять не с чем. `photo` дописывает к короткому блоку
+    строку о главном поручении снимка.
     """
-    if tasks is None:
+    if tasks is None or (short and not tasks):
         return ""
     if not tasks:
-        return f"Открытых задач нет.\n{EDIT_RULES}"
+        return f"Открытых задач нет.\n{EDIT_RULES}\n{DUPLICATE_RULES}"
     lines = ["Открытые задачи:"]
     lines.extend(
         _open_task_line(number, task, timezone) for number, task in enumerate(tasks, start=1)
     )
+    if short:
+        lines.extend((SHORT_BLOCK_NOTE, DUPLICATE_RULES))
+        if photo:
+            lines.append(PHOTO_DUPLICATE_RULE)
+        return "\n".join(lines)
     if last_task is not None:
         lines.append(f"Последняя задача в разговоре: №{last_task}")
-    lines.append(EDIT_RULES)
+    lines.extend((EDIT_RULES, DUPLICATE_RULES))
     return "\n".join(lines)
 
 
@@ -550,18 +597,20 @@ def build_system_prompt(
     last_task: int | None = None,
     *,
     photo: bool = False,
+    short: bool = False,
 ) -> str:
     """Системный промпт (§5.2): роль и правила, момент, что уже известно,
     открытый вопрос, открытые задачи. Пустые блоки не попадают вовсе.
 
     `photo` — разбирается снимок (§14.3): к блоку 1 дописываются правила
-    снимка. Без флага строка побайтно прежняя."""
+    снимка, блок 5 — короткий. `short` — короткий блок 5 у пересланного
+    (§15.2). Без флагов строка та же, что у своего текста и голоса."""
     rules = f"{RULES}\n\n{PHOTO_RULES}" if photo else RULES
     parts = [rules, format_moment(now, timezone)]
     blocks = (
         format_known(known),
         format_open_question(open_question, timezone),
-        format_open_tasks(tasks, last_task, timezone),
+        format_open_tasks(tasks, last_task, timezone, short=short or photo, photo=photo),
     )
     parts.extend(block for block in blocks if block)
     return "\n\n".join(parts)
@@ -812,13 +861,21 @@ class UnderstandingService:
         промпт, а ответ ли это — решает модель.
 
         `tasks` — открытые задачи по номерам (§12.2), `None` — блока 5 нет
-        (пересланное или сбой чтения); `last_task` — номер последней задачи
-        в разговоре; `swipe` — строка о том, на что ответили свайпом. Всё это
-        читает и нумерует слой выше.
+        (сбой чтения); `last_task` — номер последней задачи в разговоре;
+        `swipe` — строка о том, на что ответили свайпом. Всё это читает и
+        нумерует слой выше. У пересланного блок 5 короткий — только для
+        дубля (§15.2), последней задачи в нём нет.
         """
         known = await self._known_facts()
+        forwarded = forwarded_from is not None
         system = build_system_prompt(
-            self._clock(), self._settings.owner_timezone, known, open_question, tasks, last_task
+            self._clock(),
+            self._settings.owner_timezone,
+            known,
+            open_question,
+            tasks,
+            None if forwarded else last_task,
+            short=forwarded,
         )
         message = build_user_message(text, forwarded_from, spoken, swipe)
         answer = await self._ask(self._call(system=system, text=message))
@@ -831,12 +888,13 @@ class UnderstandingService:
 
         logger.info(
             "Разобрано: kind=%s, needs_review=%s, вопрос=%s, ответ на вопрос=%s, "
-            "правка=%s, сведений %s, токенов %s/%s",
+            "правка=%s, дубль=%s, сведений %s, токенов %s/%s",
             parsed.kind,
             parsed.needs_review,
             parsed.question is not None,
             parsed.answers_question,
             None if parsed.edit is None else parsed.edit.action,
+            parsed.same_as,
             len(parsed.facts),
             answer.usage.input_tokens,
             answer.usage.output_tokens,
@@ -856,20 +914,27 @@ class UnderstandingService:
         caption: str,
         forwarded_from: str | None = None,
         open_question: AskedQuestion | None = None,
+        tasks: Sequence[OpenTask] | None = None,
     ) -> PhotoVerdict:
         """Разобрать снимок или честно сказать, что не вышло (§14.3).
 
-        В промпте блоки 1–4 и правила снимка; блока открытых задач и строки
-        свайпа нет — снимок задач не правит. Отказы — те же, что у текста
-        (§5.4), и наружу исключением не выходят. `photo_text` и `more_tasks`
-        в ответе уже обрезаны; `edit` и `facts` — как их отдала модель:
-        отбрасывает их запись (`services/tasks.py`).
+        В промпте блоки 1–4, правила снимка и короткий блок 5 — открытые
+        задачи только для дубля (§15.2); строки свайпа нет — снимок задач не
+        правит. Отказы — те же, что у текста (§5.4), и наружу исключением не
+        выходят. `photo_text` и `more_tasks` в ответе уже обрезаны; `edit` и
+        `facts` — как их отдала модель: отбрасывает их запись
+        (`services/tasks.py`).
         """
         if self._photo_call is None:
             return self._not_understood("снимок разобрать нечем")
         known = await self._known_facts()
         system = build_system_prompt(
-            self._clock(), self._settings.owner_timezone, known, open_question, photo=True
+            self._clock(),
+            self._settings.owner_timezone,
+            known,
+            open_question,
+            tasks,
+            photo=True,
         )
         content = build_photo_content(image, media_type, build_photo_text(caption, forwarded_from))
         answer = await self._ask(self._photo_call(system=system, content=content))
@@ -883,13 +948,15 @@ class UnderstandingService:
 
         logger.info(
             "Снимок разобран: kind=%s, needs_review=%s, ответ на вопрос=%s, "
-            "прочитано знаков %s, ещё поручений %s, правка=%s, сведений %s, токенов %s/%s",
+            "прочитано знаков %s, ещё поручений %s, правка=%s, дубль=%s, сведений %s, "
+            "токенов %s/%s",
             trimmed.kind,
             trimmed.needs_review,
             trimmed.answers_question,
             len(trimmed.photo_text or ""),
             len(trimmed.more_tasks),
             None if trimmed.edit is None else trimmed.edit.action,
+            trimmed.same_as,
             len(trimmed.facts),
             answer.usage.input_tokens,
             answer.usage.output_tokens,

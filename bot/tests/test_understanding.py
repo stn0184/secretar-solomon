@@ -416,11 +416,81 @@ def test_open_tasks_go_after_the_open_question() -> None:
     assert prompt.endswith(format_open_tasks([MEETING], None, TZ))
 
 
-def test_rules_keep_edit_to_the_task_block_and_let_the_answer_win() -> None:
-    """`edit` — только при блоке 5; ответ на открытый вопрос — `answers_question`, не правка."""
-    assert "блок с\nоткрытыми задачами" in RULES
-    assert "edit = null" in RULES
-    assert "answers_question = true, а не правка" in RULES
+def test_rules_keep_edit_and_same_as_to_the_task_block_and_let_the_answer_win() -> None:
+    """`edit` и `same_as` — только при блоке 5; ответ на открытый вопрос —
+    `answers_question`, не правка и не дубль (§5.2 п. 1)."""
+    text = flat(RULES)
+
+    assert "только если ниже есть блок с открытыми задачами" in text
+    assert "edit = null и same_as = null" in text
+    assert "answers_question = true, а не правка и не дубль" in text
+
+
+def flat(text: str) -> str:
+    """Текст одной строкой: фраза правил не зависит от того, где её перенесли."""
+    return " ".join(text.split())
+
+
+def test_open_tasks_block_carries_the_duplicate_rules_after_the_edit_rules() -> None:
+    """Правила дубля §15.1–15.2 — в полном блоке после правил правки; «дубли не ищите» ушло."""
+    block = format_open_tasks([MEETING], None, TZ)
+
+    assert "дубли не ищите" not in block
+    assert block.index("action = change") < block.index("same_as")
+    for phrase in (
+        "same_as — номер задачи из списка",
+        "срок в сообщении не назван или тот же",
+        "назван другой срок",
+        "не ближайший раз",
+        "question = null",
+        "только при edit = null и answers_question = false",
+    ):
+        assert phrase in flat(block), phrase
+    assert "more_tasks" not in block
+
+
+def test_short_block_lists_the_tasks_with_the_duplicate_rules_only() -> None:
+    """Пересланное (§15.2): строки задач, пометка «задач не меняет» и правила дубля —
+    без правил правки и без последней задачи в разговоре."""
+    block = format_open_tasks([MEETING, REPORT], 2, TZ, short=True)
+    full = format_open_tasks([MEETING, REPORT], 2, TZ)
+
+    lines = block.splitlines()
+    assert lines[:3] == full.splitlines()[:3]
+    assert lines[3] == "Это сообщение задач не меняет: edit = null."
+    assert "Последняя задача в разговоре" not in block
+    assert "action = change" not in block
+    assert "same_as — номер задачи из списка" in flat(block)
+    assert "more_tasks" not in block
+
+
+def test_short_block_of_a_photo_keeps_more_tasks_out_of_the_check() -> None:
+    """Снимок (§15.2): дубль — о главном поручении, `more_tasks` со списком не сверяются."""
+    block = format_open_tasks([MEETING], None, TZ, short=True, photo=True)
+
+    assert block.startswith(format_open_tasks([MEETING], None, TZ, short=True))
+    assert "главном поручении" in flat(block)
+    assert "more_tasks" in block
+
+
+def test_short_block_without_tasks_is_no_block() -> None:
+    """Задач нет — у пересланного и снимка блока нет: сверять не с чем (§15.2)."""
+    assert format_open_tasks([], None, TZ, short=True) == ""
+    assert format_open_tasks(None, None, TZ, short=True) == ""
+    assert build_system_prompt(NOW, TZ, tasks=[], photo=True) == build_system_prompt(
+        NOW, TZ, photo=True
+    )
+
+
+def test_understanding_requires_same_as_right_after_the_edit() -> None:
+    """`same_as` — в схеме и обязательно (§5.3): не дубль модель отдаёт явным `null`."""
+    schema = Understanding.model_json_schema()
+    fields = list(schema["properties"])
+
+    assert "same_as" in set(schema["required"])
+    assert fields.index("same_as") == fields.index("edit") + 1
+    assert "same_as" in set(PhotoUnderstanding.model_json_schema()["required"])
+    assert make_understanding().same_as is None
 
 
 def test_understanding_requires_the_edit_and_all_its_fields() -> None:
@@ -691,6 +761,37 @@ async def test_without_tasks_the_prompt_has_no_task_block() -> None:
     assert "Открытых задач нет." not in system
 
 
+async def test_forwarded_message_gets_the_short_block_without_the_last_task() -> None:
+    """Пересланное (§15.2): список задач — коротким блоком, последней задачи нет."""
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze("пришлю смету завтра", forwarded_from="Аня", tasks=[MEETING], last_task=1)
+
+    system, _ = call.calls[0]
+    assert system == build_system_prompt(NOW, TZ, tasks=[MEETING], short=True)
+    assert "1. встреча с Ренатой" in system
+    assert "Последняя задача в разговоре" not in system
+
+
+async def test_forwarded_message_without_tasks_has_no_block() -> None:
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze("пришлю смету завтра", forwarded_from="Аня", tasks=[])
+
+    system, _ = call.calls[0]
+    assert "Открытых задач нет." not in system
+    assert "Открытые задачи:" not in system
+
+
+async def test_duplicate_number_goes_to_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    service, _ = build_service(answer=FakeAnswer(parsed_output=make_understanding(same_as=2)))
+
+    with caplog.at_level(logging.INFO):
+        await service.analyze("созвон с Ренатой в пять", tasks=[MEETING, REPORT])
+
+    assert "дубль=2" in caplog.text
+
+
 async def test_forwarded_sender_reaches_the_call() -> None:
     service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
 
@@ -731,11 +832,12 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 
 # ------------------------------------------------------------ снимок (§14.3)
 
-# Эталоны посчитаны на коммите до этапа 012 (`2203ade`): промпт и схема
-# ответа текста и голоса не должны сдвинуться ни на байт.
-PROMPT_WITH_EMPTY_TASKS_SHA256 = "8278d34afbaa06cf9d0cbf699e074815ae3fac2e9d6aefe733a4529982c22f69"
-PROMPT_BARE_SHA256 = "190529062c63a288f6d6e5836a4d31321815c7b32b72cdc7937da9c95ba4ecbd"
-SCHEMA_SHA256 = "1db1f7e60f14dd0b6f374127d1241ad181a5223c6a8e5ee761cc1bd099842e9e"
+# Эталоны пересчитаны на этапе 013: поле `same_as` и правила дубля (§15.2).
+# Дальше промпт и схема ответа текста и голоса сдвигаются только этапом,
+# который их меняет, — снимок и прочие ветки их не трогают.
+PROMPT_WITH_EMPTY_TASKS_SHA256 = "0d3983232e03815ef27a04b2c0cdb91383c0fefcad0fd86e35835f4a9cd24178"
+PROMPT_BARE_SHA256 = "15df1371223fbd35f0cc6a6eb03676af3a4d8d45afa48b5d44cf704fd143fd3e"
+SCHEMA_SHA256 = "dce15f144f4ac6a8258e60c42b5ba869449f7a070b7f87a60f73035460e8e82c"
 
 # Не настоящая картинка: модели здесь нет, важно только, что байты дошли.
 IMAGE = b"\xff\xd8\xff\xe0 not a real jpeg"
@@ -923,6 +1025,19 @@ async def test_photo_request_carries_the_picture_and_the_photo_rules_without_tas
     assert "Открытые задачи" not in system
     assert "Открытых задач нет." not in system
     assert content == build_photo_content(IMAGE, "image/jpeg", "Фото без подписи")
+
+
+async def test_photo_request_carries_the_short_task_block() -> None:
+    """Снимок (§15.2): открытые задачи — коротким блоком, без правил правки."""
+    answer = FakePhotoAnswer(parsed_output=make_photo_understanding())
+    service, photo_call, _ = build_photo_service(answer=answer)
+
+    await service.analyze_photo(IMAGE, media_type="image/jpeg", caption="", tasks=[MEETING])
+
+    system, _ = photo_call.calls[0]
+    assert system == build_system_prompt(NOW, TZ, tasks=[MEETING], photo=True)
+    assert system.endswith(format_open_tasks([MEETING], None, TZ, short=True, photo=True))
+    assert "action = change" not in system
 
 
 async def test_photo_request_carries_the_caption_the_sender_and_the_open_question() -> None:
