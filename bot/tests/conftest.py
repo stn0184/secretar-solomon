@@ -27,12 +27,15 @@ from aiogram.methods import (
 )
 from aiogram.methods.base import TelegramType
 from aiogram.types import (
+    Animation,
     CallbackQuery,
     Chat,
+    Document,
     File,
     Message,
     MessageOriginUser,
     PhotoSize,
+    Sticker,
     Update,
     User,
     VideoNote,
@@ -459,6 +462,9 @@ class FakeAnalyst:
     ) -> PhotoVerdict:
         self.photos.append((image, media_type, caption, forwarded_from))
         self.questions.append(open_question)
+        # Снимок модель смотрит дольше текста; пауза — как у `FakeTranscriber`:
+        # без неё «печатает…» не успел бы отправиться ни разу.
+        await asyncio.sleep(0.05)
         return self.photo_verdict
 
 
@@ -763,15 +769,98 @@ def make_voice_update(
     return Update(update_id=update_id, message=message)
 
 
-def make_photo_update(from_id: int = OWNER_ID, update_id: int = 1) -> Update:
-    """Фотография: ни текста, ни речи — бот такое пока не понимает."""
+def forwarded_from(sender: str | None) -> MessageOriginUser | None:
+    """Откуда переслано: от человека с этим именем — или не переслано вовсе."""
+    if sender is None:
+        return None
+    return MessageOriginUser(
+        type=MessageOriginType.USER,
+        date=datetime.now(UTC),
+        sender_user=User(id=555, is_bot=False, first_name=sender),
+    )
+
+
+def make_photo_update(
+    from_id: int = OWNER_ID,
+    update_id: int = 1,
+    caption: str | None = None,
+    sizes: Sequence[tuple[int, int, int | None]] = ((90, 90, 1_200),),
+    sender: str | None = None,
+) -> Update:
+    """Фото: размеры — ширина, высота и `file_size`, у каждого файл `photo-<ширина>`.
+
+    `file_size` `None` — Telegram размер не назвал. `sender` — фото переслано
+    владельцу от этого человека.
+    """
     user = User(id=from_id, is_bot=False, first_name="Тим")
     message = Message(
         message_id=update_id,
         date=datetime.now(UTC),
         chat=Chat(id=from_id, type="private"),
         from_user=user,
-        photo=[PhotoSize(file_id="photo-1", file_unique_id="photo-1", width=90, height=90)],
+        forward_origin=forwarded_from(sender),
+        caption=caption,
+        photo=[
+            PhotoSize(
+                file_id=f"photo-{width}",
+                file_unique_id=f"photo-{width}",
+                width=width,
+                height=height,
+                file_size=file_size,
+            )
+            for width, height, file_size in sizes
+        ],
+    )
+    return Update(update_id=update_id, message=message)
+
+
+def make_document_update(
+    mime_type: str | None,
+    file_size: int | None = 250_000,
+    update_id: int = 1,
+    caption: str | None = None,
+    animation: bool = False,
+) -> Update:
+    """Файл: картинка файлом, PDF и прочее; `animation` — GIF-анимация.
+
+    Анимацию Telegram присылает с `animation` и `document` сразу (§14.1).
+    """
+    user = User(id=OWNER_ID, is_bot=False, first_name="Тим")
+    message = Message(
+        message_id=update_id,
+        date=datetime.now(UTC),
+        chat=Chat(id=OWNER_ID, type="private"),
+        from_user=user,
+        caption=caption,
+        document=Document(
+            file_id="doc-1", file_unique_id="doc-1", mime_type=mime_type, file_size=file_size
+        ),
+        animation=(
+            Animation(file_id="doc-1", file_unique_id="doc-1", width=320, height=240, duration=3)
+            if animation
+            else None
+        ),
+    )
+    return Update(update_id=update_id, message=message)
+
+
+def make_sticker_update(update_id: int = 1) -> Update:
+    """Стикер: ни текста, ни речи, ни снимка."""
+    user = User(id=OWNER_ID, is_bot=False, first_name="Тим")
+    message = Message(
+        message_id=update_id,
+        date=datetime.now(UTC),
+        chat=Chat(id=OWNER_ID, type="private"),
+        from_user=user,
+        sticker=Sticker(
+            file_id="sticker-1",
+            file_unique_id="sticker-1",
+            type="regular",
+            width=512,
+            height=512,
+            is_animated=False,
+            is_video=False,
+        ),
     )
     return Update(update_id=update_id, message=message)
 

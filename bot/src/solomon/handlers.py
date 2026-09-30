@@ -28,6 +28,7 @@ from solomon.db.tasks import SpeechKind
 from solomon.services import edits
 from solomon.services.reminders import ReminderService
 from solomon.services.tasks import Button, PressOutcome, Swipe, TaskService
+from solomon.services.understanding import ImageType
 
 logger = logging.getLogger(__name__)
 
@@ -139,9 +140,85 @@ def speech_in(message: Message) -> dict[str, Speech] | bool:
     return {"speech": speech} if speech is not None else False
 
 
+# Предел файла снимка (`techspec/14-photo.md` §14.1): 3,5 МБ. В base64 это
+# меньше 5 МБ — самого строгого предела картинки у Claude.
+PHOTO_LIMIT = 3_670_016
+
+# Картинки файлом, которые модель принимает как есть (§14.1). Прочие `image/*`
+# — HEIC, GIF, TIFF, SVG — отказ «не открою».
+IMAGE_TYPES: dict[str, ImageType] = {
+    "image/jpeg": "image/jpeg",
+    "image/png": "image/png",
+    "image/webp": "image/webp",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Photo:
+    """Снимок: что нужно сервису, чтобы записать его и показать модели (§14.1)."""
+
+    file_id: str
+    media_type: ImageType
+    caption: str
+
+
+def fits(file_size: int | None) -> bool:
+    """Файл не больше предела; размер, который Telegram не назвал, подходит."""
+    return file_size is None or file_size <= PHOTO_LIMIT
+
+
+def photo_of(message: Message) -> Photo | None:
+    """Фото или картинка файлом, которую можно показать модели, — или ничего.
+
+    У фото Telegram присылает несколько размеров одного снимка: берётся самый
+    крупный, что влезает в предел. GIF-анимация приходит с `animation` и
+    `document` сразу — это не снимок. Подпись — как есть, нет её — пустая
+    строка.
+    """
+    if message.animation is not None:
+        return None
+    caption = message.caption or ""
+    if message.photo:
+        sizes = [size for size in message.photo if fits(size.file_size)]
+        if not sizes:
+            return None
+        largest = max(sizes, key=lambda size: size.width * size.height)
+        return Photo(largest.file_id, "image/jpeg", caption)
+    document = message.document
+    if document is None or not fits(document.file_size):
+        return None
+    media_type = IMAGE_TYPES.get((document.mime_type or "").lower())
+    return Photo(document.file_id, media_type, caption) if media_type is not None else None
+
+
+def photo_in(message: Message) -> dict[str, Photo] | bool:
+    """Фильтр снимка: пропускает фото и картинку файлом и отдаёт, что пришло."""
+    photo = photo_of(message)
+    return {"photo": photo} if photo is not None else False
+
+
+def refused_image(message: Message) -> bool:
+    """Картинка, которую не открыть: не того вида или больше предела (§14.1).
+
+    Фото, у которого ни один размер не влез в предел, — тоже: так не бывает,
+    мелкие размеры Telegram — килобайты, но молча терять снимок нельзя.
+    """
+    if message.animation is not None or photo_of(message) is not None:
+        return False
+    if message.photo:
+        return True
+    document = message.document
+    return document is not None and (document.mime_type or "").lower().startswith("image/")
+
+
 def is_not_text(message: Message) -> bool:
-    """Фотография, стикер, аудиофайл — ни текст, ни речь."""
-    return message.text is None and speech_of(message) is None
+    """Стикер, видео, аудиофайл, документ — ни текст, ни речь, ни снимок."""
+    return (
+        message.text is None
+        and speech_of(message) is None
+        and photo_of(message) is None
+        and not refused_image(message)
+    )
 
 
 def forwarded_sender(message: Message) -> str | None:
@@ -375,9 +452,51 @@ async def replace_text(
     return True
 
 
+async def handle_photo(message: Message, bot: Bot, tasks: TaskService | None, photo: Photo) -> None:
+    """Фото или картинка файлом — поручение: скачать, показать модели, записать.
+
+    Как у голоса: снимок качается в память замыканием, которое уходит в
+    сервис, и на диск не попадает (`techspec/14-photo.md` §14.2). Снимок
+    разбирается дольше текста — пока идёт разбор, в чате висит «печатает…».
+    Свайп у снимка не читается: правки у снимка нет (§14.3).
+    """
+    if tasks is None:
+        logger.error("Снимок некуда записать: бот собран без базы")
+        await message.answer(texts.NOT_SAVED)
+        return
+
+    async def load_image() -> bytes:
+        buffer = BytesIO()
+        await bot.download(photo.file_id, destination=buffer)
+        return buffer.getvalue()
+
+    async with ChatActionSender.typing(chat_id=message.chat.id, bot=bot):
+        outcome = await tasks.record_from_photo(
+            chat_id=message.chat.id,
+            telegram_message_id=message.message_id,
+            file_id=photo.file_id,
+            media_type=photo.media_type,
+            caption=photo.caption,
+            load_image=load_image,
+            forwarded_from=forwarded_sender(message),
+        )
+    await message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
+
+
+async def handle_refused_image(message: Message) -> None:
+    """Картинка не того вида или больше предела — отказ, и ничего не сохраняется."""
+    document = message.document
+    logger.info(
+        "Картинка не открыта: %s, байт %s",
+        document.mime_type if document is not None else "photo",
+        document.file_size if document is not None else None,
+    )
+    await message.answer(texts.FILE_REFUSED)
+
+
 async def handle_not_text(message: Message) -> None:
-    """Ни текст, ни речь — вежливый отказ, и ничего не сохраняется."""
-    logger.info("Сообщение не текстом и не голосом: %s", message.content_type)
+    """Ни текст, ни речь, ни снимок — вежливый отказ, и ничего не сохраняется."""
+    logger.info("Сообщение не текстом, не голосом и не снимком: %s", message.content_type)
     await message.answer(texts.NOT_TEXT)
 
 
@@ -386,14 +505,16 @@ def build_router() -> Router:
 
     Именно фабрика, а не общий объект модуля: роутер aiogram привязывается
     к одному диспетчеру навсегда, и второй сборке достался бы занятый.
-    Порядок важен: команды разбираются раньше свободного текста, речь —
-    раньше отказа на всё остальное.
+    Порядок важен: команды разбираются раньше свободного текста, речь и
+    снимок — раньше отказа на всё остальное.
     """
     router = Router(name="basic")
     router.message.register(handle_start, CommandStart())
     router.message.register(handle_help, Command("help"))
     router.message.register(handle_text, is_plain_text)
     router.message.register(handle_speech, speech_in)
+    router.message.register(handle_photo, photo_in)
+    router.message.register(handle_refused_image, refused_image)
     router.message.register(handle_not_text, is_not_text)
     router.callback_query.register(handle_done, F.data.startswith(DONE_PREFIX))
     router.callback_query.register(handle_pick, F.data.startswith(edits.PICK_PREFIX))
