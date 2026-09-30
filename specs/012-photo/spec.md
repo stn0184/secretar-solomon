@@ -151,7 +151,7 @@
       картинок в зависимости бота, в том числе dev, не попадает —
       разовый скрипт может взять её через `uv run --with`. Итог прогона
       — в отчёте исполнителя.
-- [ ] Mini App: `MessageKind` с `photo`, `photo_text` в выборках
+- [x] Mini App: `MessageKind` с `photo`, `photo_text` в выборках
       `lib/tasks.ts` и `lib/facts.ts`; `SourceMessage` — «Фото»,
       подпись, «Со снимка: …», «Снимок без подписи» (§14.4); тесты
       `lib/`.

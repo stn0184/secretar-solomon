@@ -394,6 +394,11 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* У снимка в цитате две строки: подпись и «Со снимка: …» (§14.4). */
+.source__text + .source__text {
+  margin-top: var(--s2);
+}
+
 .rem {
   list-style: none;
   margin: 0;

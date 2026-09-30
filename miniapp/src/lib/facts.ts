@@ -70,10 +70,12 @@ export type FactsResult = { ok: true; facts: Fact[] } | { ok: false; message: st
 
 // Источник — вложенная строка `messages` по внешнему ключу `source_message_id`;
 // вид разбора берётся прямо из jsonb, чтобы не тащить его целиком, и под
-// своим именем: `kind` — это вид самого сообщения (текст, голосовое, кружок).
+// своим именем: `kind` — это вид самого сообщения (текст, снимок, голосовое,
+// кружок).
 const COLUMNS =
   "id, category, text, status, created_at, " +
-  "source:messages(text, received_at, kind, duration_seconds, analysis_kind:analysis->>kind)";
+  "source:messages(text, received_at, kind, duration_seconds, photo_text, " +
+  "analysis_kind:analysis->>kind)";
 
 function parseSource(row: unknown): FactSource | null {
   const message = parseSourceMessage(row);

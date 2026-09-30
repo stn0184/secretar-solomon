@@ -57,6 +57,27 @@ describe("parseFact", () => {
     assert.equal(parsed.source?.receivedAt.getTime(), new Date("2026-09-12T08:59:00+05:00").getTime());
   });
 
+  it("источник-снимок несёт прочитанное со снимка", () => {
+    const parsed = parseFact({
+      id: "f2",
+      category: "home",
+      text: "Лампы в прихожей — E14",
+      status: "guess",
+      created_at: "2026-09-30T09:00:00+05:00",
+      source: {
+        text: "",
+        received_at: "2026-09-30T08:59:00+05:00",
+        kind: "photo",
+        duration_seconds: null,
+        photo_text: "Этикетка лампы: 7 Вт, E14",
+        analysis_kind: "task",
+      },
+    });
+
+    assert.equal(parsed?.source?.kind, "photo");
+    assert.equal(parsed?.source?.photoText, "Этикетка лампы: 7 Вт, E14");
+  });
+
   it("без источника — запись без цитаты, а не отказ", () => {
     const parsed = parseFact({ id: "f1", category: "home", text: "Живёт в Казани", status: "guess", created_at: "2026-09-02T10:00:00Z", source: null });
 
@@ -139,6 +160,7 @@ describe("sourceCaption", () => {
     receivedAt: new Date(2026, 8, 12, 9, 0),
     kind: "text" as const,
     durationSeconds: null,
+    photoText: null,
     analysisKind: "about_me",
   };
   const errand = {
@@ -146,6 +168,7 @@ describe("sourceCaption", () => {
     receivedAt: new Date(2026, 8, 24, 17, 40),
     kind: "text" as const,
     durationSeconds: null,
+    photoText: null,
     analysisKind: "task",
   };
 

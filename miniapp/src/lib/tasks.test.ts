@@ -25,6 +25,8 @@ import {
   formatDuration,
   groupOf,
   groupTasks,
+  messageCaption,
+  messageLines,
   needsSaving,
   parseSourceMessage,
   parseTask,
@@ -35,8 +37,8 @@ import {
   repeatOpen,
   repeatSummary,
   taskChanges,
+  type SourceMessage,
   validateDraft,
-  voiceCaption,
 } from "./tasks.ts";
 
 // Среда, 30 сентября 2026, 12:00.
@@ -223,9 +225,25 @@ describe("parseSourceMessage", () => {
   });
 
   it("незнакомый вид — текст, негодная длительность — пусто", () => {
-    const parsed = parseSourceMessage({ ...row, kind: "photo", duration_seconds: "long" });
+    const parsed = parseSourceMessage({ ...row, kind: "sticker", duration_seconds: "long" });
     assert.equal(parsed?.kind, "text");
     assert.equal(parsed?.durationSeconds, null);
+  });
+
+  it("снимок несёт вид и прочитанное; без прочитанного — пусто", () => {
+    const photo = parseSourceMessage({
+      ...row,
+      text: "купить такие же",
+      kind: "photo",
+      photo_text: "Этикетка лампы: 7 Вт, E14",
+    });
+    assert.equal(photo?.kind, "photo");
+    assert.equal(photo?.text, "купить такие же");
+    assert.equal(photo?.photoText, "Этикетка лампы: 7 Вт, E14");
+    assert.equal(parseSourceMessage({ ...row, kind: "photo", photo_text: "  " })?.photoText, null);
+    assert.equal(parseSourceMessage({ ...row, kind: "photo", photo_text: 5 })?.photoText, null);
+    // Старая база без столбца: поле просто пустое.
+    assert.equal(parseSourceMessage(row)?.photoText, null);
   });
 
   it("без текста или даты строка не годится", () => {
@@ -235,20 +253,58 @@ describe("parseSourceMessage", () => {
   });
 });
 
-describe("voiceCaption", () => {
-  const at = new Date(2026, 8, 28, 10, 2);
+function source(overrides: Partial<SourceMessage> = {}): SourceMessage {
+  return {
+    text: "",
+    receivedAt: new Date(2026, 8, 28, 10, 2),
+    kind: "text",
+    durationSeconds: null,
+    photoText: null,
+    ...overrides,
+  };
+}
 
+describe("messageCaption", () => {
   it("голосовое — «Голосовое · 0:32», кружок — «Кружок · 0:32»", () => {
-    assert.equal(voiceCaption({ text: "", receivedAt: at, kind: "voice", durationSeconds: 32 }), "Голосовое · 0:32");
-    assert.equal(voiceCaption({ text: "", receivedAt: at, kind: "video_note", durationSeconds: 95 }), "Кружок · 1:35");
+    assert.equal(messageCaption(source({ kind: "voice", durationSeconds: 32 })), "Голосовое · 0:32");
+    assert.equal(messageCaption(source({ kind: "video_note", durationSeconds: 95 })), "Кружок · 1:35");
+  });
+
+  it("у снимка — «Фото», без длительности", () => {
+    assert.equal(messageCaption(source({ kind: "photo", text: "купить такие же" })), "Фото");
   });
 
   it("у текста подписи нет", () => {
-    assert.equal(voiceCaption({ text: "x", receivedAt: at, kind: "text", durationSeconds: null }), null);
+    assert.equal(messageCaption(source({ text: "x" })), null);
   });
 
   it("без длительности — только слово", () => {
-    assert.equal(voiceCaption({ text: "", receivedAt: at, kind: "voice", durationSeconds: null }), "Голосовое");
+    assert.equal(messageCaption(source({ kind: "voice" })), "Голосовое");
+  });
+});
+
+describe("messageLines", () => {
+  it("у снимка — подпись, ниже «Со снимка: …»", () => {
+    const photo = source({ kind: "photo", text: "купить такие же", photoText: "Этикетка: E14" });
+    assert.deepEqual(messageLines(photo), ["купить такие же", "Со снимка: Этикетка: E14"]);
+  });
+
+  it("у снимка без подписи — только прочитанное, без прочитанного — только подпись", () => {
+    assert.deepEqual(messageLines(source({ kind: "photo", text: "  ", photoText: "Приглашение" })), [
+      "Со снимка: Приглашение",
+    ]);
+    assert.deepEqual(messageLines(source({ kind: "photo", text: "это важно" })), ["это важно"]);
+  });
+
+  it("ни подписи, ни прочитанного — «Снимок без подписи»", () => {
+    assert.deepEqual(messageLines(source({ kind: "photo", text: "" })), ["Снимок без подписи"]);
+  });
+
+  it("у текста и голоса — сам текст, прочитанное не показывается", () => {
+    assert.deepEqual(messageLines(source({ text: "в пятницу расчёт" })), ["в пятницу расчёт"]);
+    assert.deepEqual(messageLines(source({ kind: "voice", text: "позвонить маме", photoText: "x" })), [
+      "позвонить маме",
+    ]);
   });
 });
 

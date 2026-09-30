@@ -122,10 +122,12 @@ tests/fixtures/photos/draw.py`, шрифт — Arial из Windows); pillow в
   выборки `tasks.ts` и `facts.ts` читают `photo_text`. Приложение
   выкладывается после миграции (порядок в `supabase/README.md`): на
   старой базе выборка `photo_text` упала бы.
-- Чистые функции в `lib/tasks.ts`: `sourceCaption(message)` — «Фото»,
-  «Голосовое · 0:32» или `null` (тогда «Текст»); `sourceLines(message)` —
+- Чистые функции в `lib/tasks.ts`: `messageCaption(message)` — «Фото»,
+  «Голосовое · 0:32» или `null` (тогда «Текст»); `messageLines(message)` —
   строки цитаты: у снимка подпись и «Со снимка: …», пусто — «Снимок без
-  подписи»; у остальных — текст.
+  подписи»; у остальных — текст. Имя `sourceCaption` занято в
+  `lib/facts.ts` (подпись записи памяти), поэтому `message…`;
+  `voiceCaption` заменён на `messageCaption`.
 
 ## Неточности спеки
 

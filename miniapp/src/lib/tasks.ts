@@ -77,19 +77,27 @@ export interface OpenQuestion {
   askedAt: Date | null;
 }
 
-/** Вид исходного сообщения (`techspec/03-schema.md` §3.2): текст, голосовое, кружок. */
-export type MessageKind = "text" | "voice" | "video_note";
+/**
+ * Вид исходного сообщения (`techspec/03-schema.md` §3.2): текст, снимок,
+ * голосовое, кружок.
+ */
+export type MessageKind = "text" | "photo" | "voice" | "video_note";
+
+const MESSAGE_KINDS: readonly MessageKind[] = ["text", "photo", "voice", "video_note"];
 
 /**
  * Исходное сообщение задачи — целиком, как его читал помощник. У голосового
  * и кружка `text` — расшифровка, а `durationSeconds` — длина звука: по
- * подписи «Голосовое · 0:32» видно, откуда ошибки в словах (§9.4).
+ * подписи «Голосовое · 0:32» видно, откуда ошибки в словах (§9.4). У снимка
+ * `text` — подпись (пустая, если её не было), а `photoText` — что модель
+ * прочитала со снимка (`techspec/14-photo.md` §14.4); сам снимок не хранится.
  */
 export interface SourceMessage {
   text: string;
   receivedAt: Date;
   kind: MessageKind;
   durationSeconds: number | null;
+  photoText: string | null;
 }
 
 export interface Reminder {
@@ -164,12 +172,14 @@ export function parseSourceMessage(row: unknown): SourceMessage | null {
     text: r.text,
     receivedAt,
     // Незнакомый вид читается как текст: подписи не будет, но цитата останется.
-    kind: oneOf<MessageKind>(r.kind, ["text", "voice", "video_note"], "text"),
+    kind: oneOf<MessageKind>(r.kind, MESSAGE_KINDS, "text"),
     durationSeconds: typeof duration === "number" && Number.isFinite(duration) ? duration : null,
+    photoText:
+      typeof r.photo_text === "string" && r.photo_text.trim() !== "" ? r.photo_text.trim() : null,
   };
 }
 
-/* ------------------------------------------------------------------ голос */
+/* ------------------------------------------------------- голос и снимок */
 
 /** «0:32», «1:35», «62:05» — минуты и секунды, часов нет: кружок и голосовое короткие. */
 export function formatDuration(seconds: number): string {
@@ -179,21 +189,42 @@ export function formatDuration(seconds: number): string {
   return `${minutes}:${String(rest).padStart(2, "0")}`;
 }
 
-const VOICE_WORD: Record<Exclude<MessageKind, "text">, string> = {
+const KIND_WORD: Record<Exclude<MessageKind, "text">, string> = {
+  photo: "Фото",
   voice: "Голосовое",
   video_note: "Кружок",
 };
 
 /**
- * Подпись над расшифровкой: «Голосовое · 0:32», «Кружок · 0:15»; у текста
- * подписи нет — `null`. Без длительности остаётся одно слово.
+ * Подпись над цитатой: «Голосовое · 0:32», «Кружок · 0:15», «Фото»; у текста
+ * подписи нет — `null` (тогда «Текст»). Без длительности остаётся одно слово;
+ * у снимка длительности не бывает.
  */
-export function voiceCaption(message: SourceMessage): string | null {
+export function messageCaption(message: SourceMessage): string | null {
   if (message.kind === "text") {
     return null;
   }
-  const word = VOICE_WORD[message.kind];
-  return message.durationSeconds === null ? word : `${word} · ${formatDuration(message.durationSeconds)}`;
+  const word = KIND_WORD[message.kind];
+  return message.durationSeconds === null || message.kind === "photo"
+    ? word
+    : `${word} · ${formatDuration(message.durationSeconds)}`;
+}
+
+/**
+ * Строки цитаты (`techspec/14-photo.md` §14.4). У снимка — подпись, если
+ * она есть, и ниже «Со снимка: …»; нет ни того, ни другого — «Снимок без
+ * подписи». У текста и голоса — сам текст.
+ */
+export function messageLines(message: SourceMessage): string[] {
+  if (message.kind !== "photo") {
+    return [message.text];
+  }
+  const caption = message.text.trim();
+  const lines = [
+    ...(caption ? [caption] : []),
+    ...(message.photoText ? [`Со снимка: ${message.photoText}`] : []),
+  ];
+  return lines.length > 0 ? lines : ["Снимок без подписи"];
 }
 
 function parseReminder(row: unknown): Reminder | null {
@@ -343,7 +374,7 @@ export async function loadTaskDetails(db: Db, task: Task): Promise<DetailsResult
       ? query(db, (client: SupabaseClient) =>
           client
             .from("messages")
-            .select("text, received_at, kind, duration_seconds")
+            .select("text, received_at, kind, duration_seconds, photo_text")
             .eq("id", messageId)
             .limit(1),
         )
