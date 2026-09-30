@@ -522,8 +522,10 @@ class FakeEdits:
     правится, возврат активной — без записи. Повторяющуюся задачу «сделал» и
     пропуск переводят на `next_at`, только если она стоит на разе
     `occurrence` (§13.3); `return_occurrence` возвращает её на прежний раз
-    так же, как функция базы. `broken` — имена методов, которые отвечают
-    отказом базы.
+    так же, как функция базы. `record_separately` — как одноимённая функция
+    базы (`techspec/15-duplicates.md` §15.6): второй раз по тому же
+    сообщению не пишет и отдаёт его как есть. `broken` — имена методов,
+    которые отвечают отказом базы.
     """
 
     def __init__(
@@ -547,6 +549,8 @@ class FakeEdits:
         self.picks: list[tuple[str, dict[str, Any], str]] = []
         self.reopens: list[tuple[str, list[Planned]]] = []
         self.returns: list[tuple[str, int, int, list[Planned]]] = []
+        # «Записать отдельно»: сообщение, задача, план и ответ.
+        self.separates: list[tuple[str, dict[str, Any], list[Planned], str]] = []
 
     def _touch(self, name: str, *args: Any) -> None:
         self.calls.append((name, *args))
@@ -606,6 +610,24 @@ class FakeEdits:
         self.tasks[task.id] = replace(task, status=status)
         self.messages[key] = replace(stored, task_id=task.id, reply=reply)
         return PickedMessage(id=stored.id, task_id=task.id, reply=reply)
+
+    async def record_separately(
+        self,
+        message_id: str,
+        task: Mapping[str, Any],
+        reminders: Sequence[Planned],
+        reply: str,
+    ) -> PickedMessage:
+        self._touch("record_separately", message_id)
+        key, stored = next(
+            (key, stored) for key, stored in self.messages.items() if stored.id == message_id
+        )
+        if any(written[0] == message_id for written in self.separates):
+            return PickedMessage(id=stored.id, task_id=stored.task_id, reply=stored.reply)
+        self.separates.append((message_id, dict(task), list(reminders), reply))
+        task_id = f"separate-{len(self.separates)}"
+        self.messages[key] = replace(stored, task_id=task_id, reply=reply)
+        return PickedMessage(id=stored.id, task_id=task_id, reply=reply)
 
     async def reopen(self, task_id: str, schedule: Sequence[Planned]) -> TaskDetails | None:
         self._touch("reopen", task_id)

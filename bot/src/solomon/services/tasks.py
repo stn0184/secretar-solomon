@@ -96,6 +96,7 @@ from solomon.services.understanding import (
     ImageType,
     OpenTask,
     PhotoAnalysis,
+    PhotoUnderstanding,
     PhotoVerdict,
     SpeechQuality,
     TaskEdit,
@@ -335,6 +336,14 @@ class EditStore(Protocol):
 
     async def pick(self, message_id: str, edit: Mapping[str, Any], reply: str) -> PickedMessage: ...
 
+    async def record_separately(
+        self,
+        message_id: str,
+        task: Mapping[str, Any],
+        reminders: Sequence[Planned],
+        reply: str,
+    ) -> PickedMessage: ...
+
     async def reopen(self, task_id: str, schedule: Sequence[Planned]) -> TaskDetails | None: ...
 
     async def return_occurrence(
@@ -382,6 +391,22 @@ class DatabaseEditStore:
     async def pick(self, message_id: str, edit: Mapping[str, Any], reply: str) -> PickedMessage:
         return await db_tasks.pick_task(
             self._db, owner_telegram_id=self._owner, message_id=message_id, edit=edit, reply=reply
+        )
+
+    async def record_separately(
+        self,
+        message_id: str,
+        task: Mapping[str, Any],
+        reminders: Sequence[Planned],
+        reply: str,
+    ) -> PickedMessage:
+        return await db_tasks.record_separately(
+            self._db,
+            owner_telegram_id=self._owner,
+            message_id=message_id,
+            task=task,
+            reminders=[item.as_row() for item in reminders],
+            reply=reply,
         )
 
     async def reopen(self, task_id: str, schedule: Sequence[Planned]) -> TaskDetails | None:
@@ -578,6 +603,11 @@ def fact_rows(understanding: Understanding) -> list[dict[str, Any]]:
         {"category": item.category, "text": item.text, "status": status}
         for item in understanding.facts
     ]
+
+
+def paragraphs(*parts: str | None) -> str:
+    """Ответ абзацами: основная строка и то, что к ней добавилось (§14.4, §15.5)."""
+    return "\n\n".join(part for part in parts if part)
 
 
 def literal_fields(text: str) -> dict[str, Any]:
@@ -917,7 +947,7 @@ class TaskService:
                 part is not None for part in (decision.task, decision.amend, decision.same_task)
             ):
                 more = texts.more_on_photo(photo.more_tasks)
-                decision = replace(decision, reply=f"{decision.reply}\n\n{more}")
+                decision = replace(decision, reply=paragraphs(decision.reply, more))
 
         return await self._write(
             saved,
@@ -1205,6 +1235,14 @@ class TaskService:
                 reply=reply, task=None, reminders=[], buttons=(apart,), same_task=same.id
             )
 
+        return await self._new_task(understanding, now)
+
+    async def _new_task(self, understanding: Understanding, now: datetime) -> Decision:
+        """Запись с вопросом или обычная запись — сообщение заводит своё.
+
+        Ею же «Записать отдельно» заводит задачу из дубля (§15.4): так, как
+        её завёл бы обычный путь, с планом на момент нажатия.
+        """
         rule = rule_of(understanding, understanding.due_at)
         task_row = task_fields(understanding, rule) if understanding.kind in TASK_KINDS else None
         planned = []
@@ -1608,13 +1646,58 @@ class TaskService:
             return PressOutcome(message=texts.DONE_UNKNOWN, replace=False)
         return PressOutcome(message=reply, replace=True)
 
+    async def apart(self, *, chat_id: int, telegram_message_id: int) -> PressOutcome:
+        """Кнопка «Записать отдельно» под дублем (`techspec/15-duplicates.md` §15.4).
+
+        Разбор берётся из базы — из сообщения владельца, которое бот счёл
+        дублем; задача строится так, как её завёл бы обычный путь, расписание
+        — у `reminder_plan` на момент нажатия. Пишет `record_separately` одной
+        транзакцией и возвращает ответ той записи, что легла: этого нажатия
+        или прежнего, — второе нажатие ничего не пишет. Отказ базы или плана —
+        подсказка, кнопка остаётся.
+        """
+        store = self._edits
+        if store is None:
+            return PressOutcome(message=texts.NOT_SAVED, replace=False)
+        try:
+            stored = await store.message(chat_id, telegram_message_id)
+            understanding = self._stored_understanding(stored) if stored is not None else None
+            if stored is None or understanding is None or understanding.kind not in TASK_KINDS:
+                return PressOutcome(message=texts.MESSAGE_UNKNOWN, replace=False)
+            decision = await self._new_task(understanding, self._clock())
+            if decision.task is None:
+                return PressOutcome(message=texts.MESSAGE_UNKNOWN, replace=False)
+            reply = decision.reply
+            if isinstance(understanding, PhotoUnderstanding) and understanding.more_tasks:
+                reply = paragraphs(reply, texts.more_on_photo(understanding.more_tasks))
+            picked = await store.record_separately(
+                stored.id, decision.task, decision.reminders, reply
+            )
+        except DatabaseError as error:
+            logger.warning("Задача из дубля не записана: %s", error)
+            return PressOutcome(message=texts.NOT_SAVED, replace=False)
+        if not picked.reply:
+            return PressOutcome(message=texts.MESSAGE_UNKNOWN, replace=False)
+        if picked.reply == reply:
+            logger.info("Записано отдельно: задача %s", picked.task_id)
+        else:
+            logger.info("Задача по сообщению %s уже заведена: второй раз не пишем", stored.id)
+        return PressOutcome(message=picked.reply, replace=True)
+
     @staticmethod
     def _stored_understanding(stored: StoredMessage) -> Understanding | None:
-        """Разбор из `messages.analysis`; не читается — `None`, правка не угадывается."""
+        """Разбор из `messages.analysis`; не читается — `None`, правка не угадывается.
+
+        Разбор снимка узнаётся по `more_tasks` и читается моделью снимка: они
+        нужны ответу «Записать отдельно» (§15.4). В разборе, записанном до
+        этапа 013, нет `same_as` — он читается как «не дубль».
+        """
         if stored.analysis is None:
             return None
+        analysis = {"same_as": None, **stored.analysis}
+        model = PhotoUnderstanding if "more_tasks" in analysis else Understanding
         try:
-            return Understanding.model_validate(stored.analysis)
+            return model.model_validate(analysis)
         except ValidationError as error:
             logger.warning("Разбор сообщения %s не читается: %s", stored.id, error)
             return None

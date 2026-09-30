@@ -406,6 +406,8 @@ def understood_reply(
 # найденной. Кнопка под ним заводит задачу всё-таки отдельно (§15.4).
 ALREADY_RECORDED = "Это уже записано: {title}"
 APART_BUTTON = "Записать отдельно"
+# Под кнопкой нет сообщения или его разбор не читается (§15.4).
+MESSAGE_UNKNOWN = "Не нашёл это сообщение."
 
 
 def duplicate_reply(title: str, due: str | None = None, repeat: str | None = None) -> str:

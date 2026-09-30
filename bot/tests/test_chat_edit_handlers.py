@@ -62,6 +62,7 @@ from tests.test_chat_edit_service import (
     candidate_message,
     edited,
 )
+from tests.test_duplicates_service import MEETING_REPLY, duplicate_message, repeated
 
 QUESTION_ID = 41
 
@@ -473,6 +474,113 @@ async def test_unedited_message_still_tells_what_was_written(
     await dispatcher.feed_update(bot, reopen_press())
 
     assert len(store.reopens) == 1
+    assert session.answers == [session.edits[0].text]
+
+
+# ------------------------------------------------------- «Записать отдельно»
+
+
+def apart_press(update_id: int = 7) -> Update:
+    return make_callback_update(f"apart:{QUESTION_ID}", text=MEETING_REPLY, update_id=update_id)
+
+
+def duplicate_store(**fields: Any) -> FakeEdits:
+    return FakeEdits(OPEN, messages={QUESTION_ID: duplicate_message(repeated(1))}, **fields)
+
+
+async def test_duplicate_answer_comes_with_the_apart_button(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    """Под «Это уже записано» — кнопка с номером сообщения владельца (§15.4)."""
+    service, _, _ = build_tasks(settings, repeated(1))
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(bot, make_update("созвон с Ренатой", update_id=41))
+
+    assert session.texts == [MEETING_REPLY]
+    assert rows(sent_markups(session)[0]) == [[("Записать отдельно", "apart:41")]]
+
+
+async def test_apart_writes_first_and_then_replaces_the_duplicate_answer(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    store = duplicate_store()
+    service, _, _ = build_tasks(settings, store=store, planner=FakePlanner(MEETING_PLAN))
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(bot, apart_press())
+
+    assert len(store.separates) == 1
+    assert [edit.text for edit in session.edits] == [
+        "Записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. Напомню: 2 октября в 16:00"
+    ]
+    assert session.edits[0].message_id == 7
+    assert session.edits[0].reply_markup is None
+    assert session.answers == [None]
+
+
+async def test_apart_the_base_refused_keeps_the_button(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    service, _, _ = build_tasks(settings, store=duplicate_store(broken={"record_separately"}))
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(bot, apart_press())
+
+    assert session.edits == []
+    assert session.answers == [texts.NOT_SAVED]
+
+
+async def test_apart_without_a_database_says_it_did_not_write(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    dispatcher = build_dispatcher(settings)
+
+    await dispatcher.feed_update(bot, apart_press())
+
+    assert session.edits == []
+    assert session.answers == [texts.NOT_SAVED]
+
+
+async def test_apart_with_broken_data_touches_nothing(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    service, _, store = build_tasks(settings)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(bot, make_callback_update("apart:сорок"))
+
+    assert store.calls == []
+    assert session.answers == ["Не нашёл это сообщение."]
+
+
+async def test_apart_from_a_stranger_never_reaches_the_handler(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    store = duplicate_store()
+    service, _, _ = build_tasks(settings, store=store)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(
+        bot, make_callback_update(f"apart:{QUESTION_ID}", from_id=STRANGER_ID)
+    )
+
+    assert store.calls == []
+    assert session.sent == []
+
+
+async def test_unedited_duplicate_answer_still_tells_what_was_written(
+    stubborn: tuple[Bot, StubbornSession], settings: Settings
+) -> None:
+    """Задача легла, а «Это уже записано» не сменилось — ответ всплывает."""
+    bot, session = stubborn
+    store = duplicate_store()
+    service, _, _ = build_tasks(settings, store=store)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(bot, apart_press())
+
+    assert len(store.separates) == 1
     assert session.answers == [session.edits[0].text]
 
 

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -16,8 +17,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from solomon import texts
-from solomon.db.tasks import OpenQuestion, SavedMessage
-from solomon.services.tasks import Button, RecordOutcome, TaskService
+from solomon.db.tasks import OpenQuestion, SavedMessage, StoredMessage
+from solomon.services.tasks import Button, PressOutcome, RecordOutcome, TaskService
 from solomon.services.understanding import NotUnderstood, PhotoUnderstanding, Understanding
 from tests.conftest import (
     OWNER_ID,
@@ -382,3 +383,168 @@ async def test_photo_without_the_list_is_recorded_new() -> None:
     assert analyst.tasks == [None]
     assert saved(understandings, "same_task") is None
     assert saved(understandings, "task") is not None
+
+
+# ------------------------------------------------------- «Записать отдельно»
+
+
+def duplicate_message(
+    verdict: Understanding, *, analysis: dict[str, Any] | None = None
+) -> StoredMessage:
+    """Сообщение-дубль, как оно лежит в базе: о найденной задаче, с ответом."""
+    return StoredMessage(
+        id="9a72",
+        text="созвон с Ренатой в пятницу в пять",
+        task_id=MEETING_ID,
+        analysis=verdict.model_dump(mode="json") if analysis is None else analysis,
+        reply=MEETING_REPLY,
+    )
+
+
+def with_message(message: StoredMessage, **fields: Any) -> FakeEdits:
+    return FakeEdits(OPEN, messages={MESSAGE_ID: message}, **fields)
+
+
+async def press(service: TaskService) -> PressOutcome:
+    return await service.apart(chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID)
+
+
+async def test_apart_records_the_task_as_the_usual_path_would() -> None:
+    """Нажатие (§15.4): разбор из базы, план на момент нажатия, ответ вместо дубля."""
+    store = with_message(duplicate_message(repeated(1)))
+    service, _, understandings, planner, _ = build(
+        make_understanding(), store, planner=FakePlanner(MEETING_PLAN)
+    )
+
+    outcome = await press(service)
+
+    reply = "Записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. Напомню: 2 октября в 16:00"
+    assert outcome == PressOutcome(message=reply, replace=True)
+    [(message_id, task, reminders, written)] = store.separates
+    assert message_id == "9a72"
+    assert task["title"] == "созвон с Ренатой"
+    assert (task["due_precision"], task["kind"]) == ("time", "task")
+    assert reminders == MEETING_PLAN
+    assert written == reply
+    assert planner.calls[0]["now"] == NOW
+    # Первый шаг приёма не повторяется: пишет только `record_separately`.
+    assert understandings.calls == []
+
+
+async def test_apart_keeps_the_question_of_the_model() -> None:
+    """Задача — как на обычном пути (§10.1): вопрос модели ставится."""
+    store = with_message(duplicate_message(repeated(1, due_at=None, question="Во сколько?")))
+    service, _, _, _, _ = build(make_understanding(), store)
+
+    outcome = await press(service)
+
+    assert outcome.message == "Записал: созвон с Ренатой. Во сколько?"
+    [(_, task, _, _)] = store.separates
+    assert task["open_question"] == "Во сколько?"
+    assert task["needs_review"] is True
+
+
+async def test_second_press_shows_what_was_written_and_writes_nothing() -> None:
+    """Второе нажатие (§15.4): задача уже заведена — сохранённый ответ."""
+    store = with_message(duplicate_message(repeated(1)))
+    service, _, _, _, _ = build(make_understanding(), store)
+
+    first = await press(service)
+    second = await press(service)
+
+    assert second == first
+    assert len(store.separates) == 1
+
+
+async def test_apart_of_a_photo_keeps_the_rest_of_the_photo() -> None:
+    """У снимка (§15.4): разбор читается моделью снимка, «На снимке ещё» остаётся."""
+    store = with_message(duplicate_message(invitation(same_as=1)))
+    service, _, _, _, _ = build(make_understanding(), store)
+
+    outcome = await press(service)
+
+    assert outcome.message.split(chr(10) * 2) == [
+        "Записал: встреча с Ренатой. Срок: пятница, 2 октября, 17:00",
+        MORE_HINT,
+    ]
+
+
+async def test_apart_reads_an_analysis_without_same_as() -> None:
+    """Разбор, записанный до этапа, читается: `same_as` в нём нет."""
+    analysis = repeated(None).model_dump(mode="json")
+    del analysis["same_as"]
+    store = with_message(duplicate_message(repeated(None), analysis=analysis))
+    service, _, _, _, _ = build(make_understanding(), store)
+
+    outcome = await press(service)
+
+    assert outcome.replace
+    assert len(store.separates) == 1
+
+
+@pytest.mark.parametrize(
+    "analysis",
+    [None, {"kind": "task"}, repeated(1, kind="chat").model_dump(mode="json")],
+    ids=["no-analysis", "unreadable", "not-an-errand"],
+)
+async def test_apart_without_a_readable_errand_says_the_message_is_unknown(
+    analysis: dict[str, Any] | None,
+) -> None:
+    message = replace(duplicate_message(repeated(1)), analysis=analysis)
+    store = with_message(message)
+    service, _, _, _, _ = build(make_understanding(), store)
+
+    outcome = await press(service)
+
+    assert outcome == PressOutcome(message=texts.MESSAGE_UNKNOWN, replace=False)
+    assert store.separates == []
+
+
+async def test_apart_of_an_unknown_message_says_so() -> None:
+    service, _, _, _, store = build(make_understanding(), FakeEdits(OPEN))
+
+    outcome = await press(service)
+
+    assert outcome == PressOutcome(message="Не нашёл это сообщение.", replace=False)
+    assert store.separates == []
+
+
+@pytest.mark.parametrize("broken", ["record_separately", "message", "plan"])
+async def test_apart_refused_keeps_the_button(broken: str) -> None:
+    """Отказ базы или сбой плана (§15.4): подсказка, кнопка остаётся."""
+    store = with_message(duplicate_message(repeated(1)), broken={broken})
+    planner = FakePlanner(MEETING_PLAN, broken=broken == "plan")
+    service, _, _, _, _ = build(make_understanding(), store, planner=planner)
+
+    outcome = await press(service)
+
+    assert outcome == PressOutcome(message=texts.NOT_SAVED, replace=False)
+    assert store.separates == []
+
+
+async def test_apart_without_a_database_says_it_did_not_write() -> None:
+    service, _, _, _, _ = build(make_understanding(), wired=False)
+
+    outcome = await press(service)
+
+    assert outcome == PressOutcome(message=texts.NOT_SAVED, replace=False)
+
+
+async def test_pick_reads_an_analysis_from_before_the_stage() -> None:
+    """Кнопка кандидата под вопросом, заданным до этапа: `same_as` в разборе нет."""
+    verdict = make_understanding(edit=edit(action="done", candidates=[1, 2]), title="встреча")
+    analysis = verdict.model_dump(mode="json")
+    del analysis["same_as"]
+    message = StoredMessage(
+        id="9a73", text="сделал", task_id=None, analysis=analysis, reply="Какую задачу закрыть?"
+    )
+    service, _, _, _, store = build(
+        make_understanding(), FakeEdits(OPEN, messages={MESSAGE_ID: message})
+    )
+
+    outcome = await service.pick(
+        chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=REPORT_ID
+    )
+
+    assert outcome.message == "Закрыл: отправить отчёт."
+    assert len(store.picks) == 1

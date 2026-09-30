@@ -383,6 +383,27 @@ async def handle_pick(callback: CallbackQuery, tasks: TaskService | None) -> Non
     await answer_press(callback, outcome)
 
 
+async def handle_apart(callback: CallbackQuery, tasks: TaskService | None) -> None:
+    """Нажата «Записать отдельно» под «Это уже записано» (§15.4).
+
+    Порядок тот же, что у кнопки задачи: сначала база, потом сообщение —
+    «Это уже записано» сменяется ответом записи, только когда задача легла
+    (инвариант 4). Отказ — всплывающий ответ, кнопка остаётся.
+    """
+    message = callback.message
+    if tasks is None or message is None:
+        logger.error("Кнопку «Записать отдельно» некому обработать: бот собран без базы")
+        await callback.answer(texts.NOT_SAVED)
+        return
+    telegram_message_id = edits.parse_apart(callback.data or "")
+    if telegram_message_id is None:
+        logger.warning("Кнопка «Записать отдельно» с непонятными данными: %r", callback.data)
+        await callback.answer(texts.MESSAGE_UNKNOWN)
+        return
+    outcome = await tasks.apart(chat_id=message.chat.id, telegram_message_id=telegram_message_id)
+    await answer_press(callback, outcome)
+
+
 async def handle_reopen(callback: CallbackQuery, tasks: TaskService | None) -> None:
     """Нажата «Вернуть» под «Закрыл» или «Убрал из списка» (§12.6).
 
@@ -520,4 +541,5 @@ def build_router() -> Router:
     router.callback_query.register(handle_pick, F.data.startswith(edits.PICK_PREFIX))
     router.callback_query.register(handle_reopen, F.data.startswith(edits.REOPEN_PREFIX))
     router.callback_query.register(handle_back, F.data.startswith(edits.BACK_PREFIX))
+    router.callback_query.register(handle_apart, F.data.startswith(edits.APART_PREFIX))
     return router
