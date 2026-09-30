@@ -10,12 +10,15 @@
 1. `supabase/tests/photo.test.ts` (красный) → `supabase/tests/database.ts`
    (общий помощник) → `supabase/migrations/20260930100000_photo.sql` →
    `techspec/03-schema.md` §3.2, §3.4.
-2. `bot/tests/test_handlers.py` (приём, красный) → `texts.py`
-   (`NOT_TEXT`, `HELP`, `FILE_REFUSED`) → `handlers.py`.
-3. `bot/tests/test_understanding.py` (запрос снимка, обрезка, эталонные
-   хэши) → `services/understanding.py`.
-4. `bot/tests/test_tasks_service.py`, `test_tasks_db.py` → `db/tasks.py`,
-   `texts.py` (ответы §14.4), `services/tasks.py`, `conftest.py`.
+2. `bot/tests/test_understanding.py` (запрос снимка, обрезка, эталонные
+   хэши) → `services/understanding.py` — задача «Бот, разбор».
+3. `bot/tests/test_tasks_service.py`, `test_tasks_db.py` → `db/tasks.py`,
+   `texts.py` (ответы §14.4), `services/tasks.py`, `conftest.py` —
+   задача «Бот, запись и ответы».
+4. `bot/tests/test_handlers.py` (приём, красный) → `texts.py`
+   (`NOT_TEXT`, `HELP`, `FILE_REFUSED`) → `handlers.py` — задача «Бот,
+   приём». Идёт после записи: обработчик зовёт `record_from_photo`, и
+   его тесты без сервиса не собираются.
 5. `bot/tests/fixtures/photos/` (снимки и скрипт) → живой прогон.
 6. `miniapp/src/lib/tasks.test.ts` (красный) → `lib/tasks.ts`,
    `lib/facts.ts`, `components/SourceMessage.tsx`.

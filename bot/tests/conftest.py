@@ -59,6 +59,7 @@ from solomon.services.understanding import (
     Analysis,
     AskedQuestion,
     OpenTask,
+    PhotoUnderstanding,
     SpeechQuality,
     Understanding,
     Verdict,
@@ -368,6 +369,13 @@ def make_understanding(**fields: Any) -> Understanding:
         "facts": [],
     }
     return Understanding.model_validate({**base, **fields})
+
+
+def make_photo_understanding(**fields: Any) -> PhotoUnderstanding:
+    """Ответ модели на снимок (§14.3): разбор §5.3 и два поля снимка."""
+    base = make_understanding().model_dump()
+    base.update(photo_text=None, more_tasks=[])
+    return PhotoUnderstanding.model_validate({**base, **fields})
 
 
 class FakeAnalyst:
