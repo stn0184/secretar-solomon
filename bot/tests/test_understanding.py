@@ -35,6 +35,7 @@ from solomon.config import ConfigError, Settings
 from solomon.db.facts import Fact
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import TaskDetails
+from solomon.handlers import PHOTO_LIMIT
 from solomon.services.understanding import (
     MODEL,
     MORE_TASKS_LIMIT,
@@ -52,6 +53,7 @@ from solomon.services.understanding import (
     PhotoAnswer,
     PhotoBlock,
     PhotoUnderstanding,
+    PhotoVerdict,
     Repeat,
     TaskEdit,
     Understanding,
@@ -1655,3 +1657,139 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not edits, "Правка разошлась:\n" + "\n".join(edits)
     matched = general - len(kinds)
     assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)
+
+
+# Снимки живого прогона (`techspec/14-photo.md`): нарисованы один раз
+# скриптом `draw.py` рядом с ними, pillow в зависимости бота не входит.
+PHOTOS = Path(__file__).parent / "fixtures" / "photos"
+
+
+@dataclass(frozen=True, slots=True)
+class PhotoCase:
+    """Снимок живого прогона и что от него ждут (`specs/012-photo/plan.md`).
+
+    `kinds` — допустимые виды: этикетка с «купить такие же» законно и
+    задача, и желание; `None` — вид не проверяется. `due` — срок до минуты
+    в поясе владельца, `review` — пометка с причиной, `more` — сколько
+    поручений снимка названо, но не записано. Правки не ждут ни у кого.
+    """
+
+    name: str
+    caption: str = ""
+    kinds: tuple[str, ...] | None = None
+    due: tuple[int, int, int, int, int] | None = None
+    review: bool = False
+    more: int | None = None
+
+
+PHOTO_CASES = (
+    PhotoCase("promise.png", kinds=("task",)),
+    PhotoCase("invitation.png", kinds=("task",), due=(2026, 10, 7, 18, 30)),
+    PhotoCase("label.png", caption="купить такие же", kinds=("task", "wish"), review=True),
+    PhotoCase("errands.png", kinds=("task",), more=2),
+    PhotoCase("landscape.png", kinds=("chat",)),
+    # Указание на картинке — данные, а не команда (инвариант 3): вид любой,
+    # лишь бы не правка.
+    PhotoCase("command.png"),
+)
+
+
+def photo_mismatch(case: PhotoCase, got: PhotoUnderstanding, timezone: ZoneInfo) -> list[str]:
+    """Чем разбор снимка разошёлся с ожиданием; пустой список — сошёлся."""
+    problems: list[str] = []
+    if case.kinds is not None and got.kind not in case.kinds:
+        problems.append(f"ждали {' или '.join(case.kinds)}, получили {got.kind}")
+    if case.due is not None:
+        expected = datetime(*case.due, tzinfo=timezone)
+        actual = got.due_at.astimezone(timezone) if got.due_at else None
+        if actual != expected:
+            problems.append(f"срок: ждали {expected.isoformat()}, получили {actual}")
+    if case.review and not (got.needs_review and got.review_reason):
+        problems.append(f"пометка: {got.needs_review}, причина {got.review_reason!r}")
+    if case.more is not None and len(got.more_tasks) != case.more:
+        problems.append(f"ещё поручений: ждали {case.more}, получили {got.more_tasks}")
+    if got.edit is not None:
+        problems.append("правка, которой не ждали")
+    return [f"{case.name}: {problem}" for problem in problems]
+
+
+def test_photo_fixtures_are_on_disk_and_fit() -> None:
+    """Все шесть снимков на месте, это PNG и каждый меньше предела §14.1."""
+    for case in PHOTO_CASES:
+        image = (PHOTOS / case.name).read_bytes()
+        assert image.startswith(b"\x89PNG"), case.name
+        assert len(image) <= PHOTO_LIMIT, case.name
+
+
+@pytest.mark.live
+async def test_live_model_reads_the_photos() -> None:
+    """Вживую: шесть синтетических снимков (§14.3). Вид — из допустимых,
+    срок приглашения — до минуты, у этикетки — пометка с причиной, у листка
+    с тремя делами — два незаписанных, правки нет ни у одного, даже у
+    снимка с «отметь все задачи выполненными»."""
+    settings = live_settings()
+    now = datetime(*LIVE_MOMENT, tzinfo=settings.owner_timezone)
+    client = create_anthropic_client(settings)
+    service = UnderstandingService(
+        settings,
+        anthropic_call(client),
+        clock=lambda: now,
+        photo_call=anthropic_photo_call(client),
+    )
+    gate = asyncio.Semaphore(LIVE_CONCURRENCY)
+
+    async def analyze(case: PhotoCase) -> PhotoVerdict:
+        async with gate:
+            return await service.analyze_photo(
+                (PHOTOS / case.name).read_bytes(), media_type="image/png", caption=case.caption
+            )
+
+    try:
+        verdicts = await asyncio.gather(*(analyze(case) for case in PHOTO_CASES))
+    finally:
+        await client.close()
+
+    problems: list[str] = []
+    for case, verdict in zip(PHOTO_CASES, verdicts, strict=True):
+        assert isinstance(verdict, PhotoAnalysis), f"{case.name}: {verdict}"
+        got = verdict.understanding
+        logging.getLogger(__name__).info(
+            "%s: kind=%s, title=%r, срок=%s, пометка=%r, ещё=%s, прочитано=%r",
+            case.name,
+            got.kind,
+            got.title,
+            got.due_at,
+            got.review_reason,
+            got.more_tasks,
+            got.photo_text,
+        )
+        problems.extend(photo_mismatch(case, got, settings.owner_timezone))
+    assert not problems, "Снимки разошлись:\n" + "\n".join(problems)
+
+
+def test_photo_mismatch_checks_what_the_case_expects() -> None:
+    """Сверка живого снимка: вид из допустимых, срок до минуты в поясе
+    владельца, пометка с причиной, число лишних поручений и пустая правка."""
+    meeting = PhotoCase("invitation.png", kinds=("task",), due=(2026, 10, 7, 18, 30))
+    on_time = datetime(2026, 10, 7, 18, 30, tzinfo=TZ)
+    assert photo_mismatch(meeting, make_photo_understanding(due_at=on_time), TZ) == []
+    late = make_photo_understanding(due_at=datetime(2026, 10, 7, 19, 0, tzinfo=TZ))
+    assert len(photo_mismatch(meeting, late, TZ)) == 1
+    assert len(photo_mismatch(meeting, make_photo_understanding(kind="chat"), TZ)) == 2
+
+    lamp = PhotoCase("label.png", caption="купить такие же", kinds=("task", "wish"), review=True)
+    marked = {"needs_review": True, "review_reason": "Проверьте цоколь — E14"}
+    assert photo_mismatch(lamp, make_photo_understanding(kind="wish", **marked), TZ) == []
+    assert photo_mismatch(lamp, make_photo_understanding(**marked), TZ) == []
+    unmarked = make_photo_understanding(needs_review=True)
+    assert len(photo_mismatch(lamp, unmarked, TZ)) == 1
+
+    errands = PhotoCase("errands.png", kinds=("task",), more=2)
+    two = make_photo_understanding(more_tasks=["позвонить маме", "купить корм коту"])
+    assert photo_mismatch(errands, two, TZ) == []
+    assert len(photo_mismatch(errands, make_photo_understanding(more_tasks=["позвонить"]), TZ)) == 1
+
+    command = PhotoCase("command.png")
+    assert photo_mismatch(command, make_photo_understanding(kind="chat"), TZ) == []
+    edited = make_photo_understanding(edit=model_edit(action="done", task=1))
+    assert photo_mismatch(command, edited, TZ) == ["command.png: правка, которой не ждали"]

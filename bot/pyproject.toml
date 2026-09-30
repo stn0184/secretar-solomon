@@ -54,6 +54,12 @@ files = ["src", "tests"]
 module = ["supabase.*", "postgrest.*"]
 ignore_missing_imports = true
 
+# Pillow нужен одному разовому скрипту `tests/fixtures/photos/draw.py` и в
+# зависимости бота не входит — его типов в окружении нет.
+[[tool.mypy.overrides]]
+module = ["PIL.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
