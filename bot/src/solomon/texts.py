@@ -409,6 +409,21 @@ APART_BUTTON = "Записать отдельно"
 # Под кнопкой нет сообщения или его разбор не читается (§15.4).
 MESSAGE_UNKNOWN = "Не нашёл это сообщение."
 
+# Накладка (§15.5): сколько задач назвать по сути; остальные — числом.
+SAME_TIME_NAMED = 3
+
+
+def same_time(titles: Sequence[str]) -> str:
+    """Абзац накладки: «В это же время у вас: «встреча с Ренатой».».
+
+    Суть — дословно из базы, раньше записанные первыми; больше трёх —
+    «… и ещё N».
+    """
+    named = ", ".join(f"«{title}»" for title in titles[:SAME_TIME_NAMED])
+    rest = len(titles) - SAME_TIME_NAMED
+    tail = f" и ещё {rest}" if rest > 0 else ""
+    return f"В это же время у вас: {named}{tail}."
+
 
 def duplicate_reply(title: str, due: str | None = None, repeat: str | None = None) -> str:
     """«Это уже записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00».

@@ -524,8 +524,11 @@ class FakeEdits:
     `occurrence` (§13.3); `return_occurrence` возвращает её на прежний раз
     так же, как функция базы. `record_separately` — как одноимённая функция
     базы (`techspec/15-duplicates.md` §15.6): второй раз по тому же
-    сообщению не пишет и отдаёт его как есть. `broken` — имена методов,
-    которые отвечают отказом базы.
+    сообщению не пишет и отдаёт его как есть. `same_minute` — как запрос
+    накладки (§15.5): активные со сроком со временем в ту же минуту, раньше
+    записанные первыми; его вызовы — в `minutes`, а не в `calls`, чтобы
+    тесты правки не пересчитывали их. `broken` — имена методов, которые
+    отвечают отказом базы.
     """
 
     def __init__(
@@ -551,6 +554,8 @@ class FakeEdits:
         self.returns: list[tuple[str, int, int, list[Planned]]] = []
         # «Записать отдельно»: сообщение, задача, план и ответ.
         self.separates: list[tuple[str, dict[str, Any], list[Planned], str]] = []
+        # Запросы накладки: минута и задача, которая в сравнение не входит.
+        self.minutes: list[tuple[datetime, str | None]] = []
 
     def _touch(self, name: str, *args: Any) -> None:
         self.calls.append((name, *args))
@@ -582,6 +587,22 @@ class FakeEdits:
     async def task(self, task_id: str) -> TaskDetails | None:
         self._touch("task", task_id)
         return self.tasks.get(task_id)
+
+    async def same_minute(self, due_at: datetime, exclude_task_id: str | None) -> list[str]:
+        self.minutes.append((due_at, exclude_task_id))
+        if "same_minute" in self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        minute = due_at.replace(second=0, microsecond=0)
+        same = [
+            task
+            for task in self.tasks.values()
+            if task.status == "active"
+            and task.due_precision == "time"
+            and task.due_at is not None
+            and task.due_at.replace(second=0, microsecond=0) == minute
+            and task.id != exclude_task_id
+        ]
+        return [task.title for task in sorted(same, key=lambda task: task.created_at)]
 
     async def pick(self, message_id: str, edit: Mapping[str, Any], reply: str) -> PickedMessage:
         self._touch("pick", message_id)

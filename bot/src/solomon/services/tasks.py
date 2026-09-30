@@ -334,6 +334,8 @@ class EditStore(Protocol):
 
     async def task(self, task_id: str) -> TaskDetails | None: ...
 
+    async def same_minute(self, due_at: datetime, exclude_task_id: str | None) -> list[str]: ...
+
     async def pick(self, message_id: str, edit: Mapping[str, Any], reply: str) -> PickedMessage: ...
 
     async def record_separately(
@@ -387,6 +389,14 @@ class DatabaseEditStore:
 
     async def task(self, task_id: str) -> TaskDetails | None:
         return await db_tasks.task_details(self._db, owner_telegram_id=self._owner, task_id=task_id)
+
+    async def same_minute(self, due_at: datetime, exclude_task_id: str | None) -> list[str]:
+        return await db_tasks.same_minute_titles(
+            self._db,
+            owner_telegram_id=self._owner,
+            due_at=due_at,
+            exclude_task_id=exclude_task_id,
+        )
 
     async def pick(self, message_id: str, edit: Mapping[str, Any], reply: str) -> PickedMessage:
         return await db_tasks.pick_task(
@@ -1183,7 +1193,8 @@ class TaskService:
         планируются заново по сроку, какой у неё станет, и уходят в `amend`, а
         не новой задачей. Вопрос — только у задачи (§10.1): она записывается
         сразу, с пометкой и текстом вопроса. «Ответ» без открытого вопроса
-        отвечать не на что — это обычная запись.
+        отвечать не на что — это обычная запись. Ответ, давший срок, и новая
+        задача получают абзац накладки (§15.5).
 
         Правка — только при блоке 5 в промпте (§12.2): без него `edit` модель
         отдать не могла, а если отдала, бот её не слушает; у пересланного и
@@ -1202,14 +1213,22 @@ class TaskService:
                 kind=changed.kind,
                 now=now,
             )
-            reply = texts.understood_reply(
-                title=changed.title,
-                due=self._due_words(changed.due_at, changed.due_precision),
-                review_reason=review_reason(understanding, changed.rule),
-                # Срочность звучит, только если её изменил сам ответ.
-                priority=changed.priority if "priority" in changed.fields else "normal",
-                remind_at=self._remind_words(planned, now),
-                repeat=rule_words(changed.repeat),
+            clash = None
+            if "due_at" in changed.fields:
+                clash = await self._same_time(
+                    changed.due_at, changed.due_precision, exclude=asked.task_id
+                )
+            reply = paragraphs(
+                texts.understood_reply(
+                    title=changed.title,
+                    due=self._due_words(changed.due_at, changed.due_precision),
+                    review_reason=review_reason(understanding, changed.rule),
+                    # Срочность звучит, только если её изменил сам ответ.
+                    priority=changed.priority if "priority" in changed.fields else "normal",
+                    remind_at=self._remind_words(planned, now),
+                    repeat=rule_words(changed.repeat),
+                ),
+                clash,
             )
             amend = {
                 "task_id": asked.task_id,
@@ -1241,11 +1260,14 @@ class TaskService:
         """Запись с вопросом или обычная запись — сообщение заводит своё.
 
         Ею же «Записать отдельно» заводит задачу из дубля (§15.4): так, как
-        её завёл бы обычный путь, с планом на момент нажатия.
+        её завёл бы обычный путь, с планом и накладкой на момент нажатия.
+        Абзац накладки (§15.5) — после основной строки: «На снимке ещё»
+        снимок добавит уже за ним.
         """
         rule = rule_of(understanding, understanding.due_at)
         task_row = task_fields(understanding, rule) if understanding.kind in TASK_KINDS else None
         planned = []
+        clash = None
         if task_row is not None:
             planned = await self._planner(
                 due_at=understanding.due_at,
@@ -1253,6 +1275,7 @@ class TaskService:
                 kind=understanding.kind,
                 now=now,
             )
+            clash = await self._same_time(understanding.due_at, understanding.due_precision)
         question = question_of(understanding)
         if question is not None:
             # Правило не по форме — причина перед вопросом: пометка стоит и так.
@@ -1269,10 +1292,10 @@ class TaskService:
                 "needs_review": True,
                 "open_question": question,
             }
-            return Decision(reply=reply, task=task, reminders=planned)
+            return Decision(reply=paragraphs(reply, clash), task=task, reminders=planned)
 
         return Decision(
-            reply=self._reply_for(understanding, planned, now, rule),
+            reply=paragraphs(self._reply_for(understanding, planned, now, rule), clash),
             task=task_row,
             reminders=planned,
         )
@@ -1360,6 +1383,32 @@ class TaskService:
             )
             return None
         return task
+
+    async def _same_time(
+        self, due_at: datetime | None, precision: str | None, exclude: str | None = None
+    ) -> str | None:
+        """Абзац «В это же время у вас» (`techspec/15-duplicates.md` §15.5) или `None`.
+
+        Сравниваются только сроки со временем: у срока «на день» 18:00 —
+        условность, базу о нём не спрашивают. `exclude` — сама задача, когда
+        меняется её срок. Запрос — до записи: абзац входит в ответ, который
+        ложится в базу вместе с задачей (инвариант 4). Сбой запроса — строка в
+        журнал и ответ без абзаца: запись важнее предупреждения.
+        """
+        store = self._edits
+        if store is None or due_at is None or precision != db_tasks.TIME_PRECISION:
+            return None
+        if due_at.tzinfo is None:
+            due_at = due_at.replace(tzinfo=self._settings.owner_timezone)
+        try:
+            titles = await store.same_minute(due_at, exclude)
+        except DatabaseError as error:
+            logger.warning("Накладка не проверена, ответ без абзаца: %s", error)
+            return None
+        if not titles:
+            return None
+        logger.info("Накладка: в ту же минуту ещё задач %s", len(titles))
+        return texts.same_time(titles)
 
     async def _last_events(self, store: EditStore, since: datetime) -> list[TaskEvent | None]:
         """Два события разговора за час (§12.2). Любой отказ — ни одного.
@@ -1481,7 +1530,8 @@ class TaskService:
             remind_at=self._remind_words(planned, now),
             repeat=rule_words(rule.rule),
         )
-        return Decision(reply=reply, task=task, reminders=planned)
+        clash = await self._same_time(due_at, precision)
+        return Decision(reply=paragraphs(reply, clash), task=task, reminders=planned)
 
     async def _edit_known(
         self, understanding: Understanding, edit: TaskEdit, task: TaskDetails, now: datetime
@@ -1492,7 +1542,8 @@ class TaskService:
         момент нажатия (§12.6). Непонятное значение — вопрос верхнего уровня:
         ничего не меняется, даже понятное, задача получает пометку и вопрос.
         План берётся у базы, только если срок сменился и не снят: иначе
-        напоминания задачи остаются как есть или снимаются целиком.
+        напоминания задачи остаются как есть или снимаются целиком. Тогда же
+        спрашивается накладка (§15.5) — без самой задачи.
 
         Повторяющаяся задача (§13.3): «сделал» и пропуск переводят её на
         следующий раз, «убрать» убирает серию. У разовой пропуск — то же, что
@@ -1538,7 +1589,7 @@ class TaskService:
             removed = texts.DUE_AND_REPEAT_REMOVED if task.repeat else texts.DUE_REMOVED
             reply = removed.format(title=change.title)
         else:
-            remind_at = None
+            remind_at = clash = None
             if change.due_changed:
                 planned = await self._planner(
                     due_at=change.due_at,
@@ -1547,19 +1598,23 @@ class TaskService:
                     now=now,
                 )
                 remind_at = self._remind_words(planned, now)
+                clash = await self._same_time(change.due_at, change.due_precision, exclude=task.id)
             if change.repeat_removed:
                 head = texts.REPEAT_REMOVED
             elif change.due_changed and not change.repeat_changed:
                 head = texts.MOVED_BY_WORD
             else:
                 head = texts.FIXED
-            reply = texts.edited_reply(
-                head.format(title=change.title),
-                self._due_words(change.due_at, change.due_precision),
-                remind_at,
-                priority,
-                people,
-                repeat=rule_words(change.repeat),
+            reply = paragraphs(
+                texts.edited_reply(
+                    head.format(title=change.title),
+                    self._due_words(change.due_at, change.due_precision),
+                    remind_at,
+                    priority,
+                    people,
+                    repeat=rule_words(change.repeat),
+                ),
+                clash,
             )
         return Edited(
             edit=edit_row(task, "change", changes=change.changes, schedule=planned), reply=reply

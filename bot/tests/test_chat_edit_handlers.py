@@ -513,6 +513,8 @@ async def test_apart_writes_first_and_then_replaces_the_duplicate_answer(
     assert len(store.separates) == 1
     assert [edit.text for edit in session.edits] == [
         "Записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. Напомню: 2 октября в 16:00"
+        + chr(10) * 2
+        + "В это же время у вас: «встреча с Ренатой»."
     ]
     assert session.edits[0].message_id == 7
     assert session.edits[0].reply_markup is None

@@ -58,6 +58,8 @@ FRIDAY_FIVE = datetime(2026, 10, 2, 17, 0, tzinfo=TZ)
 MEETING_REPLY = "Это уже записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00"
 APART = (Button(text="Записать отдельно", data=f"apart:{MESSAGE_ID}"),)
 MORE_HINT = "На снимке ещё: «купить хлеб». Нужны — напишите или надиктуйте отдельно."
+# Задача из дубля встаёт на ту же минуту, что найденная (§15.5).
+SAME_TIME = "В это же время у вас: «встреча с Ренатой»."
 
 TUESDAYS = {"every": "week", "interval": 1, "weekdays": [2], "month_day": None, "month": None}
 
@@ -410,7 +412,8 @@ async def press(service: TaskService) -> PressOutcome:
 
 
 async def test_apart_records_the_task_as_the_usual_path_would() -> None:
-    """Нажатие (§15.4): разбор из базы, план на момент нажатия, ответ вместо дубля."""
+    """Нажатие (§15.4): разбор из базы, план и накладка на момент нажатия,
+    ответ вместо дубля."""
     store = with_message(duplicate_message(repeated(1)))
     service, _, understandings, planner, _ = build(
         make_understanding(), store, planner=FakePlanner(MEETING_PLAN)
@@ -418,7 +421,10 @@ async def test_apart_records_the_task_as_the_usual_path_would() -> None:
 
     outcome = await press(service)
 
-    reply = "Записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. Напомню: 2 октября в 16:00"
+    reply = (
+        "Записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. "
+        f"Напомню: 2 октября в 16:00{chr(10) * 2}{SAME_TIME}"
+    )
     assert outcome == PressOutcome(message=reply, replace=True)
     [(message_id, task, reminders, written)] = store.separates
     assert message_id == "9a72"
@@ -465,6 +471,7 @@ async def test_apart_of_a_photo_keeps_the_rest_of_the_photo() -> None:
 
     assert outcome.message.split(chr(10) * 2) == [
         "Записал: встреча с Ренатой. Срок: пятница, 2 октября, 17:00",
+        SAME_TIME,
         MORE_HINT,
     ]
 

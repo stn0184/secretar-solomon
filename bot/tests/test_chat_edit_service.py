@@ -1079,9 +1079,10 @@ async def test_database_store_asks_only_for_the_settings_owner() -> None:
     assert await store.reminder_task(40) is None
     assert await store.message(OWNER_ID, 39) is None
     assert await store.task(MEETING_ID) is None
+    assert await store.same_minute(NOW, MEETING_ID) == []
 
     owners = [call for call in reads.calls if call[:2] == ("eq", "owner_telegram_id")]
-    assert owners == [("eq", "owner_telegram_id", OWNER_ID)] * 6
+    assert owners == [("eq", "owner_telegram_id", OWNER_ID)] * 7
 
     writes = FakeClient(data={"id": "9a71", "task_id": None, "reply": None})
     store = DatabaseEditStore(SETTINGS, as_client(writes))
