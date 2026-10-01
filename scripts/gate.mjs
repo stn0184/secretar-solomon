@@ -50,6 +50,8 @@ const CHECKS = [
   { name: "miniapp:secrets", cmd: "node scripts/check-dist.mjs miniapp/dist" },
   { name: "supabase:types", cmd: "npm --prefix supabase run typecheck" },
   { name: "supabase:tests", cmd: "npm --prefix supabase test" },
+  // Скрипты в scripts/ (выкладка бота на сервер) — на Node, без сети и ssh.
+  { name: "scripts:tests", cmd: "node --test \"scripts/*.test.mjs\"" },
 ];
 
 /* ------------------------------------------------------------------ разбор */
