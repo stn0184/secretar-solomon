@@ -687,20 +687,59 @@ class FakeEdits:
 
 
 class FakeTranscriber:
-    """Вместо Deepgram — заранее решённый результат и список того, что прислали."""
+    """Вместо Deepgram — заранее решённый результат и список того, что прислали.
+
+    `names` — имена каждого запроса: что ушло бы подсказками (§9.5).
+    """
 
     def __init__(self, result: TranscriptionResult | None = None) -> None:
         self.result: TranscriptionResult = result or Transcript(text=SPOKEN, confidence=0.93)
         self.calls: list[bytes] = []
+        self.names: list[tuple[str, ...]] = []
 
-    async def transcribe(self, audio: bytes) -> TranscriptionResult:
+    async def transcribe(self, audio: bytes, names: Sequence[str] = ()) -> TranscriptionResult:
         self.calls.append(audio)
+        self.names.append(tuple(names))
         # Настоящее распознавание ждёт сети. Без настоящей паузы фоновый статус
         # «печатает…» не успел бы ни разу отправиться: до первой отправки его
         # задаче нужно несколько ходов цикла событий. Пауза короче ~16 мс на
         # Windows попадает под разрешение часов цикла и ведёт себя как `sleep(0)`.
         await asyncio.sleep(0.05)
         return self.result
+
+
+class FakeNames:
+    """Имена, которые бот знает (§9.5): тексты памяти и люди задач владельца.
+
+    `broken` — база не ответила; `started` выставляется в начале чтения —
+    по нему тест видит, что имена читаются, пока файл качается.
+    """
+
+    def __init__(
+        self,
+        memory: Sequence[str] = (),
+        people: Sequence[tuple[str, ...]] = (),
+        broken: bool = False,
+    ) -> None:
+        self.memory = list(memory)
+        self.people = list(people)
+        self.broken = broken
+        self.started = asyncio.Event()
+        self.calls: list[tuple[str, int]] = []
+
+    async def memory_texts(self, limit: int) -> list[str]:
+        self.started.set()
+        self.calls.append(("memory", limit))
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return self.memory
+
+    async def task_people(self, limit: int) -> list[tuple[str, ...]]:
+        self.started.set()
+        self.calls.append(("people", limit))
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return self.people
 
 
 async def load_audio() -> bytes:

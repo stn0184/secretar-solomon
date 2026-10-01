@@ -9,7 +9,9 @@
 Голосовое идёт тем же путём с одним шагом посередине (`techspec/09-voice.md`
 §9.3): сообщение с файлом пишется до того, как его расслышали, потом
 скачивание и распознавание, дальше — как с текстом. Не расслышали — честный
-ответ вместо задачи, и «Записал» не говорится (инвариант 4).
+ответ вместо задачи, и «Записал» не говорится (инвариант 4). Пока файл
+качается, читаются имена, которые бот уже знает (§9.5): они уходят
+распознаванию подсказками, а не прочитались — голосовое слышится без них.
 
 Уточняющий вопрос (`techspec/10-dialog.md`) живёт в том же хвосте: перед
 моделью читается открытый вопрос владельца (не старше суток) и уходит ей в
@@ -55,6 +57,7 @@ from supabase import Client
 
 from solomon import texts
 from solomon.config import Settings
+from solomon.db import facts as db_facts
 from solomon.db import reminders as db_reminders
 from solomon.db import tasks as db_tasks
 from solomon.db.reminders import Planned
@@ -71,6 +74,7 @@ from solomon.db.tasks import (
     TaskEvent,
 )
 from solomon.services import edits
+from solomon.services.names import known_names
 from solomon.services.reminders import Planner, database_planner, next_fire_at
 from solomon.services.repeat import (
     NO_RULE,
@@ -115,6 +119,12 @@ SUMMARY_LIMIT = 200
 # Сколько живёт вопрос без ответа (`techspec/10-dialog.md` §10.3): дольше —
 # в промпт не попадает, и следующая запись его снимет (кроме «не расслышал»).
 QUESTION_TTL = timedelta(hours=24)
+
+# Сколько задач с людьми и записей памяти читается ради имён (§9.5). В
+# подсказки всё равно входит лишь то, что вмещает предел провайдера
+# (`transcription.KEYTERM_LIMIT`), — чтение берёт с запасом над ним.
+NAME_TASKS_LIMIT = 200
+NAME_FACTS_LIMIT = 200
 
 
 def summarize(text: str) -> str:
@@ -351,6 +361,33 @@ class EditStore(Protocol):
     async def return_occurrence(
         self, task_id: str, back_to: int, moved_from: int, schedule: Sequence[Planned]
     ) -> TaskDetails | None: ...
+
+
+class NameSource(Protocol):
+    """Откуда бот знает имена для подсказок (§9.5), владелец уже подставлен.
+
+    Тест подменяет его списками; обычная сборка — `DatabaseNames` поверх
+    `db/`. Любой отказ — `DatabaseError`.
+    """
+
+    async def memory_texts(self, limit: int) -> list[str]: ...
+
+    async def task_people(self, limit: int) -> list[tuple[str, ...]]: ...
+
+
+class DatabaseNames:
+    """`NameSource` поверх настоящей базы: тексты памяти и люди задач владельца
+    из настроек (инвариант 2, `techspec/04-access.md` §4.3)."""
+
+    def __init__(self, settings: Settings, db: Client) -> None:
+        self._owner = settings.owner_telegram_id
+        self._db = db
+
+    async def memory_texts(self, limit: int) -> list[str]:
+        return await db_facts.list_fact_texts(self._db, owner_telegram_id=self._owner, limit=limit)
+
+    async def task_people(self, limit: int) -> list[tuple[str, ...]]:
+        return await db_tasks.list_task_people(self._db, owner_telegram_id=self._owner, limit=limit)
 
 
 class DatabaseEditStore:
@@ -653,6 +690,7 @@ class TaskService:
         open_question: QuestionReader | None = None,
         edit_store: EditStore | None = None,
         repeat_next: NextOccurrence | None = None,
+        names: NameSource | None = None,
     ) -> None:
         self._settings = settings
         self._record_message = record_message
@@ -672,6 +710,9 @@ class TaskService:
         # Следующий раз повторяющейся задачи считает база (§13.2). Без неё
         # «сделал» и пропуск по такой задаче — честное «не смог записать».
         self._repeat_next = repeat_next or no_next_occurrence
+        # Без источника имён голосовое слышится без подсказок, как до этапа
+        # 014 (§9.5). Обычная сборка источник подключает.
+        self._names = names
         # «Сейчас» внедряется: от него зависит расписание напоминаний, и
         # тесты не должны угадывать, который час (`services/reminders.py`).
         self._clock = clock or self._now
@@ -771,6 +812,7 @@ class TaskService:
             open_question=read_question,
             edit_store=DatabaseEditStore(settings, db),
             repeat_next=repeat_next,
+            names=DatabaseNames(settings, db),
         )
 
     @classmethod
@@ -977,18 +1019,45 @@ class TaskService:
         return RecordOutcome(ok=True, message=reply)
 
     async def _hear(self, load_audio: AudioLoader) -> TranscriptionResult:
-        """Скачать файл и распознать. Отказ скачивания — тоже «не расслышал».
+        """Скачать файл и распознать с подсказками. Отказ скачивания — «не расслышал».
+
+        Имена читаются, пока файл качается (§9.5): ожидание не растёт, а
+        распознавание получает и файл, и подсказки сразу.
+        """
+        audio, names = await asyncio.gather(self._download(load_audio), self._known_names())
+        if isinstance(audio, NotTranscribed):
+            return audio
+        return await self._transcriber.transcribe(audio, names)
+
+    @staticmethod
+    async def _download(load_audio: AudioLoader) -> bytes | NotTranscribed:
+        """Файл голосового в память — или причина, почему не скачался.
 
         Скачивание — граница с Telegram, и какие исключения оттуда придут,
         сервис не знает и знать не должен: любое из них — причина в журнал,
         человеку честный ответ, сообщение с `file_id` уже в базе.
         """
         try:
-            audio = await load_audio()
+            return await load_audio()
         except Exception as error:  # noqa: BLE001 - граница Telegram, см. доккомментарий
             logger.warning("Файл не скачан из Telegram: %s: %s", type(error).__name__, error)
             return NotTranscribed(reason=f"download: {type(error).__name__}")
-        return await self._transcriber.transcribe(audio)
+
+    async def _known_names(self) -> list[str]:
+        """Имена для подсказок: сначала из памяти, затем из задач (§9.5).
+
+        Подсказка не важнее поручения (инвариант 5): база не ответила —
+        голосовое распознаётся без подсказок, отказ уходит в журнал.
+        """
+        if self._names is None:
+            return []
+        try:
+            memory = await self._names.memory_texts(NAME_FACTS_LIMIT)
+            people = await self._names.task_people(NAME_TASKS_LIMIT)
+        except DatabaseError as error:
+            logger.warning("Имена для подсказок не прочитаны, распознавание без них: %s", error)
+            return []
+        return known_names(memory, people)
 
     async def _load_image(self, load_image: ImageLoader) -> bytes | None:
         """Скачать снимок в память; отказ скачивания — `None`, причина в журнал.

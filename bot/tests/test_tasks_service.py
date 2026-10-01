@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -17,15 +18,19 @@ import pytest
 from solomon import texts
 from solomon.db.reminders import Planned
 from solomon.db.tasks import OpenQuestion, SavedMessage, SpeechKind, Task
+from solomon.services.names import forms
 from solomon.services.tasks import (
+    NAME_FACTS_LIMIT,
+    NAME_TASKS_LIMIT,
     SUMMARY_LIMIT,
+    DatabaseNames,
     RecordOutcome,
     TaskService,
     amendment,
     fact_rows,
     summarize,
 )
-from solomon.services.transcription import NotTranscribed, Transcript
+from solomon.services.transcription import DeepgramTranscriber, NotTranscribed, Transcript
 from solomon.services.understanding import (
     FactItem,
     NotUnderstood,
@@ -41,6 +46,7 @@ from tests.conftest import (
     SPOKEN,
     FakeAnalyst,
     FakeMessages,
+    FakeNames,
     FakePlanner,
     FakeQuestions,
     FakeTranscriber,
@@ -52,6 +58,9 @@ from tests.conftest import (
     make_understanding,
 )
 from tests.test_edits import make_edit
+from tests.test_tasks_db import FakeClient, as_client
+from tests.test_transcription import FakeCall
+from tests.test_transcription import answer as speech_answer
 
 SETTINGS = make_settings()
 FRIDAY_EVENING = datetime(2026, 9, 18, 19, 0, tzinfo=ZoneInfo(OWNER_TIMEZONE))
@@ -61,8 +70,9 @@ def build_service(
     analyst: FakeAnalyst,
     messages: FakeMessages | None = None,
     understandings: FakeUnderstandings | None = None,
-    transcriber: FakeTranscriber | None = None,
+    transcriber: FakeTranscriber | DeepgramTranscriber | None = None,
     planner: FakePlanner | None = None,
+    names: FakeNames | None = None,
 ) -> tuple[TaskService, FakeMessages, FakeUnderstandings]:
     """Сервис на подменённой базе: и запись сообщения, и запись разбора."""
     record_message = messages or FakeMessages()
@@ -74,6 +84,7 @@ def build_service(
         analyst=analyst,
         transcriber=transcriber or FakeTranscriber(),
         planner=planner or FakePlanner(),
+        names=names,
     )
     return service, record_message, record_understanding
 
@@ -662,6 +673,8 @@ async def test_voice_is_saved_before_hearing_and_becomes_a_task() -> None:
         }
     ]
     assert transcriber.calls == [AUDIO]
+    # Без источника имён — без подсказок, как до этапа 014 (§9.5).
+    assert transcriber.names == [()]
     assert analyst.calls == [(SPOKEN, None, "fine")]
     saved = understandings.calls[0]
     assert saved["transcript"] == SPOKEN
@@ -811,6 +824,147 @@ async def test_not_heard_is_still_said_when_the_reply_cannot_be_saved() -> None:
     outcome = await record_voice(service)
 
     assert outcome.message == texts.NOT_HEARD
+
+
+# --- Имена в подсказках (`techspec/09-voice.md` §9.5) ------------------------
+
+OWNER_MEMORY = ["Сына зовут Юлай", "Машина — Volkswagen Polo 2015 года", "Женат"]
+OWNER_PEOPLE = [("мама", "брату"), ("Анна Петровна из школы",), ("Юлай",)]
+
+
+@pytest.mark.parametrize(
+    ("kind", "forwarded_from"),
+    [("voice", None), ("video_note", None), ("voice", "Аня")],
+)
+async def test_voice_hears_with_the_names_the_bot_knows(
+    kind: SpeechKind, forwarded_from: str | None
+) -> None:
+    """Голосовое и кружок, в том числе пересланные: память, затем задачи, без повторов."""
+    transcriber = FakeTranscriber()
+    names = FakeNames(memory=OWNER_MEMORY, people=OWNER_PEOPLE)
+    service, _, _ = build_service(heard_analyst(), transcriber=transcriber, names=names)
+
+    outcome = await record_voice(service, kind=kind, forwarded_from=forwarded_from)
+
+    assert outcome.message == RETOLD
+    assert transcriber.names == [("Юлай", "Volkswagen Polo", "Анна Петровна")]
+    assert sorted(names.calls) == [("memory", NAME_FACTS_LIMIT), ("people", NAME_TASKS_LIMIT)]
+
+
+async def test_names_are_read_while_the_file_downloads() -> None:
+    """Скачивание ждёт начала чтения имён: прошло — значит, шли одновременно."""
+    names = FakeNames(memory=OWNER_MEMORY)
+
+    async def download_waiting_for_names() -> bytes:
+        await asyncio.wait_for(names.started.wait(), timeout=1)
+        return AUDIO
+
+    transcriber = FakeTranscriber()
+    service, _, _ = build_service(heard_analyst(), transcriber=transcriber, names=names)
+
+    outcome = await record_voice(service, load=download_waiting_for_names)
+
+    assert outcome.message == RETOLD
+    assert transcriber.calls == [AUDIO]
+
+
+async def test_names_read_failure_hears_without_hints(caplog: pytest.LogCaptureFixture) -> None:
+    """База не отдала имён — распознавание без подсказок, ответ обычный (§9.5)."""
+    transcriber = FakeTranscriber()
+    names = FakeNames(memory=OWNER_MEMORY, broken=True)
+    service, _, understandings = build_service(
+        heard_analyst(), transcriber=transcriber, names=names
+    )
+
+    with caplog.at_level(logging.WARNING):
+        outcome = await record_voice(service)
+
+    assert outcome.ok
+    assert outcome.message == RETOLD
+    assert transcriber.names == [()]
+    assert understandings.calls[0]["transcript"] == SPOKEN
+    assert "Имена для подсказок не прочитаны" in caplog.text
+
+
+async def test_no_known_names_hear_without_hints() -> None:
+    transcriber = FakeTranscriber()
+    service, _, _ = build_service(
+        heard_analyst(), transcriber=transcriber, names=FakeNames(memory=["Женат"])
+    )
+
+    await record_voice(service)
+
+    assert transcriber.names == [()]
+
+
+async def test_download_failure_with_names_does_not_call_deepgram() -> None:
+    async def broken_download() -> bytes:
+        raise OSError("file is too big")
+
+    transcriber = FakeTranscriber()
+    service, _, _ = build_service(
+        heard_analyst(), transcriber=transcriber, names=FakeNames(memory=OWNER_MEMORY)
+    )
+
+    outcome = await record_voice(service, load=broken_download)
+
+    assert outcome.message == texts.NOT_HEARD
+    assert transcriber.calls == []
+
+
+async def test_repeated_voice_update_does_not_read_names() -> None:
+    names = FakeNames(memory=OWNER_MEMORY)
+    messages = FakeMessages(message=SavedMessage(id="9a71", reply=RETOLD))
+    service, _, _ = build_service(heard_analyst(), messages=messages, names=names)
+
+    await record_voice(service)
+
+    assert names.calls == []
+
+
+async def test_text_and_photo_do_not_read_names() -> None:
+    """Подсказки — только у голосового и кружка (§9.5)."""
+    names = FakeNames(memory=OWNER_MEMORY)
+    service, _, _ = build_service(heard_analyst(), names=names)
+
+    await service.record_from_message(chat_id=42, telegram_message_id=7, text=SPOKEN)
+    await service.record_from_photo(
+        chat_id=42,
+        telegram_message_id=8,
+        file_id="photo-1",
+        media_type="image/jpeg",
+        caption="",
+        load_image=load_image,
+    )
+
+    assert names.calls == []
+
+
+async def test_names_reach_deepgram_as_hints_in_all_forms() -> None:
+    """Сквозь настоящий транскрайбер: имена владельца — подсказками всех падежей."""
+    call = FakeCall(answer=speech_answer(SPOKEN))
+    names = FakeNames(memory=["Сына зовут Юлай"], people=[("Рената",), ("мама",)])
+    service, _, understandings = build_service(
+        heard_analyst(), transcriber=DeepgramTranscriber(call), names=names
+    )
+
+    outcome = await record_voice(service)
+
+    assert outcome.message == RETOLD
+    assert call.keyterms == [(*forms("Юлай"), *forms("Рената"))]
+    assert understandings.calls[0]["transcript"] == SPOKEN
+
+
+async def test_database_names_ask_only_for_the_settings_owner() -> None:
+    """Инвариант 2: владелец — из настроек, в обоих чтениях имён."""
+    reads = FakeClient(data=[])
+    source = DatabaseNames(SETTINGS, as_client(reads))
+
+    assert await source.memory_texts(NAME_FACTS_LIMIT) == []
+    assert await source.task_people(NAME_TASKS_LIMIT) == []
+
+    owners = [call for call in reads.calls if call[:2] == ("eq", "owner_telegram_id")]
+    assert owners == [("eq", "owner_telegram_id", OWNER_ID)] * 2
 
 
 # --- Уточняющий вопрос (`techspec/10-dialog.md`) ---------------------------

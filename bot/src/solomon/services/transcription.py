@@ -8,6 +8,10 @@
 
 Ни один отказ наружу исключением не выходит: сообщение с файлом уже в базе
 (инвариант 5), а слой выше честно отвечает «не расслышал» (§9.3).
+
+Имена, которые бот уже знает, уходят в запрос подсказками (`keyterm`, §9.5):
+сколько их поместится, решает предел провайдера — он живёт здесь, рядом с
+вызовом.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from deepgram.core.parse_error import ParsingError
 from deepgram.types import ListenV1Response
 
 from solomon.config import Settings
+from solomon.services.names import fit
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,13 @@ TIMEOUT_SECONDS = 60.0
 # Ниже этого модели говорится «качество низкое» (§9.4). Порог живёт здесь,
 # а не в промпте.
 LOW_CONFIDENCE = 0.6
+# Предел подсказок в знаках (`names.volume`): Deepgram принимает не больше 500
+# своих токенов на все подсказки. Живой запрос 2026-10-01 упёрся в него на
+# 826 знаках редких татарских и башкирских имён и на 1230 — обычных русских;
+# 600 — с запасом от первого (§9.5).
+KEYTERM_LIMIT = 600
+# Подсказок больше, чем принимает провайдер, — так он и отвечает (§9.5).
+HINTS_REJECTED = 400
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +78,13 @@ TranscriptionResult = Transcript | NotTranscribed
 
 
 class Transcriber(Protocol):
-    """Речь в текст — то, что подменяет тест вместо сети."""
+    """Речь в текст — то, что подменяет тест вместо сети.
 
-    async def transcribe(self, audio: bytes) -> TranscriptionResult: ...
+    `names` — имена, которые бот уже знает, в порядке, в котором они занимают
+    место в подсказках (§9.5); пусто — запрос без подсказок.
+    """
+
+    async def transcribe(self, audio: bytes, names: Sequence[str] = ()) -> TranscriptionResult: ...
 
 
 # Ответ Deepgram — ровно те поля, которые читает транскрайбер. Свойства только
@@ -98,9 +114,12 @@ class SpeechAnswer(Protocol):
 
 
 class SpeechCall(Protocol):
-    """Один запрос к распознаванию — ровно то, что подменяет тест."""
+    """Один запрос к распознаванию — ровно то, что подменяет тест.
 
-    async def __call__(self, audio: bytes) -> SpeechAnswer: ...
+    `keyterms` — готовые подсказки: каждая форма имени отдельной строкой.
+    """
+
+    async def __call__(self, audio: bytes, keyterms: Sequence[str]) -> SpeechAnswer: ...
 
 
 def create_deepgram_client(settings: Settings) -> AsyncDeepgramClient:
@@ -115,15 +134,18 @@ def deepgram_call(client: AsyncDeepgramClient) -> SpeechCall:
     """Настоящий запрос: pre-recorded API, `nova-3`, русский, smart_format.
 
     Файл уходит как есть — не режется и не сжимается; после запроса в памяти
-    бота его не остаётся.
+    бота его не остаётся. Подсказок нет — параметра `keyterm` в запросе нет
+    вовсе, как до этапа 014 (§9.5).
     """
 
-    async def call(audio: bytes) -> SpeechAnswer:
+    async def call(audio: bytes, keyterms: Sequence[str]) -> SpeechAnswer:
         answer = await client.listen.v1.media.transcribe_file(
             request=audio,
             model=MODEL,
             language=LANGUAGE,
             smart_format=True,
+            # None SDK в запрос не кладёт: без подсказок параметра нет.
+            keyterm=list(keyterms) or None,
             request_options={"timeout": TIMEOUT_SECONDS},
         )
         if not isinstance(answer, ListenV1Response):
@@ -165,10 +187,22 @@ class DeepgramTranscriber:
         """Обычная сборка: ходит в Deepgram по-настоящему."""
         return cls(deepgram_call(client))
 
-    async def transcribe(self, audio: bytes) -> TranscriptionResult:
-        """Распознать речь или честно сказать, что не вышло (§9.3)."""
+    async def transcribe(self, audio: bytes, names: Sequence[str] = ()) -> TranscriptionResult:
+        """Распознать речь или честно сказать, что не вышло (§9.3).
+
+        Имена уходят подсказками в пределах `KEYTERM_LIMIT` (§9.5); в журнал —
+        только числа, самих имён там нет.
+        """
+        hints = fit(names, KEYTERM_LIMIT)
+        if names:
+            logger.info(
+                "Подсказки распознаванию: имён %s, подсказок %s, не вошло имён %s",
+                hints.names,
+                len(hints.terms),
+                hints.left_out,
+            )
         try:
-            answer = await self._call(audio)
+            answer = await self._ask(audio, hints.terms)
         except httpx.TimeoutException:
             return self._not_transcribed("таймаут")
         except httpx.HTTPError as error:
@@ -188,6 +222,25 @@ class DeepgramTranscriber:
             return self._not_transcribed(result.reason)
         logger.info("Распознано: знаков %s, уверенность %s", len(result.text), result.confidence)
         return result
+
+    async def _ask(self, audio: bytes, keyterms: Sequence[str]) -> SpeechAnswer:
+        """Запрос; на 400 с подсказками — тот же файл ещё раз без них, один раз.
+
+        Подсказка не важнее поручения (§9.5): если провайдер их не принял,
+        голосовое распознаётся как до этапа 014. Отказ повтора и прочие отказы
+        уходят выше, в обычный путь §9.3.
+        """
+        try:
+            return await self._call(audio, keyterms)
+        except ApiError as error:
+            if not keyterms or error.status_code != HINTS_REJECTED:
+                raise
+            logger.warning(
+                "Deepgram не принял подсказки (ответ %s, подсказок %s): повтор без них",
+                error.status_code,
+                len(keyterms),
+            )
+        return await self._call(audio, ())
 
     def _not_transcribed(self, reason: str) -> NotTranscribed:
         logger.warning("Речь не распознана: %s", reason)
