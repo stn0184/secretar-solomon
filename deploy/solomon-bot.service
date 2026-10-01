@@ -1,0 +1,38 @@
+# Соломон — Telegram-бот на сервере (techspec/16-server.md §16.2).
+#
+# На сервер этот файл ставит `node scripts/deploy-bot.mjs` из копии
+# репозитория владельца, а не из клона на сервере: клоном владеет solomon,
+# и через него бот не должен влиять на то, что root кладёт в systemd.
+# Руками на сервере файл не правится — следующая выкладка его перезапишет.
+
+[Unit]
+Description=Solomon Telegram bot
+After=network-online.target
+Wants=network-online.target
+# Без предела попыток: упал — поднимается через RestartSec, сколько бы раз
+# это ни случилось (§16.5).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=solomon
+WorkingDirectory=/opt/solomon/secretar-solomon
+# Готовое окружение, а не `uv run`: старт не ходит в сеть и не меняет
+# окружение — его ставит выкладка (§16.4).
+ExecStart=/opt/solomon/secretar-solomon/bot/.venv/bin/solomon-bot
+# Журнал — в journald без задержки буфера: `journalctl -u solomon-bot`.
+Environment=PYTHONUNBUFFERED=1
+
+Restart=always
+RestartSec=10
+
+# Подкачки на сервере нет: утечка памяти бота не должна вытеснить VoiceFin.
+MemoryMax=300M
+CPUQuota=100%
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

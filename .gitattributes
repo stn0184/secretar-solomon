@@ -1,1 +1,5 @@
 * text=auto
+
+# Файлы выкладки уходят на сервер с компьютера на Windows: systemd и bash
+# с переводом строки CRLF не работают (techspec/16-server.md §16.2).
+deploy/** text eol=lf
