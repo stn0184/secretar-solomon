@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | Python | 3.12.13 | `CLAUDE.md` §«Стек» фиксирует 3.12; окружение ставит `uv`, системный Python не трогается |
 | uv | 0.11.21 | Один инструмент вместо venv + pip: ставит и сам Python, и зависимости по замку |
-| aiogram | 3.31.0 | Long polling без входящих соединений — бот живёт на домашнем компьютере |
+| aiogram | 3.31.0 | Long polling без входящих соединений — на сервере бот портов не открывает (§16) |
 | anthropic | 1.7.0 | Официальный SDK Claude: `AsyncAnthropic` и структурированный ответ `messages.parse` (`techspec/05-ai.md` §5.1) |
 | supabase | 2.31.0 | Официальный клиент; бот ходит в базу ключом service-role |
 | deepgram-sdk | 7.10.0 | Официальный SDK Deepgram с асинхронным клиентом (`AsyncDeepgramClient`) и типами (`py.typed`) — pre-recorded API, `nova-3`, `language=ru` (`techspec/09-voice.md` §9.2); актуальная на PyPI на 2026-09-28, тянет `httpx` и `pydantic`, которые уже в стеке |

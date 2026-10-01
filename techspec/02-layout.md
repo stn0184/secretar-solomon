@@ -62,9 +62,15 @@ supabase/                база и Edge Functions
   types/deno.d.ts        кусок API Deno для tsc
   tests/                 SQL-функции на PGlite: все миграции к пустой базе, без сети
 
+deploy/                  бот на сервере (§16), в .gitattributes — LF
+  solomon-bot.service    служба systemd: пользователь, запуск, перезапуск, пределы
+  setup-server.sh        первая настройка от root: пользователь, uv, Python, клон, окружение
+
 .github/workflows/pages.yml   публикация Mini App на GitHub Pages (§7)
 scripts/gate.mjs         ворота: стековые проверки + состояние спек
 scripts/check-dist.mjs   сборка Mini App без секретов — зовут workflow и ворота
+scripts/deploy-bot.mjs   выкладка бота на сервер по SSH: --env, --status, --setup (§16.4)
+scripts/deploy-bot.test.mjs   её тесты, node --test: ssh подменён, сети нет
 specs/  techspec/  prototype/   документы и очередь работ
 .env.example             один файл на все части, значений нет
 ```
