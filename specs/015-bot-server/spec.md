@@ -80,7 +80,7 @@ scripts/deploy-bot.mjs`: она забирает код на сервер, ст�
 - [x] Служба `deploy/solomon-bot.service` по §16.2: пользователь,
   `ExecStart`, перезапуск, автозапуск, пределы, защита,
   `PYTHONUNBUFFERED=1`; в `.gitattributes` — `deploy/**` с LF.
-- [ ] Первая настройка `deploy/setup-server.sh` по §16.2: пользователь
+- [x] Первая настройка `deploy/setup-server.sh` по §16.2: пользователь
   `solomon` (`nologin`, `/opt/solomon`), uv версии из §1 и Python 3.12
   от его имени, клон по HTTPS, `uv sync --frozen --no-dev`; сделанный
   шаг пропускается; нет `git` или `curl` — остановка с их именем,
