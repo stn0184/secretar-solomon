@@ -27,6 +27,10 @@ TASKS_TABLE = "tasks"
 MESSAGES_TABLE = "messages"
 REMINDERS_TABLE = "reminders"
 ACTIVE_STATUS = "active"
+# Задачи, люди которых уходят подсказками распознаванию (`techspec/09-voice.md`
+# §9.5): убранные (`cancelled`) не берутся — имя в них могло быть расслышано
+# неверно, и подсказка закрепила бы ошибку.
+NAMED_STATUSES = (ACTIVE_STATUS, "done")
 # Точность срока «со временем» (§3.3): только такие сроки сравниваются на
 # накладку (`techspec/15-duplicates.md` §15.5).
 TIME_PRECISION = "time"
@@ -536,6 +540,36 @@ async def list_open_tasks(db: Client, *, owner_telegram_id: int, limit: int) -> 
         )
     )
     return [task_details_from_row(row) for row in _rows(rows, "задач")]
+
+
+async def list_task_people(
+    db: Client, *, owner_telegram_id: int, limit: int
+) -> list[tuple[str, ...]]:
+    """Люди задач владельца для подсказок распознаванию (`techspec/09-voice.md` §9.5).
+
+    Только активные и выполненные задачи и только те, где люди названы:
+    пустой список выборку не занимает. Свежие задачи первыми — от них идёт
+    порядок, в котором имена занимают место в подсказках; не больше `limit`.
+    """
+    rows = await ask(
+        lambda: (
+            db.table(TASKS_TABLE)
+            .select("people")
+            .eq("owner_telegram_id", owner_telegram_id)
+            .in_("status", NAMED_STATUSES)
+            .neq("people", "{}")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+        )
+    )
+    people = []
+    for row in _rows(rows, "задач"):
+        if not isinstance(row, Mapping) or "people" not in row:
+            raise DatabaseError("В ответе базы нет людей задачи.")
+        people.append(_people(row["people"]))
+    return people
 
 
 async def task_details(db: Client, *, owner_telegram_id: int, task_id: str) -> TaskDetails | None:

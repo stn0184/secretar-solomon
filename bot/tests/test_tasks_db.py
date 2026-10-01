@@ -180,6 +180,10 @@ class FakeQuery:
         self.client.calls.append(("gte", column, value))
         return self
 
+    def in_(self, column: str, values: Any) -> FakeQuery:
+        self.client.calls.append(("in", column, tuple(values)))
+        return self
+
     def lt(self, column: str, value: Any) -> FakeQuery:
         self.client.calls.append(("lt", column, value))
         return self
@@ -962,6 +966,61 @@ async def test_broken_fact_row_is_a_failure() -> None:
         await db_facts.list_facts(as_client(fake), owner_telegram_id=OWNER_ID)
 
 
+async def test_memory_texts_for_hints_are_facts_and_guesses_of_this_owner() -> None:
+    """Подсказкам годится и предположение (§9.5); чужой памяти в выборке нет."""
+    fake = FakeClient(data=[{"text": "Сына зовут Юлай"}, {"text": "Есть дочь Рената"}])
+
+    found = await db_facts.list_fact_texts(as_client(fake), owner_telegram_id=OWNER_ID, limit=200)
+
+    assert found == ["Сына зовут Юлай", "Есть дочь Рената"]
+    assert ("table", "facts") in fake.calls
+    assert ("select", ("text",)) in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("in", "status", ("fact", "guess")) in fake.calls
+    # Сначала сказанное прямо, внутри — свежие: так имена занимают место.
+    orders = [call for call in fake.calls if call[0] == "order"]
+    assert orders == [("order", "status", False), ("order", "created_at", True)]
+    assert ("limit", 200) in fake.calls
+
+
+@pytest.mark.parametrize("rows", [[{"id": "f1"}], [{"text": None}], ["не строка"], "не список"])
+async def test_broken_memory_texts_are_a_failure(rows: Any) -> None:
+    fake = FakeClient(data=rows)
+
+    with pytest.raises(DatabaseError):
+        await db_facts.list_fact_texts(as_client(fake), owner_telegram_id=OWNER_ID, limit=200)
+
+
+async def test_task_people_for_hints_skip_cancelled_and_empty() -> None:
+    """Люди задач для подсказок (§9.5): свои, активные и выполненные, свежие первыми.
+
+    Убранная задача не в счёт — имя в ней могло быть расслышано неверно.
+    """
+    fake = FakeClient(data=[{"people": ["Юлай"]}, {"people": ["мама", "Анна Петровна"]}])
+
+    found = await db_tasks.list_task_people(as_client(fake), owner_telegram_id=OWNER_ID, limit=200)
+
+    assert found == [("Юлай",), ("мама", "Анна Петровна")]
+    assert ("table", "tasks") in fake.calls
+    assert ("select", ("people",)) in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    statuses = [call for call in fake.calls if call[:2] == ("in", "status")]
+    assert statuses == [("in", "status", ("active", "done"))]
+    assert "cancelled" not in statuses[0][2]
+    assert ("neq", "people", "{}") in fake.calls
+    orders = [call for call in fake.calls if call[0] == "order"]
+    assert orders == [("order", "created_at", True)]
+    assert ("limit", 200) in fake.calls
+
+
+@pytest.mark.parametrize("rows", [[{"id": "0e2f"}], [{"people": "Юлай"}], ["не строка"], None])
+async def test_broken_task_people_are_a_failure(rows: Any) -> None:
+    fake = FakeClient(data=rows)
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.list_task_people(as_client(fake), owner_telegram_id=OWNER_ID, limit=200)
+
+
 async def read_question(fake: FakeClient) -> OpenQuestion | None:
     return await db_tasks.open_question(as_client(fake), owner_telegram_id=OWNER_ID, since=ASKED_AT)
 
@@ -1442,6 +1501,7 @@ def test_owner_is_required_by_every_query() -> None:
         db_tasks.pick_task,
         db_tasks.record_separately,
         db_tasks.same_minute_titles,
+        db_tasks.list_task_people,
         db_reminders.reopen_task,
         db_reminders.due_reminders,
         db_reminders.mark_sent,
@@ -1450,6 +1510,7 @@ def test_owner_is_required_by_every_query() -> None:
         db_reminders.moved_tasks,
         db_reminders.clear_due_moved,
         db_facts.list_facts,
+        db_facts.list_fact_texts,
     ):
         parameter = inspect.signature(query).parameters["owner_telegram_id"]
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY

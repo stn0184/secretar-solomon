@@ -2,8 +2,10 @@
 
 Записи пишет `record_understanding` (`db/tasks.py`, одной транзакцией с
 задачей), подтверждает и удаляет — Mini App под правилами доступа. Боту
-здесь нужно одно: список фактов владельца, который уходит в промпт, чтобы
-помощник не переспрашивал (`techspec/08-memory.md` §8.2).
+здесь нужно два чтения: список фактов владельца, который уходит в промпт,
+чтобы помощник не переспрашивал (`techspec/08-memory.md` §8.2), и тексты
+записей, из которых берутся имена для подсказок распознаванию
+(`techspec/09-voice.md` §9.5).
 
 Тот же закон, что у `tasks.py`: `owner_telegram_id` именованный и без
 значения по умолчанию — ключ service-role правила доступа обходит, поэтому
@@ -23,6 +25,10 @@ from solomon.db.rpc import DatabaseError, ask
 FACTS_TABLE = "facts"
 FACT_COLUMNS = "id, category, text, status"
 FACT_STATUS = "fact"
+# Статусы записей, из которых берутся имена для подсказок распознаванию
+# (`techspec/09-voice.md` §9.5): подсказка — не утверждение, а помощь слуху,
+# поэтому годится и предположение.
+NAMED_STATUSES = (FACT_STATUS, "guess")
 # Сколько известных фактов уходит в промпт (§5.2, §8.2).
 KNOWN_LIMIT = 50
 
@@ -83,3 +89,33 @@ async def list_facts(
     if not isinstance(rows, list):
         raise DatabaseError("База вернула не список записей памяти.")
     return [fact_from_row(row) for row in rows]
+
+
+async def list_fact_texts(db: Client, *, owner_telegram_id: int, limit: int) -> list[str]:
+    """Тексты памяти владельца для подсказок распознаванию (§9.5), не больше `limit`.
+
+    И факты, и предположения. Порядок решает, чьи имена займут место в
+    подсказках первыми: сначала сказанное прямо (`fact` по алфавиту раньше
+    `guess`), внутри — свежие выше.
+    """
+    rows = await ask(
+        lambda: (
+            db.table(FACTS_TABLE)
+            .select("text")
+            .eq("owner_telegram_id", owner_telegram_id)
+            .in_("status", NAMED_STATUSES)
+            .order("status", desc=False)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+        )
+    )
+    if not isinstance(rows, list):
+        raise DatabaseError("База вернула не список записей памяти.")
+    texts = []
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("text") is None:
+            raise DatabaseError("В ответе базы нет текста записи памяти.")
+        texts.append(str(row["text"]))
+    return texts
