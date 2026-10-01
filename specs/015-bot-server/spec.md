@@ -92,7 +92,7 @@ scripts/deploy-bot.mjs`: она забирает код на сервер, ст�
   вызов подменяется в тестах.
 - [x] Тесты `scripts/deploy-bot.test.mjs` без сети — по пунктам «до
   выкладки»; проверка `scripts:tests` в `CHECKS` ворот.
-- [ ] Докстринг `bot/src/solomon/db/client.py`: бот работает на
+- [x] Докстринг `bot/src/solomon/db/client.py`: бот работает на
   сервере (`techspec/16-server.md`), а не на компьютере владельца.
 - [ ] Документы — по разделу «Документы».
 
