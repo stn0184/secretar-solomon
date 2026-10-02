@@ -42,6 +42,7 @@
 | `duration_seconds` | int, nullable | длительность звука — мера стоимости распознавания |
 | `transcript_confidence` | numeric, nullable | уверенность распознавания 0–1 (§9.4) |
 | `photo_text` | text, nullable | что модель прочитала со снимка, до 500 знаков (§14.3); у текста и голоса пусто |
+| `forwarded_from` | text, nullable | от кого переслано сообщение — то же имя, что в строке «Переслано от» (§5.2); у своего сообщения и у строк до этапа 016 пусто. Нужно недавнему разговору: чужие слова не выдаются за слова владельца (§17.5) |
 | `received_at` | timestamptz, `default now()` | когда бот его получил |
 | `analysis` | jsonb, nullable | что модель поняла: её ответ по схеме §5.3 целиком |
 | `ai_model` | text, nullable | какая модель разбирала |
@@ -70,6 +71,11 @@ polling может отдать обновление повторно, и вто
 Индексы: частичный `(owner_telegram_id, received_at desc) where task_id
 is not null` — под «последнюю задачу», `(task_id)` — под `on delete set
 null`.
+
+Недавний разговор (блок 6, §17.3) читает сообщения владельца за
+последний час — `received_at`, `kind`, `text`, `forwarded_from` и
+`reply` — без отдельного индекса: сообщений у владельца немного, а
+выборка короткая (§17.5).
 
 ### 3.3 `tasks` — задачи
 
@@ -133,12 +139,17 @@ record_message(owner_telegram_id bigint, chat_id bigint,
                telegram_message_id bigint, text text,
                kind text default 'text',
                telegram_file_id text default null,
-               duration_seconds int default null)
+               duration_seconds int default null,
+               forwarded_from text default null)
   returns messages
 ```
 
 Вставляет строку в `messages`; если такая уже есть (`unique` §3.2) —
-возвращает существующую, ничего не меняя. По возвращённой строке бот
+возвращает существующую, ничего не меняя, — и отправителя тоже.
+`forwarded_from` (этап 016) — имя из строки «Переслано от» у
+пересланного, у своего сообщения `null` (§17.5); семиаргументная версия
+удалена той же миграцией: две перегрузки с умолчаниями PostgREST не
+различит. По возвращённой строке бот
 видит повтор: у неё заполнен `reply` — ответ уже давался, модель не
 зовётся, тот же текст отправляется снова. `reply` пуст — первый заход
 упал между шагами, разбираем заново.
