@@ -37,6 +37,7 @@ from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import TaskDetails
 from solomon.handlers import PHOTO_LIMIT
 from solomon.services.understanding import (
+    MAX_TOKENS,
     MODEL,
     MORE_TASKS_LIMIT,
     OUTPUT_CONFIG,
@@ -44,7 +45,9 @@ from solomon.services.understanding import (
     PHOTO_RULES,
     PHOTO_TEXT_LIMIT,
     PHOTO_TIMEOUT_SECONDS,
+    RECENT_RULES,
     RULES,
+    TIMEOUT_SECONDS,
     Analysis,
     ModelAnswer,
     ModelCall,
@@ -70,6 +73,7 @@ from solomon.services.understanding import (
     format_known,
     format_open_question,
     format_open_tasks,
+    format_recent,
     trim_photo,
 )
 from tests.conftest import (
@@ -783,6 +787,87 @@ async def test_forwarded_message_without_tasks_has_no_block() -> None:
     assert "Открытые задачи:" not in system
 
 
+# ------------------------------------------------ разговор (§17.2–17.3)
+
+RECENT = (
+    "Недавний разговор (последний час, от старых к новым):\n"
+    "10:05 Вы: что у меня в четверг?\n"
+    "Соломон: В четверг в 10:00 созвон с Георгием."
+)
+
+
+def test_rules_tell_how_to_answer_a_conversation() -> None:
+    """Блок 1 (§17.2): ответ — только в reply_hint и только у разговора."""
+    assert "свободного текста в ответе нет" not in RULES
+    for phrase in (
+        "reply_hint",
+        "на «вы»",
+        "выдумывайте ни дел",
+        "Интернета у вас нет",
+        "к кому",
+        "450",
+        "Записать задачей?",
+        "reply_hint = null",
+    ):
+        assert phrase in RULES, phrase
+    # Дело рядом с благодарностью — поручение (§17.1).
+    assert "позвонить Ренате» — task" in RULES
+
+
+def test_no_recent_talk_means_no_block() -> None:
+    assert format_recent(None) == ""
+    assert "Недавний разговор" not in build_system_prompt(NOW, TZ, tasks=[MEETING])
+
+
+def test_recent_talk_goes_after_the_open_tasks_with_its_rules() -> None:
+    """Блок 6 — после блока 5, правила к нему — сразу за строками (§17.3)."""
+    prompt = build_system_prompt(NOW, TZ, tasks=[MEETING], last_task=1, recent=RECENT)
+
+    assert prompt.endswith(f"{RECENT}\n{RECENT_RULES}")
+    assert prompt.index("Последняя задача в разговоре: №1") < prompt.index(RECENT)
+    assert prompt == f"{build_system_prompt(NOW, TZ, tasks=[MEETING], last_task=1)}\n\n" + (
+        format_recent(RECENT)
+    )
+
+
+def test_recent_rules_keep_past_messages_as_data() -> None:
+    for phrase in ("данные", "Разбирается только текущее", "номер", "Записать задачей?"):
+        assert phrase in RECENT_RULES, phrase
+
+
+async def test_recent_talk_reaches_the_prompt_of_an_own_message() -> None:
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze("а в пятницу?", tasks=[MEETING], last_task=1, recent=RECENT)
+
+    system, text = call.calls[0]
+    assert system == build_system_prompt(NOW, TZ, tasks=[MEETING], last_task=1, recent=RECENT)
+    assert text == "а в пятницу?"
+
+
+async def test_forwarded_message_gets_no_recent_talk() -> None:
+    """Пересланное разговора не ведёт (§17.1): блока 6 нет, даже если он пришёл."""
+    service, call = build_service(answer=FakeAnswer(parsed_output=make_understanding()))
+
+    await service.analyze("Во сколько?", forwarded_from="Рената", tasks=[], recent=RECENT)
+
+    system, _ = call.calls[0]
+    assert "Недавний разговор" not in system
+
+
+async def test_reply_length_goes_to_the_log_without_its_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    answer = FakeAnswer(parsed_output=make_understanding(kind="chat", reply_hint="Пожалуйста!"))
+    service, _ = build_service(answer=answer)
+
+    with caplog.at_level(logging.INFO):
+        await service.analyze("спасибо")
+
+    assert "ответ знаков 11" in caplog.text
+    assert "Пожалуйста" not in caplog.text
+
+
 async def test_duplicate_number_goes_to_the_log(caplog: pytest.LogCaptureFixture) -> None:
     service, _ = build_service(answer=FakeAnswer(parsed_output=make_understanding(same_as=2)))
 
@@ -832,11 +917,12 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 
 # ------------------------------------------------------------ снимок (§14.3)
 
-# Эталоны пересчитаны на этапе 013: поле `same_as` и правила дубля (§15.2).
+# Эталоны промпта пересчитаны на этапе 016: правила ответа разговора в блоке 1
+# (§17.2); схема с этапа 013 не менялась — `reply_hint` в ней уже был.
 # Дальше промпт и схема ответа текста и голоса сдвигаются только этапом,
 # который их меняет, — снимок и прочие ветки их не трогают.
-PROMPT_WITH_EMPTY_TASKS_SHA256 = "0d3983232e03815ef27a04b2c0cdb91383c0fefcad0fd86e35835f4a9cd24178"
-PROMPT_BARE_SHA256 = "15df1371223fbd35f0cc6a6eb03676af3a4d8d45afa48b5d44cf704fd143fd3e"
+PROMPT_WITH_EMPTY_TASKS_SHA256 = "8d680994f1c330ce4c6402d074602f883e9f97375175e861e87db4bf3de85e30"
+PROMPT_BARE_SHA256 = "cd4a044bdd13e10fb4733127fbe0b674bbb15e0bbbd481dbd7dd92bff4439eaf"
 SCHEMA_SHA256 = "dce15f144f4ac6a8258e60c42b5ba869449f7a070b7f87a60f73035460e8e82c"
 
 # Не настоящая картинка: модели здесь нет, важно только, что байты дошли.
@@ -1167,13 +1253,15 @@ async def test_text_call_keeps_its_schema_tokens_and_time(
 
     assert parse.kwargs == {
         "model": MODEL,
-        "max_tokens": 1024,
+        "max_tokens": 2048,
         "output_format": Understanding,
         "output_config": OUTPUT_CONFIG,
         "system": "правила",
         "messages": [{"role": "user", "content": "купить лампочку"}],
-        "timeout": 30.0,
+        "timeout": 60.0,
     }
+    # Модель пишет ещё и ответ разговора, промпт длиннее на блок 6 (§17.4).
+    assert (MAX_TOKENS, TIMEOUT_SECONDS) == (2048, 60.0)
 
 
 async def test_photo_call_asks_for_the_photo_schema_with_more_tokens_and_time(
