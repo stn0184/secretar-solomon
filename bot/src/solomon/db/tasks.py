@@ -54,6 +54,10 @@ QUESTION_COLUMNS = (
     "id, title, kind, due_at, due_precision, priority, promise, people, "
     "open_question, question_asked_at, repeat"
 )
+# Что недавний разговор (блок 6) берёт из сообщения
+# (`techspec/17-conversation.md` §17.5): время, вид, текст, отправитель
+# пересланного и ответ бота.
+RECENT_COLUMNS = "received_at, kind, text, forwarded_from, reply"
 
 # Вид сообщения (`techspec/03-schema.md` §3.2, §9.1, §14.1): текст,
 # голосовое, видео-кружок, снимок. Голосовые виды — те, у которых есть файл и
@@ -168,9 +172,28 @@ class SavedMessage:
 
     `reply` пуст — ответа этому сообщению ещё не давали: либо оно только что
     заведено, либо прошлый заход упал между шагами и разбирать нужно заново.
+    `received_at` — когда строка заведена: до этого момента берётся недавний
+    разговор (§17.3); нет поля в ответе — пусто, и границу даёт часы бота.
     """
 
     id: str
+    reply: str | None
+    received_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecentMessage:
+    """Сообщение владельца для недавнего разговора (блок 6, §17.3).
+
+    `text` у голоса и кружка — расшифровка, у снимка — подпись;
+    `forwarded_from` — от кого переслано, у своего пусто; `reply` — что бот
+    ответил, пусто, если ответа ещё нет.
+    """
+
+    received_at: datetime
+    kind: str
+    text: str
+    forwarded_from: str | None
     reply: str | None
 
 
@@ -183,7 +206,32 @@ def _message_from_row(row: Any) -> SavedMessage:
     except KeyError as error:
         raise DatabaseError(f"В ответе базы нет поля сообщения: {error}.") from error
     reply = row.get("reply")
-    return SavedMessage(id=message_id, reply=None if reply is None else str(reply))
+    return SavedMessage(
+        id=message_id,
+        reply=None if reply is None else str(reply),
+        received_at=optional_moment(row.get("received_at"), "received_at"),
+    )
+
+
+def _recent_from_row(row: Any) -> RecentMessage:
+    """Разобрать строку недавнего разговора. Кривая строка — отказ без текста
+    сообщения: отказ уходит в журнал, а тексты владельца туда не пишутся.
+    """
+    if not isinstance(row, Mapping):
+        raise DatabaseError("База вернула не строку сообщения.")
+    try:
+        received_at = row["received_at"]
+        kind = row["kind"]
+        text = row["text"]
+    except KeyError as error:
+        raise DatabaseError(f"В ответе базы нет поля сообщения: {error}.") from error
+    return RecentMessage(
+        received_at=moment(received_at, "received_at"),
+        kind=str(kind),
+        text="" if text is None else str(text),
+        forwarded_from=_optional_text(row.get("forwarded_from")),
+        reply=_optional_text(row.get("reply")),
+    )
 
 
 def task_from_row(row: Any) -> Task:
@@ -320,6 +368,7 @@ async def record_message(
     kind: MessageKind = "text",
     telegram_file_id: str | None = None,
     duration_seconds: int | None = None,
+    forwarded_from: str | None = None,
 ) -> SavedMessage:
     """Шаг первый: сохранить сообщение до всякого разбора.
 
@@ -331,7 +380,8 @@ async def record_message(
     У голоса и кружка `text` пуст до расшифровки, а `telegram_file_id` и
     `duration_seconds` заполнены (§9.3): по файлу звук можно скачать снова.
     У снимка `text` — подпись (пустая, если её нет), файл есть, длительности
-    нет (§14.2).
+    нет (§14.2). `forwarded_from` — от кого переслано сообщение, у своего
+    пусто (`techspec/17-conversation.md` §17.5); повтор отправителя не меняет.
     """
     params = {
         "owner_telegram_id": owner_telegram_id,
@@ -341,6 +391,7 @@ async def record_message(
         "kind": kind,
         "telegram_file_id": telegram_file_id,
         "duration_seconds": duration_seconds,
+        "forwarded_from": forwarded_from,
     }
     data = single_row(await ask(lambda: db.rpc(RECORD_MESSAGE_FUNCTION, params).execute().data))
     if data is None:
@@ -625,6 +676,34 @@ async def last_message_task(
     )
     found = _rows(rows, "сообщений")
     return _event_from_row(found[0], "received_at") if found else None
+
+
+async def recent_messages(
+    db: Client, *, owner_telegram_id: int, since: datetime, before: datetime, limit: int
+) -> list[RecentMessage]:
+    """Недавний разговор (блок 6, `techspec/17-conversation.md` §17.3):
+    последние `limit` сообщений владельца от `since` и строго до `before`,
+    от старых к новым.
+
+    `before` — время текущего сообщения: само оно не берётся, и в блок более
+    раннего из пришедших разом не попадает более позднее. Новый индекс не
+    нужен: выборка за час (§17.5).
+    """
+    rows = await ask(
+        lambda: (
+            db.table(MESSAGES_TABLE)
+            .select(RECENT_COLUMNS)
+            .eq("owner_telegram_id", owner_telegram_id)
+            .gte("received_at", since.isoformat())
+            .lt("received_at", before.isoformat())
+            .order("received_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+        )
+    )
+    found = [_recent_from_row(row) for row in _rows(rows, "сообщений")]
+    return sorted(found, key=lambda message: message.received_at)
 
 
 async def last_reminder_task(

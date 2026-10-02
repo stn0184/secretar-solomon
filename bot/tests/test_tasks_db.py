@@ -23,6 +23,7 @@ from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import (
     OpenQuestion,
     PickedMessage,
+    RecentMessage,
     SavedMessage,
     StoredMessage,
     Task,
@@ -244,6 +245,7 @@ async def test_record_message_calls_rpc_with_whole_text() -> None:
             "kind": "text",
             "telegram_file_id": None,
             "duration_seconds": None,
+            "forwarded_from": None,
         },
     )
 
@@ -275,6 +277,7 @@ async def test_record_message_sends_kind_file_and_duration_for_voice() -> None:
             "kind": "voice",
             "telegram_file_id": "voice-1",
             "duration_seconds": 32,
+            "forwarded_from": None,
         },
     )
 
@@ -292,6 +295,39 @@ async def test_record_message_returns_the_reply_already_given() -> None:
     )
 
     assert saved.reply == "Записал: купить лампочку"
+
+
+async def test_record_message_sends_the_sender_of_a_forwarded_message() -> None:
+    """У пересланного в строку ложится отправитель (§17.5): блок 6 назовёт его."""
+    fake = FakeClient(data={**MESSAGE_ROW, "forwarded_from": "Рената"})
+
+    await db_tasks.record_message(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        chat_id=42,
+        telegram_message_id=7,
+        text="Во сколько?",
+        forwarded_from="Рената",
+    )
+
+    assert fake.calls[0][2]["forwarded_from"] == "Рената"
+
+
+async def test_record_message_reads_when_the_message_was_received() -> None:
+    """Время строки — верхняя граница недавнего разговора (§17.3)."""
+    fake = FakeClient(data={**MESSAGE_ROW, "received_at": "2026-09-29T11:40:00+05:00"})
+
+    saved = await db_tasks.record_message(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        chat_id=42,
+        telegram_message_id=7,
+        text="купить лампочку",
+    )
+
+    assert saved == SavedMessage(
+        id="9a71", reply=None, received_at=datetime(2026, 9, 29, 11, 40, tzinfo=TZ)
+    )
 
 
 async def test_record_message_without_row_is_a_failure() -> None:
@@ -1207,6 +1243,88 @@ async def test_last_message_task_is_the_newest_message_about_a_task() -> None:
     assert ("limit", 1) in fake.calls
 
 
+RECENT_ROWS = [
+    {
+        "received_at": "2026-09-29T11:50:00+05:00",
+        "kind": "photo",
+        "text": "",
+        "forwarded_from": None,
+        "reply": None,
+    },
+    {
+        "received_at": "2026-09-29T11:45:00+05:00",
+        "kind": "text",
+        "text": "Во сколько?",
+        "forwarded_from": "Рената",
+        "reply": "Это не похоже на поручение — ничего не записал.",
+    },
+]
+
+
+async def test_recent_messages_are_the_owners_last_messages_before_the_current() -> None:
+    """Блок 6 (§17.3): сообщения владельца за окно, строго до текущего, последние N."""
+    before = datetime(2026, 9, 29, 11, 55, tzinfo=TZ)
+    fake = FakeClient(data=RECENT_ROWS)
+
+    found = await db_tasks.recent_messages(
+        as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE, before=before, limit=10
+    )
+
+    assert ("table", "messages") in fake.calls
+    assert ("select", ("received_at, kind, text, forwarded_from, reply",)) in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("gte", "received_at", SINCE.isoformat()) in fake.calls
+    assert ("lt", "received_at", before.isoformat()) in fake.calls
+    assert ("order", "received_at", True) in fake.calls
+    assert ("limit", 10) in fake.calls
+    # База отдаёт новые первыми, блоку нужны от старых к новым.
+    assert found == [
+        RecentMessage(
+            received_at=datetime(2026, 9, 29, 11, 45, tzinfo=TZ),
+            kind="text",
+            text="Во сколько?",
+            forwarded_from="Рената",
+            reply="Это не похоже на поручение — ничего не записал.",
+        ),
+        RecentMessage(
+            received_at=datetime(2026, 9, 29, 11, 50, tzinfo=TZ),
+            kind="photo",
+            text="",
+            forwarded_from=None,
+            reply=None,
+        ),
+    ]
+
+
+async def test_broken_recent_message_is_a_failure_without_its_text() -> None:
+    """Кривая строка — отказ; текст сообщения в отказ не попадает (журнал — без текстов)."""
+    fake = FakeClient(data=[{"received_at": "2026-09-29T11:45:00+05:00", "text": "секрет"}])
+
+    with pytest.raises(DatabaseError) as raised:
+        await db_tasks.recent_messages(
+            as_client(fake),
+            owner_telegram_id=OWNER_ID,
+            since=SINCE,
+            before=SINCE + timedelta(hours=1),
+            limit=10,
+        )
+
+    assert "секрет" not in str(raised.value)
+
+
+async def test_recent_messages_not_a_list_is_a_failure() -> None:
+    fake = FakeClient(data={"text": "Во сколько?"})
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.recent_messages(
+            as_client(fake),
+            owner_telegram_id=OWNER_ID,
+            since=SINCE,
+            before=SINCE + timedelta(hours=1),
+            limit=10,
+        )
+
+
 async def test_last_reminder_task_is_the_newest_sent_reminder() -> None:
     fake = FakeClient(data=[{"task_id": TASK_ID, "sent_at": "2026-09-29T11:50:00+05:00"}])
 
@@ -1496,6 +1614,7 @@ def test_owner_is_required_by_every_query() -> None:
         db_tasks.task_details,
         db_tasks.last_message_task,
         db_tasks.last_reminder_task,
+        db_tasks.recent_messages,
         db_tasks.reminder_task_id,
         db_tasks.message_by_telegram_id,
         db_tasks.pick_task,
