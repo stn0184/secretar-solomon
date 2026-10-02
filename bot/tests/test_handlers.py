@@ -444,6 +444,18 @@ async def test_help_tells_about_photos(
     assert "Фото и скриншоты" in session.texts[0]
 
 
+async def test_help_tells_about_questions(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    """Разговор (`techspec/17-conversation.md`): /help знает, что можно спросить."""
+    dispatcher = build_dispatcher(settings)
+
+    await dispatcher.feed_update(bot, make_update("/help"))
+
+    assert "«что у меня в четверг?»" in session.texts[0]
+    assert "по записанному" in session.texts[0]
+
+
 # --- Скачивание с повтором (`techspec/09-voice.md` §9.3) ---------------------
 
 # Адрес файла у Telegram: в нём токен бота, и в журнал он попадать не должен.
