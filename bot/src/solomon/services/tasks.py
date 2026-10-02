@@ -1036,11 +1036,14 @@ class TaskService:
         Скачивание — граница с Telegram, и какие исключения оттуда придут,
         сервис не знает и знать не должен: любое из них — причина в журнал,
         человеку честный ответ, сообщение с `file_id` уже в базе.
+
+        В журнал — только тип ошибки, без текста: aiohttp кладёт в текст
+        адрес файла, а в адресе у Telegram — токен бота (инвариант 1).
         """
         try:
             return await load_audio()
         except Exception as error:  # noqa: BLE001 - граница Telegram, см. доккомментарий
-            logger.warning("Файл не скачан из Telegram: %s: %s", type(error).__name__, error)
+            logger.warning("Файл не скачан из Telegram: %s", type(error).__name__)
             return NotTranscribed(reason=f"download: {type(error).__name__}")
 
     async def _known_names(self) -> list[str]:
@@ -1062,13 +1065,14 @@ class TaskService:
     async def _load_image(self, load_image: ImageLoader) -> bytes | None:
         """Скачать снимок в память; отказ скачивания — `None`, причина в журнал.
 
-        Граница с Telegram, как у голоса (`_hear`): какие исключения оттуда
-        придут, сервис не знает, и любое из них — «не смог открыть».
+        Граница с Telegram, как у голоса (`_download`): какие исключения
+        оттуда придут, сервис не знает, и любое из них — «не смог открыть».
+        В журнал — только тип ошибки: в её тексте бывает токен бота.
         """
         try:
             return await load_image()
-        except Exception as error:  # noqa: BLE001 - граница Telegram, см. `_hear`
-            logger.warning("Снимок не скачан из Telegram: %s: %s", type(error).__name__, error)
+        except Exception as error:  # noqa: BLE001 - граница Telegram, см. `_download`
+            logger.warning("Снимок не скачан из Telegram: %s", type(error).__name__)
             return None
 
     async def _not_heard(self, saved: SavedMessage, result: NotTranscribed) -> RecordOutcome:

@@ -1,0 +1,65 @@
+"""Журнал без значений ключей: `cli.HidingFormatter` (инвариант 1)."""
+
+from __future__ import annotations
+
+import logging
+import sys
+from dataclasses import fields
+
+from solomon.cli import HIDDEN, LOG_FORMAT, HidingFormatter, secrets_of
+from solomon.config import Settings
+from tests.conftest import TEST_TOKEN
+
+# Адрес файла у Telegram — так токен и попадает в текст ошибок aiohttp.
+FILE_URL = f"https://api.telegram.org/file/bot{TEST_TOKEN}/voice/voice-1.oga"
+
+
+def make_record(message: str, *args: object) -> logging.LogRecord:
+    """Строка журнала, какой её пишет aiogram."""
+    return logging.LogRecord("aiogram.event", logging.ERROR, __file__, 1, message, args, None)
+
+
+def test_token_is_hidden_in_the_message() -> None:
+    formatter = HidingFormatter(LOG_FORMAT, [TEST_TOKEN])
+
+    line = formatter.format(make_record("Файл не скачан: %s", FILE_URL))
+
+    assert TEST_TOKEN not in line
+    assert f"https://api.telegram.org/file/bot{HIDDEN}/voice/voice-1.oga" in line
+
+
+def test_token_is_hidden_in_the_traceback() -> None:
+    formatter = HidingFormatter(LOG_FORMAT, [TEST_TOKEN])
+    try:
+        raise TimeoutError(f"Connection timeout to host {FILE_URL}")
+    except TimeoutError:
+        record = logging.LogRecord(
+            "aiogram.event", logging.ERROR, __file__, 1, "Cause exception", None, sys.exc_info()
+        )
+
+    line = formatter.format(record)
+
+    assert "TimeoutError" in line
+    assert TEST_TOKEN not in line
+
+
+def test_every_key_from_settings_is_hidden(settings: Settings) -> None:
+    """Ключ, заведённый в `Settings`, без правки `secrets_of` не останется."""
+    keys = [
+        getattr(settings, field.name)
+        for field in fields(settings)
+        if field.name.endswith(("_token", "_key"))
+    ]
+    formatter = HidingFormatter(LOG_FORMAT, secrets_of(settings))
+
+    line = formatter.format(make_record(" ".join(["%s"] * len(keys)), *keys))
+
+    assert len(keys) == 4
+    for key in keys:
+        assert key not in line
+
+
+def test_line_without_keys_is_left_as_is() -> None:
+    formatter = HidingFormatter("%(message)s", ["", TEST_TOKEN])
+
+    assert formatter.format(make_record("Команда /start")) == "Команда /start"

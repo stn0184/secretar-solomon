@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import pytest
 from aiogram import Bot
@@ -688,6 +689,36 @@ def http_error(status: int) -> ClientResponseError:
 )
 def test_only_network_failures_are_retried(error: Exception, retried: bool) -> None:
     assert network_failure(error) is retried
+
+
+@pytest.mark.parametrize(
+    ("make", "reply"),
+    [(make_voice_update, texts.NOT_HEARD), (make_photo_update, texts.PHOTO_NOT_OPENED)],
+)
+async def test_download_refusal_leaves_no_token_in_the_log(
+    make: Callable[..., Update],
+    reply: str,
+    bot: Bot,
+    session: RecordingSession,
+    settings: Settings,
+    pauses: list[float],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Сервер файлов ответил 404: в тексте ошибки aiohttp — адрес файла с токеном.
+
+    Ни строка обработчика, ни строка сервиса этот текст в журнал не пишут —
+    только тип ошибки.
+    """
+    session.content_failures = [http_error(404)]
+    service, _, _ = build_tasks(settings, photo=make_photo_understanding())
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    with caplog.at_level(logging.INFO):
+        await dispatcher.feed_update(bot, make(update_id=29))
+
+    assert session.texts == [reply]
+    assert "ClientResponseError" in caplog.text
+    assert TEST_TOKEN not in caplog.text
 
 
 async def test_broken_database_is_not_called_recorded(
