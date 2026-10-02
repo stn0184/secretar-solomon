@@ -123,7 +123,7 @@
   `test_conversation.py`, `test_understanding.py`,
   `test_tasks_service.py`, `test_tasks_db.py`,
   `test_chat_edit_service.py`.
-- [ ] Живые примеры (`fixtures/understanding.jsonl`,
+- [x] Живые примеры (`fixtures/understanding.jsonl`,
   `test_understanding.py`, маркер `live`) — по пунктам «Приёмки» с
   пометкой «живой». Проверки ответа мягкие: число, имя, вид, нет
   задачи, нет запрещённого слова. Прогон и счёт — в отчёт.

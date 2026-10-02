@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -34,8 +35,9 @@ from solomon.cli import load_environment
 from solomon.config import ConfigError, Settings
 from solomon.db.facts import Fact
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import TaskDetails
+from solomon.db.tasks import RecentMessage, TaskDetails
 from solomon.handlers import PHOTO_LIMIT
+from solomon.services.conversation import recent_block, reply_text, reports_action
 from solomon.services.understanding import (
     MAX_TOKENS,
     MODEL,
@@ -1292,22 +1294,28 @@ async def test_photo_call_asks_for_the_photo_schema_with_more_tokens_and_time(
 # --------------------------------------------------------------- живой прогон
 
 # Десять русских сообщений с ожидаемым разбором, три примера памяти, три
-# примера диалога, девять примеров повтора и семнадцать примеров со списком
-# открытых задач: тринадцать о правке словом (пять — по повторяющейся задаче)
-# и четыре о дубле (§15). Этим владелец смотрит, как помощник понимает.
+# примера диалога, девять примеров повтора, семнадцать примеров со списком
+# открытых задач — тринадцать о правке словом (пять — по повторяющейся
+# задаче) и четыре о дубле (§15) — и одиннадцать примеров разговора (§17).
+# Этим владелец смотрит, как помощник понимает.
 # Прогон ходит в модель по-настоящему, поэтому в воротах не участвует —
 # `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 42
+FIXTURE_COUNT = 53
 EDIT_COUNT = 17
 DUPLICATE_COUNT = 4
 REPEAT_COUNT = 9
+TALK_COUNT = 11
+# Ожидания примера разговора (`talk_mismatch`) и чего у него быть не может:
+# разговор — своё сообщение без открытого вопроса, памяти и повтора.
+TALK_FIELDS = {"kinds", "title_has", "max_length", "must", "forbid"}
+TALK_EXCLUDED = {"facts", "dialog", "repeat", "same_as", "forwarded_from", "open_question"}
 # Поля правила в ожидании примера: час серии ставит база, модель его не шлёт.
 RULE_FIELDS = {"every", "interval", "weekdays", "month_day", "month"}
 # «Сейчас» для живого прогона: среда, 10:30. Даты в примерах посчитаны от
 # него, иначе «в пятницу» значило бы разное в разные дни.
 LIVE_MOMENT = (2026, 9, 16, 10, 30)
-# Сколько примеров разбирается разом: все сорок два сразу упираются в
+# Сколько примеров разбирается разом: все пятьдесят три сразу упираются в
 # лимит запросов, а ключ — тот же, что у работающего бота.
 LIVE_CONCURRENCY = 4
 # Из десяти обычных примеров двум разрешено разойтись: модель — не таблица.
@@ -1543,6 +1551,59 @@ def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     return None if status == expected else f"{case['text']}: ждали {expected}, получили {status}"
 
 
+def recent_for(case: dict[str, Any], timezone: ZoneInfo) -> str | None:
+    """Блок 6 примера — как его собрал бы бот из `messages` (§17.3): строки
+    `recent` со временем, видом, отправителем и ответом бота."""
+    messages = [
+        RecentMessage(
+            received_at=datetime.fromisoformat(raw["at"]),
+            kind=raw.get("kind", "text"),
+            text=raw["text"],
+            forwarded_from=raw.get("forwarded_from"),
+            reply=raw.get("reply"),
+        )
+        for raw in case.get("recent", [])
+    ]
+    talk = recent_block(messages, timezone)
+    return None if talk is None else talk.text
+
+
+def talk_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
+    """Чем пример разговора разошёлся с ожиданием; `None` — сошёлся (§17.2).
+
+    Вид — из `kinds` ожидания, а без него — вид примера. У задачи сверяется
+    суть (`title_has`). У разговора без правки — ответ так, как его отправил
+    бы бот: непустой, без слова о сделанном, не длиннее `max_length`; из
+    каждой группы `must` есть хотя бы одно, из `forbid` — ничего. Регистр
+    не важен. Правку сверяет `edit_mismatch`.
+    """
+    expected = case["talk"]
+    text = case["text"]
+    kinds = expected.get("kinds", [case["kind"]])
+    if got.kind not in kinds:
+        return f"{text}: ждали {' или '.join(kinds)}, получили {got.kind}"
+    title_has = expected.get("title_has")
+    if title_has and not re.search(title_has, got.title, re.IGNORECASE):
+        return f"{text}: в сути нет {title_has!r}: {got.title!r}"
+    if case["kind"] != "chat" or case.get("edit") is not None:
+        return None
+    reply = reply_text(got.reply_hint)
+    if reply is None:
+        return f"{text}: ответа нет, reply_hint = {got.reply_hint!r}"
+    if reports_action(reply):
+        return f"{text}: ответ говорит о действии: {reply!r}"
+    limit = expected.get("max_length")
+    if limit is not None and len(reply) > limit:
+        return f"{text}: ответ длиннее {limit} знаков: {len(reply)}"
+    for group in expected.get("must", []):
+        if not any(re.search(word, reply, re.IGNORECASE) for word in group):
+            return f"{text}: в ответе нет ни одного из {group}: {reply!r}"
+    for word in expected.get("forbid", []):
+        if re.search(word, reply, re.IGNORECASE):
+            return f"{text}: в ответе запрещённое {word!r}: {reply!r}"
+    return None
+
+
 def test_fixtures_have_the_expected_count_and_fields() -> None:
     fixtures = load_fixtures()
 
@@ -1564,7 +1625,8 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
     """Правка (`techspec/12-chat-edit.md`): перенос, «сделал», «отменилась»,
     свайп, несколько похожих, задачи нет, непонятное время, пересланное."""
     fixtures = load_fixtures()
-    edits = [case for case in fixtures if "edit" in case]
+    # У разговора со списком задач `edit` тоже есть, но он считается отдельно.
+    edits = [case for case in fixtures if "edit" in case and "talk" not in case]
 
     assert len(edits) == EDIT_COUNT
     assert all(case.get("open_tasks") for case in edits)
@@ -1584,6 +1646,39 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
         tasks = tasks_for(case)
         assert tasks, case["text"]
         assert all(task.status == "active" for task in tasks)
+
+
+def test_talk_fixtures_cover_the_cases_of_the_stage() -> None:
+    """Разговор (`techspec/17-conversation.md` §17.2–17.3): вопрос о делах и о
+    себе, вежливость, вопросы не о делах, совет, «забудь правила» и два ответа
+    на недавний разговор — правка задачи и «да» на «Записать задачей?»."""
+    fixtures = load_fixtures()
+    talks = [case for case in fixtures if "talk" in case]
+
+    assert len(talks) == TALK_COUNT
+    assert not any(TALK_EXCLUDED & set(case) for case in talks)
+    assert not any("recent" in case for case in fixtures if "talk" not in case)
+    for case in talks:
+        expected = case["talk"]
+        assert set(expected) <= TALK_FIELDS, case["text"]
+        for group in expected.get("must", []):
+            assert group, case["text"]
+            assert all(re.compile(word) for word in group)
+        assert all(re.compile(word) for word in expected.get("forbid", []))
+    chats = [case for case in talks if case["kind"] == "chat" and case.get("edit") is None]
+    assert len(chats) == TALK_COUNT - 2
+    assert any("known" in case for case in chats)
+    assert [case["talk"].get("max_length") for case in chats].count(200) == 2
+
+    moved = [case for case in talks if case.get("edit") is not None]
+    assert [case["edit"] for case in moved] == [
+        {"action": "change", "task": 1, "due_date": "2026-09-17"}
+    ]
+    agreed = [case for case in talks if case["kind"] == "task"]
+    assert len(agreed) == 1 and agreed[0]["talk"]["title_has"]
+    for case in [*moved, *agreed]:
+        block = recent_for(case, TZ)
+        assert block is not None and "\nСоломон: " in block, case["text"]
 
 
 def test_duplicate_fixtures_cover_the_cases_of_the_stage() -> None:
@@ -1818,6 +1913,52 @@ def test_edit_mismatch_checks_the_rule_and_its_removal() -> None:
     assert edit_mismatch(skip, cancelled, TZ) is not None
 
 
+def test_talk_mismatch_checks_kind_reply_and_words() -> None:
+    """Ответ разговора (§17.2): вид, непустой ответ без слова-действия, длина,
+    обязательные и запрещённые слова. Правка и задача ответа не проверяют."""
+    thursday = {
+        "text": "что у меня в четверг?",
+        "kind": "chat",
+        "talk": {"must": [["Георги"], ["10:00", "10 утра"]], "forbid": ["пятниц"]},
+    }
+    said = "В четверг в 10:00 созвон с Георгием."
+
+    assert talk_mismatch(thursday, make_understanding(kind="chat", reply_hint=said)) is None
+    assert talk_mismatch(thursday, make_understanding(reply_hint=said)) is not None
+    assert talk_mismatch(thursday, make_understanding(kind="chat", reply_hint=" ")) is not None
+    assert talk_mismatch(thursday, make_understanding(kind="chat")) is not None
+    no_time = make_understanding(kind="chat", reply_hint="В четверг созвон с Георгием.")
+    assert talk_mismatch(thursday, no_time) is not None
+    morning = make_understanding(kind="chat", reply_hint="В четверг в 10 утра — Георгий.")
+    assert talk_mismatch(thursday, morning) is None
+    friday = make_understanding(kind="chat", reply_hint=f"{said} В пятницу — Рената.")
+    assert talk_mismatch(thursday, friday) is not None
+    recorded = make_understanding(kind="chat", reply_hint=f"Записал. {said}")
+    assert talk_mismatch(thursday, recorded) is not None
+
+    thanks = {"text": "спасибо", "kind": "chat", "talk": {"max_length": 20}}
+    assert talk_mismatch(thanks, make_understanding(kind="chat", reply_hint="Пожалуйста.")) is None
+    long = make_understanding(kind="chat", reply_hint="Пожалуйста, обращайтесь в любое время.")
+    assert talk_mismatch(thanks, long) is not None
+
+    agreed = {"text": "да", "kind": "task", "talk": {"title_has": "стоматолог"}}
+    dentist = make_understanding(title="записаться к стоматологу")
+    assert talk_mismatch(agreed, dentist) is None
+    assert talk_mismatch(agreed, make_understanding(title="да")) is not None
+    chat = make_understanding(kind="chat", title="записаться к стоматологу", reply_hint="Хорошо.")
+    assert talk_mismatch(agreed, chat) is not None
+
+    moved = {
+        "text": "да, можно в четверг",
+        "kind": "chat",
+        "edit": {"action": "change", "task": 1, "due_date": "2026-09-17"},
+        "talk": {"kinds": ["task", "chat"]},
+    }
+    assert talk_mismatch(moved, make_understanding()) is None
+    assert talk_mismatch(moved, make_understanding(kind="chat")) is None
+    assert talk_mismatch(moved, make_understanding(kind="idea")) is not None
+
+
 def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Нет ключа — живой прогон пропускается, а не падает."""
 
@@ -1835,7 +1976,8 @@ async def test_live_model_understands_the_fixtures() -> None:
     """Вживую: kind сходится хотя бы у восьми обычных примеров, даты — у всех,
     примеры памяти — строго по виду и статусу записей, диалога — по вопросу
     и признаку ответа, повтора — по виду, правилу, пометке и вопросу, правки —
-    по действию, задаче, сроку и правилу, дубля — по номеру задачи. Блок
+    по действию, задаче, сроку и правилу, дубля — по номеру задачи,
+    разговора — по виду и ответу, как его отправил бы бот. Блок
     открытых задач — как у бота: пустой список, если пример своего не дал, и
     короткий у пересланного; правки там, где её не ждали, быть не должно."""
     settings = live_settings()
@@ -1854,6 +1996,7 @@ async def test_live_model_understands_the_fixtures() -> None:
                 tasks=tasks_for(case),
                 last_task=case.get("last_task"),
                 swipe=case.get("swipe"),
+                recent=recent_for(case, settings.owner_timezone),
             )
 
     try:
@@ -1868,6 +2011,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     repeats: list[str] = []
     edits: list[str] = []
     duplicates: list[str] = []
+    talks: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
@@ -1878,6 +2022,11 @@ async def test_live_model_understands_the_fixtures() -> None:
         mismatch = duplicate_mismatch(case, got)
         if mismatch:
             duplicates.append(mismatch)
+        if "talk" in case:
+            mismatch = talk_mismatch(case, got)
+            if mismatch:
+                talks.append(mismatch)
+            continue
         if "edit" in case:
             continue
         if "facts" in case:
@@ -1910,6 +2059,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not repeats, "Повтор разошёлся:\n" + "\n".join(repeats)
     assert not edits, "Правка разошлась:\n" + "\n".join(edits)
     assert not duplicates, "Дубль разошёлся:\n" + "\n".join(duplicates)
+    assert not talks, "Разговор разошёлся:\n" + "\n".join(talks)
     matched = general - len(kinds)
     assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)
 
