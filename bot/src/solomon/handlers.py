@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
+from asyncio import sleep
 from collections.abc import Sequence
 from dataclasses import dataclass
 from io import BytesIO
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramEntityTooLarge, TelegramNetworkError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -22,6 +23,7 @@ from aiogram.types import (
     MessageOriginUser,
 )
 from aiogram.utils.chat_action import ChatActionSender
+from aiohttp import ClientConnectionError, ClientPayloadError
 
 from solomon import texts
 from solomon.db.tasks import SpeechKind
@@ -241,6 +243,91 @@ def forwarded_sender(message: Message) -> str | None:
     return None
 
 
+# Скачивание файла из Telegram (`techspec/09-voice.md` §9.3,
+# `techspec/14-photo.md` §14.2). Связь сервера с Telegram временами рвётся
+# (журнал 2026-10-01): запрос повисает до таймаута или обрывается
+# (`Connection reset by peer`), а такой же через минуту проходит за секунды.
+# Поэтому вместо одной попытки с долгим сроком — три с короткими. Худший
+# случай — 3 × (5 + 13) + 2 × 1 = 56 с; aiohttp округляет срок длиннее 5 с
+# вверх до целой секунды — выходит до 59 с. Это не дольше прежнего отказа:
+# один `get_file` ждал таймаута сессии, 60 с. Удачная попытка идёт как
+# раньше — те же два запроса.
+DOWNLOAD_ATTEMPTS = 3
+# Путь к файлу — маленький запрос к API, обычно доли секунды: 5 с хватает и
+# на новое соединение, а повисший запрос не держит минуту.
+GET_FILE_TIMEOUT = 5
+# Сам файл — остаток попытки: голосовое в десятки килобайт приходит за
+# секунду, а снимок до 3,5 МБ (`PHOTO_LIMIT`) успевает при скорости от 280 КБ/с.
+DOWNLOAD_TIMEOUT = 13
+# Пауза между попытками — как первая пауза опроса Telegram в aiogram.
+DOWNLOAD_PAUSE = 1
+
+# Сбой сети по дороге к Telegram — его стоит повторить. Запрос к API
+# (`get_file`) aiogram заворачивает в `TelegramNetworkError` — и таймаут, и
+# обрыв; скачивание самого файла (`download_file`) не заворачивает: оттуда
+# таймаут и ошибки соединения aiohttp приходят как есть.
+NETWORK_FAILURES = (TelegramNetworkError, TimeoutError, ClientConnectionError, ClientPayloadError)
+
+
+def network_failure(error: Exception) -> bool:
+    """Сбой сети — повторить; ответ Telegram по существу — нет.
+
+    `TelegramEntityTooLarge` наследует `TelegramNetworkError`, но это ответ
+    413: файл не пройдёт и со второго раза. `TelegramBadRequest` («file is too
+    big») и ответ сервера файлов с кодом ошибки (`ClientResponseError`) — тоже
+    не сеть.
+    """
+    return isinstance(error, NETWORK_FAILURES) and not isinstance(error, TelegramEntityTooLarge)
+
+
+async def load_file_once(bot: Bot, file_id: str) -> bytes:
+    """Одна попытка: путь к файлу у Telegram, затем сам файл — в память.
+
+    Это `bot.download`, только со сроком на оба запроса: у него срок есть лишь
+    у скачивания, а `get_file` ждёт таймаута сессии — минуту.
+    """
+    found = await bot.get_file(file_id, request_timeout=GET_FILE_TIMEOUT)
+    if found.file_path is None:
+        # Без пути файл не скачать, и повтор не поможет: это не сеть.
+        raise ValueError("Telegram returned no file_path")
+    buffer = BytesIO()
+    await bot.download_file(found.file_path, destination=buffer, timeout=DOWNLOAD_TIMEOUT)
+    return buffer.getvalue()
+
+
+async def load_file(bot: Bot, file_id: str) -> bytes:
+    """Файл из Telegram в память; сбой сети — ещё попытка, всего `DOWNLOAD_ATTEMPTS`.
+
+    Каждая неудачная попытка — строка в журнал: номер и тип ошибки. Текста
+    ошибки там нет: в адресе файла у Telegram — токен бота. Не сеть или
+    попытки кончились — исключение уходит в сервис как есть, и он отвечает
+    так же, как без повтора.
+    """
+    attempt = 1
+    while True:
+        try:
+            return await load_file_once(bot, file_id)
+        except Exception as error:
+            name = type(error).__name__
+            if attempt == DOWNLOAD_ATTEMPTS or not network_failure(error):
+                logger.warning(
+                    "Файл из Telegram не скачан, попытка %s из %s: %s, без повтора",
+                    attempt,
+                    DOWNLOAD_ATTEMPTS,
+                    name,
+                )
+                raise
+            logger.warning(
+                "Файл из Telegram не скачан, попытка %s из %s: %s, повтор через %s с",
+                attempt,
+                DOWNLOAD_ATTEMPTS,
+                name,
+                DOWNLOAD_PAUSE,
+            )
+        await sleep(DOWNLOAD_PAUSE)
+        attempt += 1
+
+
 async def handle_start(message: Message) -> None:
     """Приветствие владельцу."""
     logger.info("Команда /start")
@@ -282,11 +369,12 @@ async def handle_speech(
 ) -> None:
     """Голосовое или кружок владельца — поручение: скачать, расслышать, записать.
 
-    Файл качается в память замыканием, которое уходит в сервис: сервис не
-    знает про aiogram, а байты на диск не попадают (`techspec/09-voice.md`
-    §9.2). Пока идёт распознавание и разбор, в чате висит «печатает…» — это
-    дольше текста, и молчание пугает; статус живёт пять секунд, поэтому его
-    повторяет `ChatActionSender`.
+    Файл качается в память замыканием над `load_file` (сбой сети — ещё
+    попытка), которое уходит в сервис: сервис не знает про aiogram, а байты
+    на диск не попадают (`techspec/09-voice.md` §9.2, §9.3). Пока идёт
+    распознавание и разбор, в чате висит «печатает…» — это дольше текста, и
+    молчание пугает; статус живёт пять секунд, поэтому его повторяет
+    `ChatActionSender`.
     """
     if tasks is None:
         logger.error("Голосовое некуда записать: бот собран без базы")
@@ -294,9 +382,7 @@ async def handle_speech(
         return
 
     async def load_audio() -> bytes:
-        buffer = BytesIO()
-        await bot.download(speech.file_id, destination=buffer)
-        return buffer.getvalue()
+        return await load_file(bot, speech.file_id)
 
     async with ChatActionSender.typing(chat_id=message.chat.id, bot=bot):
         outcome = await tasks.record_from_voice(
@@ -476,10 +562,11 @@ async def replace_text(
 async def handle_photo(message: Message, bot: Bot, tasks: TaskService | None, photo: Photo) -> None:
     """Фото или картинка файлом — поручение: скачать, показать модели, записать.
 
-    Как у голоса: снимок качается в память замыканием, которое уходит в
-    сервис, и на диск не попадает (`techspec/14-photo.md` §14.2). Снимок
-    разбирается дольше текста — пока идёт разбор, в чате висит «печатает…».
-    Свайп у снимка не читается: правки у снимка нет (§14.3).
+    Как у голоса: снимок качается в память тем же `load_file` с повтором —
+    замыканием, которое уходит в сервис, — и на диск не попадает
+    (`techspec/14-photo.md` §14.2). Снимок разбирается дольше текста — пока
+    идёт разбор, в чате висит «печатает…». Свайп у снимка не читается:
+    правки у снимка нет (§14.3).
     """
     if tasks is None:
         logger.error("Снимок некуда записать: бот собран без базы")
@@ -487,9 +574,7 @@ async def handle_photo(message: Message, bot: Bot, tasks: TaskService | None, ph
         return
 
     async def load_image() -> bytes:
-        buffer = BytesIO()
-        await bot.download(photo.file_id, destination=buffer)
-        return buffer.getvalue()
+        return await load_file(bot, photo.file_id)
 
     async with ChatActionSender.typing(chat_id=message.chat.id, bot=bot):
         outcome = await tasks.record_from_photo(

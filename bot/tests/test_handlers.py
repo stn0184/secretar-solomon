@@ -2,13 +2,42 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from aiogram import Bot
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramEntityTooLarge,
+    TelegramNetworkError,
+    TelegramServerError,
+)
+from aiogram.methods import GetFile
 from aiogram.types import Message, Update
+from aiohttp import (
+    ClientOSError,
+    ClientPayloadError,
+    ClientResponseError,
+    RequestInfo,
+    ServerDisconnectedError,
+)
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
-from solomon import texts
+from solomon import handlers, texts
 from solomon.config import Settings
-from solomon.handlers import PHOTO_LIMIT, Photo, is_not_text, photo_of, refused_image
+from solomon.handlers import (
+    DOWNLOAD_ATTEMPTS,
+    DOWNLOAD_PAUSE,
+    DOWNLOAD_TIMEOUT,
+    GET_FILE_TIMEOUT,
+    PHOTO_LIMIT,
+    Photo,
+    is_not_text,
+    network_failure,
+    photo_of,
+    refused_image,
+)
 from solomon.runner import build_dispatcher
 from solomon.services.tasks import TaskService
 from solomon.services.transcription import NotTranscribed
@@ -19,6 +48,7 @@ from tests.conftest import (
     OWNER_ID,
     SPOKEN,
     STRANGER_ID,
+    TEST_TOKEN,
     FakeAnalyst,
     FakeMessages,
     FakePlanner,
@@ -410,6 +440,254 @@ async def test_help_tells_about_photos(
 
     assert "Фотографии и файлы пока не понимаю" not in session.texts[0]
     assert "Фото и скриншоты" in session.texts[0]
+
+
+# --- Скачивание с повтором (`techspec/09-voice.md` §9.3) ---------------------
+
+# Адрес файла у Telegram: в нём токен бота, и в журнал он попадать не должен.
+FILE_URL = f"https://api.telegram.org/file/bot{TEST_TOKEN}/voice/voice-1.oga"
+
+
+def timed_out(file_id: str = "voice-1") -> TelegramNetworkError:
+    """Повисший `get_file`: так aiogram заворачивает таймаут запроса к API."""
+    return TelegramNetworkError(method=GetFile(file_id=file_id), message="Request timeout error")
+
+
+def refused(message: str) -> TelegramBadRequest:
+    """Отказ Telegram по существу: ответ 400 на `get_file`."""
+    return TelegramBadRequest(method=GetFile(file_id="voice-1"), message=message)
+
+
+def attempt_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Строки журнала о неудачных попытках — от обработчиков, по порядку."""
+    return [record.getMessage() for record in caplog.records if record.name == "solomon.handlers"]
+
+
+@pytest.fixture
+def pauses(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Паузы между попытками: записываются, а не выжидаются."""
+    taken: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        taken.append(seconds)
+
+    monkeypatch.setattr(handlers, "sleep", pause)
+    return taken
+
+
+async def test_voice_is_heard_after_a_network_failure(
+    bot: Bot,
+    session: RecordingSession,
+    settings: Settings,
+    pauses: list[float],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session.get_file_failures = [timed_out()]
+    transcriber = FakeTranscriber()
+    service, messages, analyst = build_tasks(
+        settings, title="отправить расчёт клиенту", transcriber=transcriber
+    )
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    with caplog.at_level(logging.WARNING, logger="solomon.handlers"):
+        await dispatcher.feed_update(bot, make_voice_update(update_id=21))
+
+    # Вторая попытка прошла — дальше всё как обычно.
+    assert session.texts == ["Записал: отправить расчёт клиенту"]
+    assert messages.calls[0]["telegram_file_id"] == "voice-1"
+    assert transcriber.calls == [AUDIO]
+    assert analyst.calls == [(SPOKEN, None, "fine")]
+    assert session.file_requests == ["voice-1", "voice-1"]
+    assert pauses == [DOWNLOAD_PAUSE]
+    assert attempt_lines(caplog) == [
+        "Файл из Telegram не скачан, попытка 1 из 3: TelegramNetworkError, повтор через 1 с",
+    ]
+
+
+async def test_voice_is_not_heard_when_every_attempt_fails(
+    bot: Bot,
+    session: RecordingSession,
+    settings: Settings,
+    pauses: list[float],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session.get_file_failures = [timed_out() for _ in range(DOWNLOAD_ATTEMPTS)]
+    transcriber = FakeTranscriber()
+    service, messages, analyst = build_tasks(settings, transcriber=transcriber)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    with caplog.at_level(logging.WARNING, logger="solomon.handlers"):
+        await dispatcher.feed_update(bot, make_voice_update(update_id=22))
+
+    # Как без повтора: сообщение с файлом в базе, честный ответ, без распознавания.
+    assert session.texts == [texts.NOT_HEARD]
+    assert messages.calls[0]["telegram_file_id"] == "voice-1"
+    assert transcriber.calls == []
+    assert analyst.calls == []
+    assert session.file_requests == ["voice-1"] * DOWNLOAD_ATTEMPTS
+    assert pauses == [DOWNLOAD_PAUSE] * (DOWNLOAD_ATTEMPTS - 1)
+    assert attempt_lines(caplog) == [
+        "Файл из Telegram не скачан, попытка 1 из 3: TelegramNetworkError, повтор через 1 с",
+        "Файл из Telegram не скачан, попытка 2 из 3: TelegramNetworkError, повтор через 1 с",
+        "Файл из Telegram не скачан, попытка 3 из 3: TelegramNetworkError, без повтора",
+    ]
+
+
+async def test_refusal_of_telegram_is_not_retried(
+    bot: Bot,
+    session: RecordingSession,
+    settings: Settings,
+    pauses: list[float],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session.get_file_failures = [refused("Bad Request: file is too big")]
+    transcriber = FakeTranscriber()
+    service, _, _ = build_tasks(settings, transcriber=transcriber)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    with caplog.at_level(logging.WARNING, logger="solomon.handlers"):
+        await dispatcher.feed_update(bot, make_voice_update(update_id=23))
+
+    assert session.texts == [texts.NOT_HEARD]
+    assert transcriber.calls == []
+    assert session.file_requests == ["voice-1"]
+    assert pauses == []
+    assert attempt_lines(caplog) == [
+        "Файл из Telegram не скачан, попытка 1 из 3: TelegramBadRequest, без повтора",
+    ]
+
+
+async def test_each_attempt_has_its_own_short_timeouts(
+    bot: Bot, session: RecordingSession, settings: Settings, pauses: list[float]
+) -> None:
+    session.content_failures = [TimeoutError()]
+    service, _, _ = build_tasks(settings)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(bot, make_voice_update(update_id=24))
+
+    # Срок есть и у пути к файлу, и у самого файла — в каждой попытке; таймаут
+    # сессии в минуту больше не ждётся.
+    assert session.get_file_timeouts == [GET_FILE_TIMEOUT, GET_FILE_TIMEOUT]
+    assert session.content_timeouts == [DOWNLOAD_TIMEOUT, DOWNLOAD_TIMEOUT]
+
+
+def test_worst_case_is_not_longer_than_the_old_minute() -> None:
+    # Прежний отказ — 60 с: столько ждал один `get_file`. Срок длиннее 5 с
+    # aiohttp округляет вверх до целой секунды — отсюда секунда запаса.
+    attempt = GET_FILE_TIMEOUT + DOWNLOAD_TIMEOUT + 1
+    assert DOWNLOAD_ATTEMPTS * attempt + (DOWNLOAD_ATTEMPTS - 1) * DOWNLOAD_PAUSE <= 60
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError(),
+        ClientOSError(104, "Connection reset by peer"),
+        ServerDisconnectedError(),
+        ClientPayloadError("Response payload is not completed"),
+    ],
+    ids=["timeout", "reset", "disconnected", "cut-short"],
+)
+async def test_failure_while_downloading_the_file_is_retried(
+    failure: Exception,
+    bot: Bot,
+    session: RecordingSession,
+    settings: Settings,
+    pauses: list[float],
+) -> None:
+    # Скачивание самого файла aiogram в `TelegramNetworkError` не заворачивает.
+    session.content_failures = [failure]
+    transcriber = FakeTranscriber()
+    service, _, _ = build_tasks(settings, title="отправить расчёт клиенту", transcriber=transcriber)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(bot, make_voice_update(update_id=25))
+
+    assert session.texts == ["Записал: отправить расчёт клиенту"]
+    assert transcriber.calls == [AUDIO]
+    # Новая попытка начинается сначала — с пути к файлу.
+    assert session.file_requests == ["voice-1", "voice-1"]
+    assert pauses == [DOWNLOAD_PAUSE]
+
+
+async def test_attempt_line_has_no_error_text(
+    bot: Bot,
+    session: RecordingSession,
+    settings: Settings,
+    pauses: list[float],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session.content_failures = [
+        ClientPayloadError(f"Response payload is not completed: {FILE_URL}")
+    ]
+    service, _, _ = build_tasks(settings)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    with caplog.at_level(logging.WARNING, logger="solomon.handlers"):
+        await dispatcher.feed_update(bot, make_voice_update(update_id=26))
+
+    assert attempt_lines(caplog) == [
+        "Файл из Telegram не скачан, попытка 1 из 3: ClientPayloadError, повтор через 1 с",
+    ]
+    assert TEST_TOKEN not in caplog.text
+
+
+async def test_photo_is_downloaded_with_the_same_retry(
+    bot: Bot, session: RecordingSession, settings: Settings, pauses: list[float]
+) -> None:
+    session.file_bytes = IMAGE
+    session.get_file_failures = [timed_out("photo-90")]
+    photo = make_photo_understanding(title="сходить на родительское собрание")
+    service, _, analyst = build_tasks(settings, photo=photo)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(bot, make_photo_update(update_id=27))
+
+    assert session.texts == ["Записал: сходить на родительское собрание"]
+    assert analyst.photos == [(IMAGE, "image/jpeg", "", None)]
+    assert session.file_requests == ["photo-90", "photo-90"]
+    assert pauses == [DOWNLOAD_PAUSE]
+
+
+async def test_photo_is_not_opened_when_every_attempt_fails(
+    bot: Bot, session: RecordingSession, settings: Settings, pauses: list[float]
+) -> None:
+    session.get_file_failures = [timed_out("photo-90") for _ in range(DOWNLOAD_ATTEMPTS)]
+    service, messages, analyst = build_tasks(settings, photo=make_photo_understanding())
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(bot, make_photo_update(update_id=28))
+
+    assert session.texts == [texts.PHOTO_NOT_OPENED]
+    assert messages.calls[0]["telegram_file_id"] == "photo-90"
+    assert analyst.photos == []
+    assert session.file_requests == ["photo-90"] * DOWNLOAD_ATTEMPTS
+
+
+def http_error(status: int) -> ClientResponseError:
+    """Сервер файлов ответил кодом ошибки: так aiohttp сообщает о нём при скачивании."""
+    info = RequestInfo(URL(FILE_URL), "GET", CIMultiDictProxy(CIMultiDict[str]()))
+    return ClientResponseError(info, (), status=status, message="Not Found")
+
+
+@pytest.mark.parametrize(
+    ("error", "retried"),
+    [
+        (timed_out(), True),
+        (TimeoutError(), True),
+        (ClientOSError(104, "Connection reset by peer"), True),
+        (ServerDisconnectedError(), True),
+        (ClientPayloadError("Response payload is not completed"), True),
+        (TelegramEntityTooLarge(method=GetFile(file_id="voice-1"), message="Too Large"), False),
+        (refused("Bad Request: file is too big"), False),
+        (TelegramServerError(method=GetFile(file_id="voice-1"), message="Bad Gateway"), False),
+        (http_error(404), False),
+        (ValueError("Telegram returned no file_path"), False),
+    ],
+)
+def test_only_network_failures_are_retried(error: Exception, retried: bool) -> None:
+    assert network_failure(error) is retried
 
 
 async def test_broken_database_is_not_called_recorded(

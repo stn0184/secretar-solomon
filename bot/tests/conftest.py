@@ -97,6 +97,13 @@ class RecordingSession(BaseSession):
         self.sent: list[TelegramMethod[Any]] = []
         # Что «лежит» в Telegram под любым file_id: скачивание отдаёт эти байты.
         self.file_bytes = AUDIO
+        # Сбои по дороге к файлу: по одному на попытку, по порядку; кончились —
+        # запрос проходит. Первый шаг — `get_file`, второй — сам файл.
+        self.get_file_failures: list[Exception] = []
+        self.content_failures: list[Exception] = []
+        # Сроки, с которыми бот спрашивал путь к файлу и качал сам файл.
+        self.get_file_timeouts: list[int | None] = []
+        self.content_timeouts: list[int] = []
 
     async def close(self) -> None:
         return None
@@ -129,8 +136,12 @@ class RecordingSession(BaseSession):
         if isinstance(method, SendChatAction):
             return cast(TelegramType, True)
         if isinstance(method, GetFile):
-            # Первый шаг `bot.download`: Telegram называет путь, по которому
-            # потом качается содержимое (`stream_content`).
+            # Первый шаг скачивания (`handlers.load_file_once`): Telegram
+            # называет путь, по которому потом качается содержимое
+            # (`stream_content`).
+            self.get_file_timeouts.append(timeout)
+            if self.get_file_failures:
+                raise self.get_file_failures.pop(0)
             found = File(
                 file_id=method.file_id,
                 file_unique_id=method.file_id,
@@ -147,12 +158,20 @@ class RecordingSession(BaseSession):
         chunk_size: int = 65536,
         raise_for_status: bool = True,
     ) -> AsyncGenerator[bytes, None]:
+        self.content_timeouts.append(timeout)
+        if self.content_failures:
+            raise self.content_failures.pop(0)
         yield self.file_bytes
 
     @property
     def texts(self) -> list[str]:
         """Тексты отправленных сообщений."""
         return [m.text for m in self.sent if isinstance(m, SendMessage)]
+
+    @property
+    def file_requests(self) -> list[str]:
+        """Какие файлы бот просил у Telegram (`get_file`) — по запросу на попытку."""
+        return [m.file_id for m in self.sent if isinstance(m, GetFile)]
 
     @property
     def actions(self) -> list[str]:
