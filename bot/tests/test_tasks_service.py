@@ -556,6 +556,7 @@ async def test_whole_text_goes_to_the_database() -> None:
             "kind": "text",
             "telegram_file_id": None,
             "duration_seconds": None,
+            "forwarded_from": None,
         }
     ]
 
@@ -670,6 +671,7 @@ async def test_voice_is_saved_before_hearing_and_becomes_a_task() -> None:
             "kind": "voice",
             "telegram_file_id": "voice-1",
             "duration_seconds": 32,
+            "forwarded_from": None,
         }
     ]
     assert transcriber.calls == [AUDIO]
@@ -1416,6 +1418,7 @@ async def test_photo_is_saved_before_download_and_becomes_a_task() -> None:
             "kind": "photo",
             "telegram_file_id": "photo-1",
             "duration_seconds": None,
+            "forwarded_from": None,
         }
     ]
     assert analyst.photos == [(IMAGE, "image/jpeg", "", None)]
@@ -1689,3 +1692,188 @@ async def test_caption_recorded_as_is_while_asked_lifts_the_question() -> None:
 
     assert isinstance(understandings.calls[0]["task"], dict)
     assert questions.asked is None
+
+
+# --- Ответ разговора (`techspec/17-conversation.md` §17.2) -----------------------
+
+THURSDAY = "В четверг в 10:00 созвон с Георгием."
+
+
+def talking(hint: str | None, kind: str = "chat") -> FakeAnalyst:
+    """Модель, разобравшая разговор и написавшая ответ в `reply_hint`."""
+    return FakeAnalyst(make_understanding(kind=kind, title="вопрос о четверге", reply_hint=hint))
+
+
+async def test_own_text_gets_the_conversation_reply_without_spaces() -> None:
+    """Свой текст, `chat` с ответом: ответ уходит человеку и ложится в базу."""
+    service, _, understandings = build_service(
+        talking(f"  {THURSDAY}\n"), understandings=FakeUnderstandings(task=None)
+    )
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="что у меня в четверг?"
+    )
+
+    assert outcome.ok
+    assert outcome.message == THURSDAY
+    saved = understandings.calls[0]
+    assert saved["reply"] == THURSDAY
+    assert saved["task"] is None
+    assert saved["reminders"] == []
+
+
+async def test_own_voice_gets_the_conversation_reply() -> None:
+    service, _, understandings = build_service(
+        talking(THURSDAY), understandings=FakeUnderstandings(task=None)
+    )
+
+    outcome = await record_voice(service)
+
+    assert outcome.message == THURSDAY
+    assert understandings.calls[0]["reply"] == THURSDAY
+    assert understandings.calls[0]["task"] is None
+
+
+@pytest.mark.parametrize("hint", [None, "", "   ", "\n\t "])
+async def test_empty_conversation_reply_is_no_errand(hint: str | None) -> None:
+    service, _, understandings = build_service(
+        talking(hint), understandings=FakeUnderstandings(task=None)
+    )
+
+    outcome = await service.record_from_message(chat_id=42, telegram_message_id=7, text="хм")
+
+    assert outcome.message == texts.NO_ERRAND
+    assert understandings.calls[0]["reply"] == texts.NO_ERRAND
+
+
+async def test_forwarded_chat_is_no_errand_even_with_a_reply() -> None:
+    """Пересланное разговора не ведёт (§17.1): ответ модели не слушается."""
+    service, _, _ = build_service(talking(THURSDAY), understandings=FakeUnderstandings(task=None))
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="Во сколько?", forwarded_from="Рената"
+    )
+
+    assert outcome.message == texts.NO_ERRAND
+
+
+async def test_forwarded_voice_chat_is_no_errand_even_with_a_reply() -> None:
+    service, _, _ = build_service(talking(THURSDAY), understandings=FakeUnderstandings(task=None))
+
+    outcome = await record_voice(service, forwarded_from="Рената")
+
+    assert outcome.message == texts.NO_ERRAND
+
+
+async def test_photo_chat_is_photo_no_errand_even_with_a_reply() -> None:
+    analyst = photo_analyst(make_photo_understanding(kind="chat", reply_hint=THURSDAY))
+    service, _, _ = build_service(analyst, understandings=FakeUnderstandings(task=None))
+
+    outcome = await record_photo(service, caption="что это?")
+
+    assert outcome.message == texts.PHOTO_NO_ERRAND
+
+
+@pytest.mark.parametrize("kind", ["task", "idea", "wish", "about_me"])
+async def test_reply_hint_of_other_kinds_is_not_used(kind: str) -> None:
+    """У поручения и сведения о себе ответ — прежний текст вида (§17.2)."""
+    plain, _, _ = build_service(talking(None, kind))
+    hinted, _, _ = build_service(talking("Готово, всё сделано за вас.", kind))
+
+    expected = await plain.record_from_message(chat_id=42, telegram_message_id=7, text="а")
+    outcome = await hinted.record_from_message(chat_id=42, telegram_message_id=7, text="а")
+
+    assert outcome.message == expected.message
+    assert "Готово" not in outcome.message
+
+
+async def test_long_conversation_reply_is_cut_with_an_ellipsis() -> None:
+    hint = "д" * 3400 + "к" * 200
+    service, _, understandings = build_service(
+        talking(hint), understandings=FakeUnderstandings(task=None)
+    )
+
+    outcome = await service.record_from_message(chat_id=42, telegram_message_id=7, text="а")
+
+    assert outcome.message == hint[:3500] + "…"
+    assert understandings.calls[0]["reply"] == outcome.message
+
+
+async def test_reply_reporting_an_action_becomes_no_errand(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Разговор ничего не меняет (инвариант 4): «Перенёс» не уходит, журнал без текста."""
+    service, _, understandings = build_service(
+        talking("Перенёс встречу на пятницу."), understandings=FakeUnderstandings(task=None)
+    )
+
+    with caplog.at_level(logging.INFO, logger="solomon.services.tasks"):
+        outcome = await service.record_from_message(
+            chat_id=42, telegram_message_id=7, text="перенеси встречу на пятницу"
+        )
+
+    assert outcome.message == texts.NO_ERRAND
+    assert understandings.calls[0]["reply"] == texts.NO_ERRAND
+    replaced = [record for record in caplog.records if "заменён" in record.getMessage()]
+    assert len(replaced) == 1
+    assert replaced[0].levelno == logging.WARNING
+    assert "встреч" not in caplog.text
+    assert "Перенёс" not in caplog.text
+
+
+async def test_reply_with_a_negated_action_word_goes_as_is() -> None:
+    said = "Ничего не записал: это вопрос, а не поручение."
+    service, _, _ = build_service(talking(said), understandings=FakeUnderstandings(task=None))
+
+    outcome = await service.record_from_message(chat_id=42, telegram_message_id=7, text="а")
+
+    assert outcome.message == said
+
+
+async def test_conversation_reply_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    service, _, _ = build_service(talking(THURSDAY), understandings=FakeUnderstandings(task=None))
+
+    with caplog.at_level(logging.DEBUG, logger="solomon"):
+        await service.record_from_message(
+            chat_id=42, telegram_message_id=7, text="что у меня в четверг?"
+        )
+
+    assert "Георгием" not in caplog.text
+    assert "четверг" not in caplog.text
+
+
+# --- Отправитель в записи (`techspec/17-conversation.md` §17.5) ------------------
+
+
+async def test_forwarded_text_records_its_sender() -> None:
+    service, messages, _ = build_service(FakeAnalyst(make_understanding()))
+
+    await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="Во сколько?", forwarded_from="Рената"
+    )
+
+    assert messages.calls[0]["forwarded_from"] == "Рената"
+
+
+async def test_forwarded_voice_records_its_sender() -> None:
+    service, messages, _ = build_service(heard_analyst())
+
+    await record_voice(service, forwarded_from="Рената")
+
+    assert messages.calls[0]["forwarded_from"] == "Рената"
+
+
+async def test_forwarded_photo_records_its_sender() -> None:
+    service, messages, _ = build_service(photo_analyst(meeting()))
+
+    await record_photo(service, forwarded_from="Рената")
+
+    assert messages.calls[0]["forwarded_from"] == "Рената"
+
+
+async def test_own_message_records_no_sender() -> None:
+    service, messages, _ = build_service(FakeAnalyst(make_understanding()))
+
+    await service.record_from_message(chat_id=42, telegram_message_id=7, text="купить лампочку")
+
+    assert messages.calls[0]["forwarded_from"] is None

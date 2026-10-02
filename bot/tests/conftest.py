@@ -49,6 +49,7 @@ from solomon.db.tasks import (
     MessageKind,
     OpenQuestion,
     PickedMessage,
+    RecentMessage,
     SavedMessage,
     SpeechKind,
     StoredMessage,
@@ -207,6 +208,7 @@ class FakeMessages:
         kind: MessageKind = "text",
         telegram_file_id: str | None = None,
         duration_seconds: int | None = None,
+        forwarded_from: str | None = None,
     ) -> SavedMessage:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -219,6 +221,7 @@ class FakeMessages:
                 "kind": kind,
                 "telegram_file_id": telegram_file_id,
                 "duration_seconds": duration_seconds,
+                "forwarded_from": forwarded_from,
             }
         )
         return self.message
@@ -441,6 +444,8 @@ class FakeAnalyst:
         self.tasks: list[list[OpenTask] | None] = []
         self.last_tasks: list[int | None] = []
         self.swipes: list[str | None] = []
+        # Блок 6 «Недавний разговор» (§17.3) — по вызову; `None` — блока нет.
+        self.recents: list[str | None] = []
         self.photo_verdict: PhotoVerdict = (
             PhotoAnalysis(
                 understanding=photo,
@@ -466,12 +471,14 @@ class FakeAnalyst:
         tasks: Sequence[OpenTask] | None = None,
         last_task: int | None = None,
         swipe: str | None = None,
+        recent: str | None = None,
     ) -> Verdict:
         self.calls.append((text, forwarded_from, spoken))
         self.questions.append(open_question)
         self.tasks.append(None if tasks is None else list(tasks))
         self.last_tasks.append(last_task)
         self.swipes.append(swipe)
+        self.recents.append(recent)
         return self.verdict
 
     async def analyze_photo(
@@ -546,7 +553,10 @@ class FakeEdits:
     сообщению не пишет и отдаёт его как есть. `same_minute` — как запрос
     накладки (§15.5): активные со сроком со временем в ту же минуту, раньше
     записанные первыми; его вызовы — в `minutes`, а не в `calls`, чтобы
-    тесты правки не пересчитывали их. `broken` — имена методов, которые
+    тесты правки не пересчитывали их. `recent_messages` — как чтение
+    недавнего разговора (`techspec/17-conversation.md` §17.3): сообщения из
+    `recent` от `since` и строго до `before`, последние `limit`, от старых к
+    новым; его вызовы — в `talks`. `broken` — имена методов, которые
     отвечают отказом базы.
     """
 
@@ -558,9 +568,11 @@ class FakeEdits:
         reminder_event: TaskEvent | None = None,
         reminders: Mapping[int, str] | None = None,
         messages: Mapping[int, StoredMessage] | None = None,
+        recent: Sequence[RecentMessage] = (),
         broken: Iterable[str] = (),
     ) -> None:
         self.tasks = {task.id: task for task in tasks}
+        self.recent = list(recent)
         self.message_event = message_event
         self.reminder_event = reminder_event
         self.reminders = dict(reminders or {})
@@ -575,6 +587,8 @@ class FakeEdits:
         self.separates: list[tuple[str, dict[str, Any], list[Planned], str]] = []
         # Запросы накладки: минута и задача, которая в сравнение не входит.
         self.minutes: list[tuple[datetime, str | None]] = []
+        # Чтения недавнего разговора: начало окна, граница и сколько взять.
+        self.talks: list[tuple[datetime, datetime, int]] = []
 
     def _touch(self, name: str, *args: Any) -> None:
         self.calls.append((name, *args))
@@ -622,6 +636,15 @@ class FakeEdits:
             and task.id != exclude_task_id
         ]
         return [task.title for task in sorted(same, key=lambda task: task.created_at)]
+
+    async def recent_messages(
+        self, since: datetime, before: datetime, limit: int
+    ) -> list[RecentMessage]:
+        self.talks.append((since, before, limit))
+        if "recent_messages" in self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        found = [message for message in self.recent if since <= message.received_at < before]
+        return sorted(found, key=lambda message: message.received_at)[-limit:]
 
     async def pick(self, message_id: str, edit: Mapping[str, Any], reply: str) -> PickedMessage:
         self._touch("pick", message_id)

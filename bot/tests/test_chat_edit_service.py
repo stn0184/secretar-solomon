@@ -18,7 +18,14 @@ import pytest
 
 from solomon import texts
 from solomon.db.reminders import Planned
-from solomon.db.tasks import OpenQuestion, SavedMessage, StoredMessage, TaskEvent
+from solomon.db.tasks import (
+    OpenQuestion,
+    RecentMessage,
+    SavedMessage,
+    StoredMessage,
+    TaskEvent,
+)
+from solomon.services.conversation import recent_block
 from solomon.services.tasks import (
     Button,
     DatabaseEditStore,
@@ -38,6 +45,7 @@ from tests.conftest import (
     FakeTranscriber,
     FakeUnderstandings,
     load_audio,
+    load_image,
     make_details,
     make_settings,
     make_understanding,
@@ -1080,9 +1088,10 @@ async def test_database_store_asks_only_for_the_settings_owner() -> None:
     assert await store.message(OWNER_ID, 39) is None
     assert await store.task(MEETING_ID) is None
     assert await store.same_minute(NOW, MEETING_ID) == []
+    assert await store.recent_messages(NOW - timedelta(hours=1), NOW, 10) == []
 
     owners = [call for call in reads.calls if call[:2] == ("eq", "owner_telegram_id")]
-    assert owners == [("eq", "owner_telegram_id", OWNER_ID)] * 7
+    assert owners == [("eq", "owner_telegram_id", OWNER_ID)] * 8
 
     writes = FakeClient(data={"id": "9a71", "task_id": None, "reply": None})
     store = DatabaseEditStore(SETTINGS, as_client(writes))
@@ -1095,3 +1104,167 @@ async def test_database_store_asks_only_for_the_settings_owner() -> None:
     assert await store.reopen(MEETING_ID, []) is None
     rpc = [call for call in reopens.calls if call[0] == "rpc"]
     assert rpc[0][2]["owner_telegram_id"] == OWNER_ID
+
+
+# ------------------------------------------- недавний разговор, блок 6 (§17.3)
+
+# Текущее сообщение пришло за секунду до «сейчас»: граница блока — его время.
+RECEIVED = NOW - timedelta(seconds=1)
+ASKED_THURSDAY = RecentMessage(
+    received_at=NOW - timedelta(minutes=10),
+    kind="text",
+    text="что у меня в четверг?",
+    forwarded_from=None,
+    reply="В четверг в 17:00 встреча с Ренатой.",
+)
+FROM_RENATA = RecentMessage(
+    received_at=NOW - timedelta(minutes=5),
+    kind="text",
+    text="Во сколько?",
+    forwarded_from="Рената",
+    reply=None,
+)
+TALK = recent_block([ASKED_THURSDAY, FROM_RENATA], TZ)
+
+
+def received(at: datetime | None = RECEIVED) -> FakeMessages:
+    """Первый шаг приёма, отдающий время записи текущего сообщения."""
+    return FakeMessages(SavedMessage(id="9a71", reply=None, received_at=at))
+
+
+async def test_own_message_gets_the_recent_talk_after_the_task_list() -> None:
+    store = FakeEdits(OPEN, recent=[FROM_RENATA, ASKED_THURSDAY])
+    service, analyst, _, _, _ = build(make_understanding(), store, messages=received())
+
+    await say(service, "да, можно в четверг")
+
+    assert TALK is not None
+    assert analyst.recents == [TALK.text]
+    assert analyst.tasks == [[MEETING, REPORT, LAMP]]
+    # Окно — тот же час, что у последней задачи; граница — само сообщение.
+    assert store.talks == [(NOW - timedelta(hours=1), RECEIVED, 10)]
+
+
+async def test_current_later_and_older_messages_stay_out_of_the_block() -> None:
+    """Текущее, пришедшее позже него и старше часа в блок не попадают."""
+    current = replace(FROM_RENATA, received_at=RECEIVED, forwarded_from=None, text="да")
+    later = replace(FROM_RENATA, received_at=NOW, forwarded_from=None, text="и ещё")
+    old = replace(ASKED_THURSDAY, received_at=NOW - timedelta(minutes=61))
+    store = FakeEdits(OPEN, recent=[old, ASKED_THURSDAY, current, later])
+    service, analyst, _, _, _ = build(make_understanding(), store, messages=received())
+
+    await say(service, "да")
+
+    expected = recent_block([ASKED_THURSDAY], TZ)
+    assert expected is not None
+    assert analyst.recents == [expected.text]
+
+
+async def test_without_messages_within_the_hour_there_is_no_block() -> None:
+    service, analyst, _, _, store = build(make_understanding(), messages=received())
+
+    await say(service)
+
+    assert analyst.recents == [None]
+    assert len(store.talks) == 1
+
+
+async def test_without_the_time_of_the_message_the_boundary_is_the_clock() -> None:
+    store = FakeEdits(OPEN, recent=[ASKED_THURSDAY])
+    service, _, _, _, _ = build(make_understanding(), store, messages=received(None))
+
+    await say(service)
+
+    assert store.talks == [(NOW - timedelta(hours=1), NOW, 10)]
+
+
+async def test_own_voice_gets_the_recent_talk() -> None:
+    store = FakeEdits(OPEN, recent=[ASKED_THURSDAY, FROM_RENATA])
+    service, analyst, _, _, _ = build(make_understanding(), store, messages=received())
+
+    await service.record_from_voice(
+        chat_id=OWNER_ID,
+        telegram_message_id=MESSAGE_ID,
+        kind="voice",
+        file_id="voice-1",
+        duration=5,
+        load_audio=load_audio,
+    )
+
+    assert TALK is not None
+    assert analyst.recents == [TALK.text]
+
+
+async def test_forwarded_message_does_not_read_the_talk() -> None:
+    store = FakeEdits(OPEN, recent=[ASKED_THURSDAY])
+    service, analyst, _, _, _ = build(make_understanding(), store, messages=received())
+
+    await say(service, "Во сколько?", forwarded_from="Рената")
+
+    assert store.talks == []
+    assert analyst.recents == [None]
+
+
+async def test_photo_does_not_read_the_talk() -> None:
+    store = FakeEdits(OPEN, recent=[ASKED_THURSDAY])
+    service, _, _, _, _ = build(make_understanding(), store, messages=received())
+
+    await service.record_from_photo(
+        chat_id=OWNER_ID,
+        telegram_message_id=MESSAGE_ID,
+        file_id="photo-1",
+        media_type="image/jpeg",
+        caption="что это?",
+        load_image=load_image,
+    )
+
+    assert store.talks == []
+
+
+async def test_failed_talk_read_is_logged_and_the_message_understood(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Поручение важнее контекста: без блока, строка в журнал, ответ как обычно."""
+    store = FakeEdits(OPEN, recent=[ASKED_THURSDAY], broken={"recent_messages"})
+    service, analyst, understandings, _, _ = build(make_understanding(), store, messages=received())
+
+    with caplog.at_level(logging.WARNING, logger="solomon.services.tasks"):
+        outcome = await say(service, "купить лампочку")
+
+    assert analyst.recents == [None]
+    assert analyst.tasks == [[MEETING, REPORT, LAMP]]
+    assert outcome.ok
+    assert outcome.message.startswith("Записал: купить лампочку")
+    assert saved(understandings, "task") is not None
+    assert "Недавний разговор не прочитан" in caplog.text
+
+
+async def test_failed_task_list_keeps_the_talk() -> None:
+    store = FakeEdits(OPEN, recent=[ASKED_THURSDAY, FROM_RENATA], broken={"open_tasks"})
+    service, analyst, _, _, _ = build(make_understanding(), store, messages=received())
+
+    await say(service)
+
+    assert TALK is not None
+    assert analyst.tasks == [None]
+    assert analyst.recents == [TALK.text]
+
+
+async def test_service_without_a_store_has_no_block() -> None:
+    service, analyst, _, _, _ = build(make_understanding(), wired=False, messages=received())
+
+    await say(service)
+
+    assert analyst.recents == [None]
+
+
+async def test_talk_is_logged_only_as_a_count(caplog: pytest.LogCaptureFixture) -> None:
+    store = FakeEdits(OPEN, recent=[ASKED_THURSDAY, FROM_RENATA])
+    service, _, _, _, _ = build(make_understanding(), store, messages=received())
+
+    with caplog.at_level(logging.DEBUG, logger="solomon"):
+        await say(service)
+
+    assert "Недавний разговор: сообщений 2" in caplog.text
+    for said in ("четверг", "Ренат", "Во сколько"):
+        assert said not in caplog.text

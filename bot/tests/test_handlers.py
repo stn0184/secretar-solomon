@@ -142,6 +142,7 @@ async def test_text_is_recorded_and_confirmed(
             "kind": "text",
             "telegram_file_id": None,
             "duration_seconds": None,
+            "forwarded_from": None,
         }
     ]
 

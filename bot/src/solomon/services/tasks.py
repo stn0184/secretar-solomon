@@ -33,6 +33,13 @@
 планом, как расписание правки (§12.4), и ответ называет ровно записанное.
 Кнопка «Вернуть» под «Отметил» и «Пропускаю» возвращает прежний раз.
 
+Разговор (`techspec/17-conversation.md`) — тоже здесь: рядом со списком
+задач у своего текста и голоса читается недавний разговор (блок 6) — у
+пересланного и снимка он не читается, — а разбор `chat` своего сообщения
+отвечает текстом модели из `reply_hint`. Ответ проходит проверку: о
+сделанном разговор не говорит (инвариант 4). Чистые правила блока и
+ответа — в `services/conversation.py`.
+
 Обработчик ничего не решает: он зовёт `record_from_message` или
 `record_from_voice` и отправляет то, что вернулось. Владелец берётся из
 настроек, а не из сообщения — чужие обновления до этого слоя не доходят
@@ -66,6 +73,7 @@ from solomon.db.tasks import (
     MessageKind,
     OpenQuestion,
     PickedMessage,
+    RecentMessage,
     SavedMessage,
     SpeechKind,
     StoredMessage,
@@ -73,7 +81,7 @@ from solomon.db.tasks import (
     TaskDetails,
     TaskEvent,
 )
-from solomon.services import edits
+from solomon.services import conversation, edits
 from solomon.services.names import known_names
 from solomon.services.reminders import Planner, database_planner, next_fire_at
 from solomon.services.repeat import (
@@ -173,7 +181,7 @@ class MessageRecorder(Protocol):
     """Первый шаг: сообщение в базу до всякого разбора.
 
     У голоса и кружка — вид, файл и длительность, а текст пуст до расшифровки
-    (§9.3).
+    (§9.3). `forwarded_from` — от кого переслано (§17.5), у своего пусто.
     """
 
     async def __call__(
@@ -186,6 +194,7 @@ class MessageRecorder(Protocol):
         kind: MessageKind = "text",
         telegram_file_id: str | None = None,
         duration_seconds: int | None = None,
+        forwarded_from: str | None = None,
     ) -> SavedMessage: ...
 
 
@@ -257,6 +266,7 @@ class Analyst(Protocol):
         tasks: Sequence[OpenTask] | None = None,
         last_task: int | None = None,
         swipe: str | None = None,
+        recent: str | None = None,
     ) -> Verdict: ...
 
     async def analyze_photo(
@@ -298,19 +308,23 @@ class Swipe:
 
 @dataclass(frozen=True, slots=True)
 class EditContext:
-    """Подсказки модели для правки (§12.2): список, последняя задача, свайп.
+    """Подсказки модели для правки (§12.2): список, последняя задача, свайп,
+    недавний разговор.
 
     `tasks` — открытые задачи в порядке номеров (`edits.number_tasks`);
     `None` — блока 5 в промпте нет, и не бывает ни правки, ни дубля (сбой
     чтения). `swipe` — готовая строка перед текстом сообщения. `edits` —
     правка разрешена: у пересланного и снимка список есть только для сверки
     дублей (`techspec/15-duplicates.md` §15.2), и их `edit` бот не слушает.
+    `recent` — готовый блок 6 (`techspec/17-conversation.md` §17.3); `None` —
+    блока нет.
     """
 
     tasks: list[TaskDetails] | None
     last_task: int | None
     swipe: str | None
     edits: bool = True
+    recent: str | None = None
 
 
 NO_EDIT = EditContext(tasks=None, last_task=None, swipe=None)
@@ -345,6 +359,10 @@ class EditStore(Protocol):
     async def task(self, task_id: str) -> TaskDetails | None: ...
 
     async def same_minute(self, due_at: datetime, exclude_task_id: str | None) -> list[str]: ...
+
+    async def recent_messages(
+        self, since: datetime, before: datetime, limit: int
+    ) -> list[RecentMessage]: ...
 
     async def pick(self, message_id: str, edit: Mapping[str, Any], reply: str) -> PickedMessage: ...
 
@@ -433,6 +451,13 @@ class DatabaseEditStore:
             owner_telegram_id=self._owner,
             due_at=due_at,
             exclude_task_id=exclude_task_id,
+        )
+
+    async def recent_messages(
+        self, since: datetime, before: datetime, limit: int
+    ) -> list[RecentMessage]:
+        return await db_tasks.recent_messages(
+            self._db, owner_telegram_id=self._owner, since=since, before=before, limit=limit
         )
 
     async def pick(self, message_id: str, edit: Mapping[str, Any], reply: str) -> PickedMessage:
@@ -735,6 +760,7 @@ class TaskService:
             kind: MessageKind = "text",
             telegram_file_id: str | None = None,
             duration_seconds: int | None = None,
+            forwarded_from: str | None = None,
         ) -> SavedMessage:
             return await db_tasks.record_message(
                 db,
@@ -745,6 +771,7 @@ class TaskService:
                 kind=kind,
                 telegram_file_id=telegram_file_id,
                 duration_seconds=duration_seconds,
+                forwarded_from=forwarded_from,
             )
 
         async def record_understanding(
@@ -846,6 +873,7 @@ class TaskService:
                 chat_id=chat_id,
                 telegram_message_id=telegram_message_id,
                 text=text,
+                forwarded_from=forwarded_from,
             )
         except DatabaseError as error:
             # Инвариант 4: не отвечаем «Записал», пока база не подтвердила.
@@ -890,6 +918,7 @@ class TaskService:
                 kind=kind,
                 telegram_file_id=file_id,
                 duration_seconds=duration,
+                forwarded_from=forwarded_from,
             )
         except DatabaseError as error:
             logger.warning("Голосовое не записано: %s", error)
@@ -940,6 +969,7 @@ class TaskService:
                 text=caption,
                 kind="photo",
                 telegram_file_id=file_id,
+                forwarded_from=forwarded_from,
             )
         except DatabaseError as error:
             logger.warning("Снимок не записан: %s", error)
@@ -1143,14 +1173,22 @@ class TaskService:
         с каким качеством (§9.4), а расшифровка уходит в базу тем же вызовом,
         что разбор и задача (§9.3). Открытый вопрос читается до модели и
         уходит ей в промпт (§10.2) — и для текста, и для голоса. Рядом с ним —
-        подсказки для правки словом (§12.2).
+        подсказки для правки словом (§12.2) и недавний разговор (§17.3).
+
+        Своё сообщение ведёт разговор: его `chat` отвечает текстом модели
+        (§17.2). Пересланное — нет: блока 6 у него нет, а ответ разговора
+        не слушается.
         """
         spoken: SpeechQuality | None = None
         if transcript is not None:
             spoken = "low" if transcript.low_confidence else "fine"
+        talk = forwarded_from is None
+        # Граница блока 6 — само сообщение: ни оно, ни пришедшие после него в
+        # блок не попадают (§17.3). Время записи даёт база; нет его — часы.
+        before = saved.received_at or self._clock()
 
         asked, context = await asyncio.gather(
-            self._open_question(), self._edit_context(chat_id, forwarded_from, swipe)
+            self._open_question(), self._edit_context(chat_id, forwarded_from, swipe, before)
         )
         verdict = await self._analyst.analyze(
             text,
@@ -1160,13 +1198,14 @@ class TaskService:
             tasks=context.tasks,
             last_task=context.last_task,
             swipe=context.swipe,
+            recent=context.recent,
         )
         now = self._clock()
         if isinstance(verdict, Analysis):
             understanding = verdict.understanding
             try:
                 decision = await self._decide(
-                    understanding, asked, now, context, telegram_message_id
+                    understanding, asked, now, context, telegram_message_id, talk=talk
                 )
             except DatabaseError as error:
                 # Без плана «Напомню» было бы неправдой, а задача без
@@ -1258,6 +1297,8 @@ class TaskService:
         now: datetime,
         context: EditContext,
         telegram_message_id: int,
+        *,
+        talk: bool = False,
     ) -> Decision:
         """Пять путей разбора: ответ на вопрос, правка словом, дубль, запись
         с вопросом, обычная запись.
@@ -1277,6 +1318,9 @@ class TaskService:
         План берётся у базы, только когда есть что планировать — задача или
         поправка; у разговора и сведения о себе задачи нет, и звать базу
         незачем. Отказ базы выходит наружу `DatabaseError`.
+
+        `talk` — своё сообщение: разговор отвечает текстом модели (§17.2).
+        У пересланного и снимка ответ разговора прежний.
         """
         if asked is not None and understanding.answers_question:
             changed = amendment(asked, understanding)
@@ -1327,9 +1371,11 @@ class TaskService:
                 reply=reply, task=None, reminders=[], buttons=(apart,), same_task=same.id
             )
 
-        return await self._new_task(understanding, now)
+        return await self._new_task(understanding, now, talk=talk)
 
-    async def _new_task(self, understanding: Understanding, now: datetime) -> Decision:
+    async def _new_task(
+        self, understanding: Understanding, now: datetime, *, talk: bool = False
+    ) -> Decision:
         """Запись с вопросом или обычная запись — сообщение заводит своё.
 
         Ею же «Записать отдельно» заводит задачу из дубля (§15.4): так, как
@@ -1368,21 +1414,24 @@ class TaskService:
             return Decision(reply=paragraphs(reply, clash), task=task, reminders=planned)
 
         return Decision(
-            reply=paragraphs(self._reply_for(understanding, planned, now, rule), clash),
+            reply=paragraphs(self._reply_for(understanding, planned, now, rule, talk=talk), clash),
             task=task_row,
             reminders=planned,
         )
 
     async def _edit_context(
-        self, chat_id: int, forwarded_from: str | None, swipe: Swipe | None
+        self, chat_id: int, forwarded_from: str | None, swipe: Swipe | None, before: datetime
     ) -> EditContext:
-        """Подсказки для правки (§12.2) — или их отсутствие.
+        """Подсказки для правки (§12.2) и недавний разговор (§17.3) — или их
+        отсутствие.
 
-        Пересланное правкой не бывает: список — только для сверки дублей
-        (§15.2), свайп и последняя задача не читаются. Без хранилища —
-        пустой список. Не прочитался список — блока нет, и разбор идёт как до
-        правки словом (поручение важнее контекста); не прочиталась последняя
-        задача или свайп — нет только этой строки.
+        Пересланное правкой не бывает и разговора не ведёт: список — только
+        для сверки дублей (§15.2), свайп, последняя задача и разговор не
+        читаются. Без хранилища — пустой список и блока 6 нет. Не прочитался
+        список — блока 5 нет, и разбор идёт как до правки словом (поручение
+        важнее контекста); не прочиталась последняя задача, свайп или
+        разговор — нет только этой части. `before` — время самого сообщения,
+        граница блока 6.
         """
         if forwarded_from is not None:
             return await self._check_context()
@@ -1390,13 +1439,15 @@ class TaskService:
         if store is None:
             return EditContext(tasks=[], last_task=None, swipe=None)
         now = self._clock()
-        tasks, events, swiped = await asyncio.gather(
+        since = now - edits.LAST_TASK_WINDOW
+        tasks, events, swiped, recent = await asyncio.gather(
             self._open_tasks(store),
-            self._last_events(store, now - edits.LAST_TASK_WINDOW),
+            self._last_events(store, since),
             self._swiped(store, chat_id, swipe),
+            self._recent(store, since, before),
         )
         if tasks is None:
-            return NO_EDIT
+            return replace(NO_EDIT, recent=recent)
         last_task = edits.last_task_number(events, tasks, now)
         line = None
         if swiped is not None:
@@ -1408,7 +1459,23 @@ class TaskService:
             last_task,
             line is not None,
         )
-        return EditContext(tasks=tasks, last_task=last_task, swipe=line)
+        return EditContext(tasks=tasks, last_task=last_task, swipe=line, recent=recent)
+
+    async def _recent(self, store: EditStore, since: datetime, before: datetime) -> str | None:
+        """Блок 6 «Недавний разговор» (§17.3) или `None`, если блока нет.
+
+        Окно — тот же час, что у последней задачи в разговоре (§12.2). База не
+        ответила — блока нет, разбор идёт без него. В журнал — только число
+        сообщений, тексты — никогда.
+        """
+        try:
+            messages = await store.recent_messages(since, before, conversation.RECENT_LIMIT)
+        except DatabaseError as error:
+            logger.warning("Недавний разговор не прочитан, разбор без него: %s", error)
+            return None
+        talk = conversation.recent_block(messages, self._settings.owner_timezone)
+        logger.info("Недавний разговор: сообщений %s", 0 if talk is None else talk.count)
+        return None if talk is None else talk.text
 
     async def _check_context(self) -> EditContext:
         """Список для сверки дублей без правки — пересланное и снимок (§15.2).
@@ -1927,14 +1994,19 @@ class TaskService:
         planned: list[Planned],
         now: datetime,
         rule: RuleOutcome,
+        *,
+        talk: bool = False,
     ) -> str:
-        """Ответ человеку по видам. Дословно из модели — причина и текст записи.
+        """Ответ человеку по видам. Дословно из модели — причина, текст записи
+        и ответ разговора.
 
         Строка «Напомню» берётся из того же плана, который уходит в базу
         (§6.4): бот обещает ровно то, что записал, — и ничего сверх того
         (инвариант 4). Сведение о себе подтверждается словами «Запомнил: …»
         (`techspec/08-memory.md` §8.2); предположения из поручения в ответ
-        не попадают — они видны в приложении.
+        не попадают — они видны в приложении. Разговор своего сообщения
+        (`talk`) отвечает текстом модели (§17.2), у других видов поле не
+        слушается.
         """
         if understanding.kind == "about_me":
             if understanding.facts:
@@ -1942,7 +2014,7 @@ class TaskService:
             # Сведение есть, а нового нет — значит, оно уже в памяти (§8.2).
             return texts.ALREADY_KNOWN
         if understanding.kind not in TASK_KINDS:
-            return texts.NO_ERRAND
+            return self._talk_reply(understanding.reply_hint) if talk else texts.NO_ERRAND
         return texts.recorded_reply(
             kind=understanding.kind,
             title=understanding.title,
@@ -1952,3 +2024,19 @@ class TaskService:
             remind_at=self._remind_words(planned, now),
             repeat=rule_words(rule.rule),
         )
+
+    @staticmethod
+    def _talk_reply(hint: str | None) -> str:
+        """Ответ разговора (§17.2): текст модели без пробелов по краям, не
+        длиннее предела. Пусто — прежний `NO_ERRAND`.
+
+        Разговор ничего не меняет: ответ, который сообщает о сделанном,
+        заменяется на `NO_ERRAND` (инвариант 4). В журнал — только длина.
+        """
+        reply = conversation.reply_text(hint)
+        if reply is None:
+            return texts.NO_ERRAND
+        if conversation.reports_action(reply):
+            logger.warning("Ответ разговора говорит о действии — заменён: знаков %s", len(reply))
+            return texts.NO_ERRAND
+        return reply
