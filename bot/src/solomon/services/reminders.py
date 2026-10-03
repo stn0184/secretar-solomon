@@ -14,6 +14,10 @@ aiogram, ни про сеть, и тест подставляет свою за�
 Повторяющиеся задачи (`techspec/13-repeat.md`): тик сначала перекатывает
 пропущенные разы (§13.4), кнопка «Сделано» несёт раз и переводит задачу на
 следующий (§13.3) — и то и другое делает база.
+
+Вопрос о деле без срока (`techspec/19-undated.md`) — последний шаг того же
+тика (§19.2): окно, границы и слова — в `services/asks.py`, отбор и запись —
+в базе, здесь — порядок «отправить → записать» и память о дате вопроса.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ import asyncio
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 
 from supabase import Client
@@ -30,9 +34,10 @@ from supabase import Client
 from solomon import texts
 from solomon.config import Settings
 from solomon.db import reminders as db_reminders
-from solomon.db.reminders import DueReminder, MovedTask, Planned
+from solomon.db.reminders import DueReminder, MovedTask, Planned, UndatedTask
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import ACTIVE_STATUS, TaskDetails
+from solomon.services import asks
 from solomon.services.repeat import occurrence_seconds
 from solomon.services.understanding import Clock
 
@@ -176,6 +181,22 @@ class Roller(Protocol):
     async def __call__(self, *, owner_telegram_id: int, now: datetime) -> int: ...
 
 
+class UndatedFinder(Protocol):
+    """О каком деле без срока спросить сейчас (§19.4): одно дело или `None`."""
+
+    async def __call__(
+        self, *, owner_telegram_id: int, bounds: asks.AskBounds
+    ) -> UndatedTask | None: ...
+
+
+class AskRecorder(Protocol):
+    """Записать ушедший вопрос (§19.4). `None` — дело уже не то, не записано."""
+
+    async def __call__(
+        self, *, owner_telegram_id: int, task_id: str, question: str, telegram_message_id: int
+    ) -> TaskDetails | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Completion:
     """Чем кончилось нажатие «Сделано» и что сказать человеку.
@@ -204,6 +225,8 @@ class ReminderService:
         announce: Announcer,
         clock: Clock | None = None,
         roll: Roller | None = None,
+        undated: UndatedFinder | None = None,
+        record_ask: AskRecorder | None = None,
     ) -> None:
         self._settings = settings
         self._due = due
@@ -216,6 +239,12 @@ class ReminderService:
         # Без перекатывания пропущенный раз стоит до «Сделано» — как до этапа
         # 011. Обычная сборка его подключает.
         self._roll = roll
+        # Без них вопроса о деле без срока нет — как до этапа 018 (§19.2).
+        self._undated = undated
+        self._record_ask = record_ask
+        # День владельца, когда процесс задал вопрос: второго в этот день не
+        # будет, даже если база вопрос не записала (§19.4). Бот один (§16.3).
+        self._asked_on: date | None = None
         self._clock = clock or self._now
 
     def _now(self) -> datetime:
@@ -260,6 +289,27 @@ class ReminderService:
                 db, owner_telegram_id=owner_telegram_id, task_id=task_id, seen=seen
             )
 
+        async def undated(*, owner_telegram_id: int, bounds: asks.AskBounds) -> UndatedTask | None:
+            return await db_reminders.undated_to_ask(
+                db,
+                owner_telegram_id=owner_telegram_id,
+                day_start=bounds.day_start,
+                asked_before=bounds.asked_before,
+                question_since=bounds.question_since,
+                quiet_since=bounds.quiet_since,
+            )
+
+        async def record_ask(
+            *, owner_telegram_id: int, task_id: str, question: str, telegram_message_id: int
+        ) -> TaskDetails | None:
+            return await db_reminders.record_ask(
+                db,
+                owner_telegram_id=owner_telegram_id,
+                task_id=task_id,
+                question=question,
+                telegram_message_id=telegram_message_id,
+            )
+
         return cls(
             settings=settings,
             due=due,
@@ -270,10 +320,13 @@ class ReminderService:
             clear_moved=clear_moved,
             announce=announce,
             roll=roll,
+            undated=undated,
+            record_ask=record_ask,
         )
 
     async def tick(self, now: datetime | None = None) -> int:
-        """Один заход: перекатывание (§13.4), созревшее (§6.2), строки «Перенёс» (§11.4).
+        """Один заход: перекатывание (§13.4), созревшее (§6.2), строки «Перенёс» (§11.4)
+        и последним — вопрос о деле без срока (§19.2), если до него ничего не ушло.
 
         Порядок нарочно такой: новый раз получает свои ступени до выборки, и
         созревшая уходит этим же тиком; напоминание, ушедшее в этом тике, уже
@@ -293,7 +346,62 @@ class ReminderService:
         for task in await self._moved(owner_telegram_id=owner):
             if await self._announce_one(task, moment):
                 sent += 1
+        # В этом тике уже ушло напоминание или «Перенёс» — тишины нет (§19.2).
+        if sent == 0 and await self._ask_undated(moment):
+            sent += 1
         return sent
+
+    async def _ask_undated(self, now: datetime) -> bool:
+        """Вопрос о деле без срока (§19.4): отправить и только потом записать.
+
+        Окно и «сегодня процесс уже спрашивал» решает бот, остальное —
+        `undated_to_ask` по границам из `services/asks.py`. Сбой отбора —
+        строка в журнал, тик живёт. Не ушло — ничего не записано, следующий
+        тик спросит снова. Ушло — процесс помнит день, и второго вопроса
+        сегодня не будет, даже если запись не удалась. Возвращает, ушёл ли
+        вопрос.
+        """
+        if self._undated is None or self._record_ask is None:
+            return False
+        timezone = self._settings.owner_timezone
+        today = asks.local_day(now, timezone)
+        if self._asked_on == today or not asks.in_window(now, timezone):
+            return False
+        owner = self._settings.owner_telegram_id
+        try:
+            task = await self._undated(owner_telegram_id=owner, bounds=asks.bounds(now, timezone))
+        except DatabaseError as error:
+            logger.error("Дело без срока для вопроса не выбрано: %s", error)
+            return False
+        if task is None:
+            return False
+        try:
+            message_id = await self._notify(
+                text=asks.question_text(task, now, timezone), task_id=task.task_id
+            )
+        except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
+            logger.warning("Вопрос о задаче %s не ушёл: %s", task.task_id, error)
+            return False
+        self._asked_on = today
+        # Суть дела в журнал не пишется: id и какой это вопрос (§19.4).
+        which = "повторный" if task.asked_at is not None else "первый"
+        logger.info("Вопрос о задаче %s: %s", task.task_id, which)
+        try:
+            recorded = await self._record_ask(
+                owner_telegram_id=owner,
+                task_id=task.task_id,
+                question=texts.UNDATED_QUESTION,
+                telegram_message_id=message_id,
+            )
+        except DatabaseError as error:
+            logger.error("Вопрос о задаче %s ушёл, но не записан: %s", task.task_id, error)
+            return True
+        if recorded is None:
+            logger.warning(
+                "Вопрос о задаче %s ушёл, но не записан: дело получило срок или закрыто",
+                task.task_id,
+            )
+        return True
 
     async def _roll_quietly(self, now: datetime) -> None:
         """Перевести просроченные разы на наступившие (§13.4); сбой — строка в журнал."""

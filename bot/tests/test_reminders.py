@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from datetime import datetime
 from typing import cast
@@ -19,12 +20,13 @@ from aiogram.types import InlineKeyboardMarkup
 from supabase import Client
 
 from solomon import texts
-from solomon.db.reminders import DueReminder, MovedTask, Planned
+from solomon.db.reminders import DueReminder, MovedTask, Planned, UndatedTask
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import TaskDetails
 from solomon.handlers import done_keyboard
 from solomon.runner import build_dispatcher
 from solomon.runner import build_reminders as build_reminders_service
+from solomon.services import asks
 from solomon.services.reminders import (
     ReminderService,
     by_task,
@@ -918,4 +920,350 @@ async def test_moved_line_goes_to_the_owner_without_a_button(
         "owner_telegram_id": OWNER_ID,
         "task_id": "0e2f",
         "seen": MOVED_AT.isoformat(),
+    }
+
+
+# --- Вопрос о деле без срока (techspec/19-undated.md §19.2, §19.4) ---
+
+UNDATED_ID = "5b0c7a52-8f3e-4c1d-9a6b-2e4f1d3c8b90"
+# Суббота, 3 октября 2026 года, полдень у владельца: окно вопроса открыто.
+SATURDAY_NOON = datetime(2026, 10, 3, 12, 0, tzinfo=TZ)
+
+
+def make_undated(asked_at: datetime | None = None) -> UndatedTask:
+    """Дело без срока, записанное вчера вечером, — как его отдаёт `undated_to_ask`."""
+    return UndatedTask(
+        task_id=UNDATED_ID,
+        title="купить фильтр для воды",
+        created_at=datetime(2026, 10, 2, 21, 30, tzinfo=TZ),
+        asked_at=asked_at,
+    )
+
+
+class FakeUndated:
+    """`undated_to_ask` без базы: какое дело отдать и с какими границами спросили."""
+
+    def __init__(self, task: UndatedTask | None = None, broken: bool = False) -> None:
+        self.task = task
+        self.broken = broken
+        self.calls: list[tuple[int, asks.AskBounds]] = []
+
+    async def __call__(
+        self, *, owner_telegram_id: int, bounds: asks.AskBounds
+    ) -> UndatedTask | None:
+        self.calls.append((owner_telegram_id, bounds))
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return self.task
+
+
+class FakeAskRecorder:
+    """`record_ask` без базы: что записали; `None` — дело уже не то."""
+
+    def __init__(
+        self, broken: bool = False, events: list[str] | None = None, missing: bool = False
+    ) -> None:
+        self.task = None if missing else make_details(id=UNDATED_ID)
+        self.broken = broken
+        self.calls: list[dict[str, object]] = []
+        self.events = events if events is not None else []
+
+    async def __call__(
+        self, *, owner_telegram_id: int, task_id: str, question: str, telegram_message_id: int
+    ) -> TaskDetails | None:
+        self.events.append("record")
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        self.calls.append(
+            {
+                "owner_telegram_id": owner_telegram_id,
+                "task_id": task_id,
+                "question": question,
+                "telegram_message_id": telegram_message_id,
+            }
+        )
+        return self.task
+
+
+def build_asking(
+    undated: FakeUndated,
+    recorder: FakeAskRecorder | None = None,
+    notifier: FakeNotifier | None = None,
+    due: FakeDue | None = None,
+    moved: FakeMoved | None = None,
+) -> tuple[ReminderService, FakeAskRecorder, FakeNotifier]:
+    """Сервис напоминаний с шагом вопроса — на подделках, без базы и сети."""
+    record = recorder or FakeAskRecorder()
+    sender = notifier or FakeNotifier()
+    service = ReminderService(
+        settings=make_settings(),
+        due=due or FakeDue(),
+        mark_sent=FakeMarks(),
+        close_task=FakeCloser(),
+        notify=sender,
+        moved=moved or FakeMoved(),
+        clear_moved=FakeClearMoved(),
+        announce=FakeAnnouncer(),
+        clock=lambda: SATURDAY_NOON,
+        undated=undated,
+        record_ask=record,
+    )
+    return service, record, sender
+
+
+async def test_undated_question_is_sent_with_the_button_and_then_recorded() -> None:
+    """Ушло с кнопкой «Сделано» — и только потом записано (§19.4)."""
+    events: list[str] = []
+    undated = FakeUndated(make_undated())
+    service, recorder, notifier = build_asking(
+        undated, FakeAskRecorder(events=events), FakeNotifier(events=events)
+    )
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    assert undated.calls == [(OWNER_ID, asks.bounds(SATURDAY_NOON, TZ))]
+    assert notifier.sent == [
+        (UNDATED_ID, "Вчера вы просили записать: купить фильтр для воды. Когда займётесь?")
+    ]
+    # Кнопка «Сделано» — та же, что под напоминанием; раза у дела без срока нет.
+    assert notifier.occurrences == [None]
+    assert events == ["reminder", "record"]
+    assert recorder.calls == [
+        {
+            "owner_telegram_id": OWNER_ID,
+            "task_id": UNDATED_ID,
+            "question": texts.UNDATED_QUESTION,
+            "telegram_message_id": 41,
+        }
+    ]
+
+
+async def test_repeat_question_says_still_without_due() -> None:
+    """Спрашивал неделю назад — повторный текст (§19.3)."""
+    asked = datetime(2026, 9, 26, 11, 0, tzinfo=TZ)
+    service, _, notifier = build_asking(FakeUndated(make_undated(asked_at=asked)))
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    assert notifier.sent[0][1].startswith("Всё ещё без срока: купить фильтр для воды.")
+
+
+@pytest.mark.parametrize(
+    "moment",
+    [
+        datetime(2026, 10, 3, 9, 59, tzinfo=TZ),
+        datetime(2026, 10, 3, 20, 0, tzinfo=TZ),
+        datetime(2026, 10, 3, 23, 0, tzinfo=TZ),
+        datetime(2026, 10, 3, 6, 0, tzinfo=TZ),
+    ],
+)
+async def test_no_question_outside_the_window(moment: datetime) -> None:
+    """До 10:00 и с 20:00 база о деле даже не спрашивается (§19.2)."""
+    undated = FakeUndated(make_undated())
+    service, recorder, notifier = build_asking(undated)
+
+    assert await service.tick(moment) == 0
+    assert undated.calls == []
+    assert notifier.sent == []
+    assert recorder.calls == []
+
+
+async def test_no_question_when_a_reminder_went_out_this_tick() -> None:
+    """В этом тике ушло напоминание — тишины нет, вопроса тоже (§19.2)."""
+    undated = FakeUndated(make_undated())
+    ripe = [make_due("due", SATURDAY_NOON, task_id="0e2f")]
+    service, recorder, notifier = build_asking(undated, due=FakeDue(ripe))
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    assert [task_id for task_id, _ in notifier.sent] == ["0e2f"]
+    assert undated.calls == []
+    assert recorder.calls == []
+
+
+async def test_no_question_when_a_moved_line_went_out_this_tick() -> None:
+    """Ушла строка «Перенёс» — вопрос ждёт следующей тишины (§19.2)."""
+    undated = FakeUndated(make_undated())
+    service, _, notifier = build_asking(undated, moved=FakeMoved([make_moved()]))
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    assert notifier.sent == []
+    assert undated.calls == []
+
+
+async def test_failed_reminder_does_not_count_as_noise() -> None:
+    """Напоминание не ушло — в этом тике ничего не ушло, и база решает о вопросе."""
+    undated = FakeUndated(make_undated())
+    ripe = [make_due("due", SATURDAY_NOON, task_id="0e2f")]
+    service, _, _ = build_asking(undated, due=FakeDue(ripe), notifier=FakeNotifier(broken=True))
+
+    assert await service.tick(SATURDAY_NOON) == 0
+    assert len(undated.calls) == 1
+
+
+async def test_one_question_a_day_by_process_memory() -> None:
+    """Спросил — до конца дня владельца база о деле больше не спрашивается."""
+    undated = FakeUndated(make_undated())
+    service, recorder, notifier = build_asking(undated)
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    assert await service.tick(SATURDAY_NOON.replace(hour=15)) == 0
+    assert await service.tick(SATURDAY_NOON.replace(hour=19, minute=59)) == 0
+
+    assert len(undated.calls) == 1
+    assert len(notifier.sent) == 1
+    assert len(recorder.calls) == 1
+
+
+async def test_next_day_asks_again() -> None:
+    """Назавтра с 10:00 — снова можно: память — о дне, а не навсегда."""
+    service, _, notifier = build_asking(FakeUndated(make_undated()))
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    assert await service.tick(datetime(2026, 10, 4, 10, 0, tzinfo=TZ)) == 1
+    assert len(notifier.sent) == 2
+
+
+async def test_nothing_to_ask_is_asked_again_next_tick() -> None:
+    """Дела нет или нет тишины — база решает заново на следующем тике."""
+    undated = FakeUndated(None)
+    service, recorder, notifier = build_asking(undated)
+
+    assert await service.tick(SATURDAY_NOON) == 0
+    undated.task = make_undated()
+    assert await service.tick(SATURDAY_NOON.replace(minute=1)) == 1
+
+    assert len(undated.calls) == 2
+    assert len(notifier.sent) == 1
+    assert len(recorder.calls) == 1
+
+
+async def test_failed_send_records_nothing_and_next_tick_asks_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Не ушло — ничего не записано, следующий тик того же дня спросит снова (§19.4)."""
+    notifier = FakeNotifier(broken=True)
+    service, recorder, _ = build_asking(FakeUndated(make_undated()), notifier=notifier)
+
+    assert await service.tick(SATURDAY_NOON) == 0
+    assert recorder.calls == []
+    assert f"Вопрос о задаче {UNDATED_ID} не ушёл" in caplog.text
+
+    notifier.broken = False
+    assert await service.tick(SATURDAY_NOON.replace(minute=1)) == 1
+    assert len(recorder.calls) == 1
+
+
+async def test_failed_record_keeps_the_day(caplog: pytest.LogCaptureFixture) -> None:
+    """Ушло, а база не записала: второго вопроса сегодня нет (§19.4)."""
+    undated = FakeUndated(make_undated())
+    service, _, notifier = build_asking(undated, FakeAskRecorder(broken=True))
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    assert f"Вопрос о задаче {UNDATED_ID} ушёл, но не записан" in caplog.text
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+    assert await service.tick(SATURDAY_NOON.replace(minute=1)) == 0
+    assert len(undated.calls) == 1
+    assert len(notifier.sent) == 1
+
+
+async def test_task_changed_between_pick_and_record_is_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`record_ask` вернула `null`: дело за этот миг получило срок или закрыто."""
+    service, _, notifier = build_asking(FakeUndated(make_undated()), FakeAskRecorder(missing=True))
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert any("ушёл, но не записан" in record.getMessage() for record in warnings)
+
+    assert await service.tick(SATURDAY_NOON.replace(minute=1)) == 0
+    assert len(notifier.sent) == 1
+
+
+async def test_broken_pick_does_not_kill_the_tick(caplog: pytest.LogCaptureFixture) -> None:
+    """Сбой `undated_to_ask` — строка в журнал, тик живёт дальше (§19.4)."""
+    service, recorder, notifier = build_asking(FakeUndated(broken=True))
+
+    assert await service.tick(SATURDAY_NOON) == 0
+    assert notifier.sent == []
+    assert recorder.calls == []
+    assert "Дело без срока для вопроса не выбрано" in caplog.text
+
+
+async def test_log_names_the_task_not_its_title(caplog: pytest.LogCaptureFixture) -> None:
+    """Журнал: id задачи и первый вопрос или повторный; сути дела в нём нет."""
+    caplog.set_level(logging.INFO)
+    asked = datetime(2026, 9, 26, 11, 0, tzinfo=TZ)
+    first, _, _ = build_asking(FakeUndated(make_undated()))
+    again, _, _ = build_asking(FakeUndated(make_undated(asked_at=asked)))
+
+    await first.tick(SATURDAY_NOON)
+    await again.tick(SATURDAY_NOON)
+
+    assert f"Вопрос о задаче {UNDATED_ID}: первый" in caplog.text
+    assert f"Вопрос о задаче {UNDATED_ID}: повторный" in caplog.text
+    assert "фильтр" not in caplog.text
+
+
+async def test_without_the_new_dependencies_there_is_no_question() -> None:
+    """Сервис без поиска и записи вопроса — как до этапа 018: шага нет."""
+    service, _, _, notifier = build_reminders()
+
+    assert await service.tick(SATURDAY_NOON) == 0
+    assert notifier.sent == []
+
+
+async def test_undated_question_goes_to_the_owner_with_the_button(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Сборка из `runner.py`: границы в базу, вопрос с кнопкой, запись с id сообщения."""
+    created = datetime(2026, 10, 2, 21, 30, tzinfo=TZ).isoformat()
+    row: dict[str, object] = {
+        "task_id": UNDATED_ID,
+        "title": "купить фильтр для воды",
+        "created_at": created,
+        "asked_at": None,
+    }
+    recorded: dict[str, object] = {
+        "id": UNDATED_ID,
+        "title": "купить фильтр для воды",
+        "kind": "task",
+        "status": "active",
+        "due_at": None,
+        "due_precision": None,
+        "priority": "normal",
+        "promise": None,
+        "people": [],
+        "created_at": created,
+    }
+    answers = {"due_reminders": [], "moved_tasks": [], "undated_to_ask": [row]}
+    client = FakeRpcClient({**answers, "record_ask": recorded})
+    service = build_reminders_service(make_settings(), cast(Client, client), bot)
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    sent = session.sent[0]
+    assert isinstance(sent, SendMessage)
+    assert sent.chat_id == OWNER_ID
+    assert sent.text == "Вчера вы просили записать: купить фильтр для воды. Когда займётесь?"
+    assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
+    assert sent.reply_markup.inline_keyboard[0][0].callback_data == f"done:{UNDATED_ID}"
+    assert client.calls == [
+        "roll_repeats",
+        "due_reminders",
+        "moved_tasks",
+        "undated_to_ask",
+        "record_ask",
+    ]
+    bounds = asks.bounds(SATURDAY_NOON, TZ)
+    assert client.params[3] == {
+        "owner_telegram_id": OWNER_ID,
+        "day_start": bounds.day_start.isoformat(),
+        "asked_before": bounds.asked_before.isoformat(),
+        "question_since": bounds.question_since.isoformat(),
+        "quiet_since": bounds.quiet_since.isoformat(),
+    }
+    assert client.params[4] == {
+        "owner_telegram_id": OWNER_ID,
+        "task_id": UNDATED_ID,
+        "question": texts.UNDATED_QUESTION,
+        "telegram_message_id": 1,
     }
