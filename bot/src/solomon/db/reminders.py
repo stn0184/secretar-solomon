@@ -17,6 +17,11 @@
 на следующий раз, следующий раз считает база (`repeat_next`), «Вернуть» под
 «Отметил» и «Пропускаю» — `return_occurrence`, пропущенный раз двигает
 `roll_repeats` в минутном цикле.
+
+Вопрос о деле без срока (`techspec/19-undated.md` §19.4): о каком деле
+спросить — `undated_to_ask`, ушедший вопрос — `record_ask`. Память о
+вопросе — строка `reminders` со ступенью `ask`; планом напоминаний она не
+бывает, поэтому в `Stage` её нет.
 """
 
 from __future__ import annotations
@@ -42,6 +47,8 @@ CLEAR_DUE_MOVED_FUNCTION = "clear_due_moved"
 REPEAT_NEXT_FUNCTION = "repeat_next"
 RETURN_OCCURRENCE_FUNCTION = "return_occurrence"
 ROLL_REPEATS_FUNCTION = "roll_repeats"
+UNDATED_TO_ASK_FUNCTION = "undated_to_ask"
+RECORD_ASK_FUNCTION = "record_ask"
 
 Stage = Literal["before", "due"]
 
@@ -378,3 +385,91 @@ async def reopen_task(
         "schedule": [item.as_row() for item in schedule],
     }
     return _task_or_none(await ask(lambda: db.rpc(REOPEN_TASK_FUNCTION, params).execute().data))
+
+
+@dataclass(frozen=True, slots=True)
+class UndatedTask:
+    """Дело без срока, о котором пора спросить (§19.1).
+
+    `created_at` — когда записано: первый вопрос называет этот день.
+    `asked_at` — когда бот спрашивал о нём в последний раз; `None` — не
+    спрашивал, и вопрос будет первым.
+    """
+
+    task_id: str
+    title: str
+    created_at: datetime
+    asked_at: datetime | None
+
+
+def _undated_from_row(row: Any) -> UndatedTask:
+    """Разобрать строку. Неполная — отказ, а не вопрос без сути."""
+    if not isinstance(row, Mapping):
+        raise DatabaseError("База вернула не строку дела без срока.")
+    try:
+        return UndatedTask(
+            task_id=str(row["task_id"]),
+            title=str(row["title"]),
+            created_at=moment(row["created_at"], "created_at"),
+            asked_at=optional_moment(row["asked_at"], "asked_at"),
+        )
+    except KeyError as error:
+        raise DatabaseError(f"В ответе базы нет поля дела без срока: {error}.") from error
+
+
+async def undated_to_ask(
+    db: Client,
+    *,
+    owner_telegram_id: int,
+    day_start: datetime,
+    asked_before: datetime,
+    question_since: datetime,
+    quiet_since: datetime,
+) -> UndatedTask | None:
+    """О каком деле без срока спросить сейчас (§19.1, §19.2).
+
+    Границы считает бот (`services/asks.py`), база по ним отбирает: сегодня
+    уже спрашивал, живой открытый вопрос или нет 15 минут тишины — `None`;
+    иначе первое по порядку §19.1 дело. Больше одной строки — отказ: вопрос
+    в день один.
+    """
+    params = {
+        "owner_telegram_id": owner_telegram_id,
+        "day_start": day_start.isoformat(),
+        "asked_before": asked_before.isoformat(),
+        "question_since": question_since.isoformat(),
+        "quiet_since": quiet_since.isoformat(),
+    }
+    rows = await ask(lambda: db.rpc(UNDATED_TO_ASK_FUNCTION, params).execute().data)
+    if rows is None:
+        return None
+    if not isinstance(rows, list):
+        raise DatabaseError("База вернула не список дел без срока.")
+    if len(rows) > 1:
+        raise DatabaseError(f"База вернула {len(rows)} дел без срока вместо одного.")
+    return _undated_from_row(rows[0]) if rows else None
+
+
+async def record_ask(
+    db: Client,
+    *,
+    owner_telegram_id: int,
+    task_id: str,
+    question: str,
+    telegram_message_id: int,
+) -> TaskDetails | None:
+    """Записать ушедший вопрос о деле без срока (§19.4) — одной транзакцией.
+
+    Порядок «отправить → записать», как у напоминания: зовётся, когда
+    Telegram сообщение принял. Открытый вопрос задачи — `question`, у
+    остальных задач владельца снят; строка `ask` помнит время и сообщение.
+    `None` — задача чужая, закрыта, убрана, получила срок или это не задача:
+    ничего не записано.
+    """
+    params = {
+        "owner_telegram_id": owner_telegram_id,
+        "task_id": task_id,
+        "question": question,
+        "telegram_message_id": telegram_message_id,
+    }
+    return _task_or_none(await ask(lambda: db.rpc(RECORD_ASK_FUNCTION, params).execute().data))

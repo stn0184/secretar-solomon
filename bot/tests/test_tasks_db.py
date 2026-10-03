@@ -1603,6 +1603,127 @@ async def test_reopen_task_of_a_deleted_task_is_none() -> None:
     )
 
 
+UNDATED_ROW = {
+    "task_id": TASK_ID,
+    "title": "купить фильтр для воды",
+    "created_at": "2026-09-30T09:15:00+00:00",
+    "asked_at": None,
+}
+
+
+def _ask_bounds() -> dict[str, datetime]:
+    day_start = datetime(2026, 10, 3, 0, 0, tzinfo=TZ)
+    now = datetime(2026, 10, 3, 10, 0, tzinfo=TZ)
+    return {
+        "day_start": day_start,
+        "asked_before": day_start - timedelta(days=6),
+        "question_since": now - timedelta(days=1),
+        "quiet_since": now - timedelta(minutes=15),
+    }
+
+
+async def test_undated_to_ask_sends_the_owner_and_the_bounds() -> None:
+    """Дело без срока (§19.4): владелец и четыре границы уходят явно (инвариант 2)."""
+    fake = FakeClient(data=[UNDATED_ROW])
+    bounds = _ask_bounds()
+
+    found = await db_reminders.undated_to_ask(as_client(fake), owner_telegram_id=OWNER_ID, **bounds)
+
+    expected = {key: value.isoformat() for key, value in bounds.items()}
+    assert fake.calls[0] == (
+        "rpc",
+        "undated_to_ask",
+        {"owner_telegram_id": OWNER_ID, **expected},
+    )
+    assert found == db_reminders.UndatedTask(
+        task_id=TASK_ID,
+        title="купить фильтр для воды",
+        created_at=datetime(2026, 9, 30, 14, 15, tzinfo=TZ),
+        asked_at=None,
+    )
+
+
+async def test_undated_to_ask_reads_when_it_asked_last() -> None:
+    fake = FakeClient(data=[{**UNDATED_ROW, "asked_at": "2026-09-26T05:00:00+00:00"}])
+
+    found = await db_reminders.undated_to_ask(
+        as_client(fake), owner_telegram_id=OWNER_ID, **_ask_bounds()
+    )
+
+    assert found is not None
+    assert found.asked_at == datetime(2026, 9, 26, 10, 0, tzinfo=TZ)
+
+
+@pytest.mark.parametrize("data", [None, []])
+async def test_undated_to_ask_without_rows_is_none(data: Any) -> None:
+    fake = FakeClient(data=data)
+
+    found = await db_reminders.undated_to_ask(
+        as_client(fake), owner_telegram_id=OWNER_ID, **_ask_bounds()
+    )
+
+    assert found is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [UNDATED_ROW, UNDATED_ROW],
+        [{key: value for key, value in UNDATED_ROW.items() if key != "created_at"}],
+        {"task_id": TASK_ID},
+    ],
+)
+async def test_undated_to_ask_odd_answer_is_a_failure(data: Any) -> None:
+    """Две строки, неполная строка или не список — отказ: вопрос в день один."""
+    fake = FakeClient(data=data)
+
+    with pytest.raises(DatabaseError):
+        await db_reminders.undated_to_ask(
+            as_client(fake), owner_telegram_id=OWNER_ID, **_ask_bounds()
+        )
+
+
+async def test_record_ask_sends_the_owner_question_and_message() -> None:
+    """Ушедший вопрос (§19.4): владелец, задача, текст и id сообщения — явно."""
+    fake = FakeClient(data={**DETAIL_ROW, "due_at": None, "due_precision": None})
+
+    task = await db_reminders.record_ask(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        task_id=TASK_ID,
+        question="Когда займётесь?",
+        telegram_message_id=4242,
+    )
+
+    assert fake.calls[0] == (
+        "rpc",
+        "record_ask",
+        {
+            "owner_telegram_id": OWNER_ID,
+            "task_id": TASK_ID,
+            "question": "Когда займётесь?",
+            "telegram_message_id": 4242,
+        },
+    )
+    assert task is not None
+    assert task.id == TASK_ID
+
+
+async def test_record_ask_of_a_gone_task_is_none() -> None:
+    """База не записала: задача получила срок, закрыта или чужая."""
+    fake = FakeClient(data={"id": None, "title": None})
+
+    task = await db_reminders.record_ask(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        task_id=TASK_ID,
+        question="Когда займётесь?",
+        telegram_message_id=4242,
+    )
+
+    assert task is None
+
+
 def test_owner_is_required_by_every_query() -> None:
     """Инвариант 2 держится сигнатурой: владельца не забыть и не подставить."""
     for query in (
@@ -1628,6 +1749,8 @@ def test_owner_is_required_by_every_query() -> None:
         db_reminders.save_owner_timezone,
         db_reminders.moved_tasks,
         db_reminders.clear_due_moved,
+        db_reminders.undated_to_ask,
+        db_reminders.record_ask,
         db_facts.list_facts,
         db_facts.list_fact_texts,
     ):
