@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import replace
 from datetime import datetime
@@ -18,8 +19,14 @@ import pytest
 
 from solomon import texts
 from solomon.db.tasks import OpenQuestion, SavedMessage, StoredMessage
+from solomon.services.batches import Batches
 from solomon.services.tasks import Button, PressOutcome, RecordOutcome, TaskService
-from solomon.services.understanding import NotUnderstood, PhotoUnderstanding, Understanding
+from solomon.services.understanding import (
+    ConversationUnderstanding,
+    NotUnderstood,
+    PhotoUnderstanding,
+    Understanding,
+)
 from tests.conftest import (
     OWNER_ID,
     OWNER_TIMEZONE,
@@ -31,6 +38,7 @@ from tests.conftest import (
     FakeTranscriber,
     FakeUnderstandings,
     load_image,
+    make_conversation_understanding,
     make_details,
     make_photo_understanding,
     make_settings,
@@ -555,3 +563,108 @@ async def test_pick_reads_an_analysis_from_before_the_stage() -> None:
 
     assert outcome.message == "Закрыл: отправить отчёт."
     assert len(store.picks) == 1
+
+
+# ---------------------------------------------------------------- переписка
+
+CONVERSATION_HINT = "В переписке ещё: «купить хлеб». Нужны — напишите или надиктуйте отдельно."
+
+
+def meeting_talk(**fields: Any) -> ConversationUnderstanding:
+    """Переписка о встрече с Ренатой в пятницу в пять и ещё одно дело в ней."""
+    base: dict[str, Any] = {
+        "title": "встреча с Ренатой",
+        "due_at": FRIDAY_FIVE,
+        "due_precision": "time",
+        "more_tasks": ["купить хлеб"],
+    }
+    return make_conversation_understanding(**{**base, **fields})
+
+
+def conversation_service(
+    talk: ConversationUnderstanding, store: FakeEdits
+) -> tuple[TaskService, FakeAnalyst, FakeUnderstandings]:
+    """Сервис с пачкой (`techspec/18-forwarded.md` §18.1): модель видит только переписку."""
+    analyst = FakeAnalyst(NotUnderstood(reason="одно сообщение тест не ждал"), conversation=talk)
+    understandings = FakeUnderstandings()
+    service = TaskService(
+        settings=make_settings(),
+        record_message=FakeMessages(numbered=True),
+        record_understanding=understandings,
+        analyst=analyst,
+        transcriber=FakeTranscriber(),
+        planner=FakePlanner(MEETING_PLAN),
+        clock=lambda: NOW,
+        edit_store=store,
+        batches=Batches(window=0.05, limit=1.0),
+    )
+    return service, analyst, understandings
+
+
+async def forward(service: TaskService) -> RecordOutcome:
+    """Две строки Ренаты разом; голова — последняя, с номером `MESSAGE_ID`."""
+    first, head = await asyncio.gather(
+        service.record_from_message(
+            chat_id=OWNER_ID,
+            telegram_message_id=MESSAGE_ID - 1,
+            text="Давайте встретимся",
+            forwarded_from="Рената",
+        ),
+        service.record_from_message(
+            chat_id=OWNER_ID,
+            telegram_message_id=MESSAGE_ID,
+            text="В пятницу в пять?",
+            forwarded_from="Рената",
+        ),
+    )
+    assert first.message == ""
+    return head
+
+
+async def test_conversation_duplicate_offers_to_record_apart() -> None:
+    """Дело из переписки уже записано (§15.3): «Это уже записано», кнопка — под головой,
+    «В переписке ещё» остаётся."""
+    service, analyst, understandings = conversation_service(
+        meeting_talk(same_as=1), FakeEdits(OPEN)
+    )
+
+    outcome = await forward(service)
+
+    assert analyst.tasks == [[MEETING, REPORT, LAMP]]
+    assert outcome.message.split(chr(10) * 2) == [MEETING_REPLY, CONVERSATION_HINT]
+    assert outcome.buttons == APART
+    assert saved(understandings, "message_id") == f"m{MESSAGE_ID}"
+    assert saved(understandings, "same_task") == MEETING_ID
+    assert saved(understandings, "task") is None
+
+
+async def test_conversation_same_time_comes_before_the_rest() -> None:
+    """Накладка (§15.5) — после основной строки и перед «В переписке ещё» (§18.4)."""
+    service, _, _ = conversation_service(meeting_talk(title="созвон с Ренатой"), FakeEdits(OPEN))
+
+    outcome = await forward(service)
+
+    assert outcome.message.split(chr(10) * 2) == [
+        "Из переписки записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. "
+        "Напомню: 2 октября в 16:00",
+        SAME_TIME,
+        CONVERSATION_HINT,
+    ]
+
+
+async def test_apart_of_a_conversation_answers_from_the_conversation() -> None:
+    """Кнопка у переписки (§15.4, §18.4): «Из переписки записал: …» и «В переписке ещё»."""
+    store = with_message(duplicate_message(meeting_talk(same_as=1)))
+    service, _, _, _, _ = build(make_understanding(), store)
+
+    outcome = await press(service)
+
+    reply = [
+        "Из переписки записал: встреча с Ренатой. Срок: пятница, 2 октября, 17:00",
+        SAME_TIME,
+        CONVERSATION_HINT,
+    ]
+    assert outcome.message.split(chr(10) * 2) == reply
+    [(_, task, _, written)] = store.separates
+    assert task["title"] == "встреча с Ренатой"
+    assert written.split(chr(10) * 2) == reply

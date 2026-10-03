@@ -408,7 +408,7 @@ async def record_understanding(
     ai_model: str | None,
     ai_input_tokens: int | None,
     ai_output_tokens: int | None,
-    reply: str,
+    reply: str | None,
     task: Mapping[str, Any] | None,
     reminders: Sequence[Mapping[str, Any]],
     facts: Sequence[Mapping[str, Any]],
@@ -431,7 +431,9 @@ async def record_understanding(
     `{category, text, status}` (§3.7): статус уже проставлен ботом, повтор
     по владельцу, категории и тексту база схлопывает сама. `transcript` —
     расшифровка голоса (§9.3): она становится текстом сообщения; у текста и
-    у нерасслышанного голоса её нет, и текст не трогается.
+    у нерасслышанного голоса её нет, и текст не трогается. Расшифровка
+    голосового из переписки (`techspec/18-forwarded.md` §18.3) приходит без
+    разбора, ответа и задачи: `reply` пуст.
 
     `amend` — ответ на открытый вопрос (`techspec/10-dialog.md` §10.2):
     `{task_id, fields, reminders}`. Тогда `task` пуст, а база дополняет

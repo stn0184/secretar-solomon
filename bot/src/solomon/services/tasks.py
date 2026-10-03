@@ -40,6 +40,15 @@
 сделанном разговор не говорит (инвариант 4). Чистые правила блока и
 ответа — в `services/conversation.py`.
 
+Переписка, пересланная разом (`techspec/18-forwarded.md`), — тоже здесь:
+текст и голос после записи в базу встают в пачку чата (`services/batches.py`)
+и ждут секунду тишины. Пачка без пересланного или из одного сообщения
+разбирается по одному, как раньше; переписку разбирает её голова —
+последнее пересланное: голосовые распознаются параллельно, модель зовётся
+один раз, разбор, ответ и задача ложатся на голову, расшифровки остальных —
+в их строки. Остальные сообщения переписки получают пустой ответ, и
+обработчик его не отправляет.
+
 Обработчик ничего не решает: он зовёт `record_from_message` или
 `record_from_voice` и отправляет то, что вернулось. Владелец берётся из
 настроек, а не из сообщения — чужие обновления до этого слоя не доходят
@@ -81,7 +90,8 @@ from solomon.db.tasks import (
     TaskDetails,
     TaskEvent,
 )
-from solomon.services import conversation, edits
+from solomon.services import batches, conversation, edits
+from solomon.services.batches import Batches, Line
 from solomon.services.names import known_names
 from solomon.services.reminders import Planner, database_planner, next_fire_at
 from solomon.services.repeat import (
@@ -105,6 +115,8 @@ from solomon.services.understanding import (
     Analysis,
     AskedQuestion,
     Clock,
+    ConversationAnalysis,
+    ConversationUnderstanding,
     ConversationVerdict,
     ImageType,
     OpenTask,
@@ -206,6 +218,8 @@ class UnderstandingRecorder(Protocol):
     сообщения (§9.3). `edit` — правка задачи словом (§12.4). `photo_text` —
     прочитанное со снимка (§14.2). `same_task` — задача, которую сообщение
     повторяет (`techspec/15-duplicates.md` §15.3): новой не заводится.
+    `reply` пуст у расшифровки голосового из переписки (§18.3): ответа у
+    такого сообщения нет.
     """
 
     async def __call__(
@@ -217,7 +231,7 @@ class UnderstandingRecorder(Protocol):
         ai_model: str | None,
         ai_input_tokens: int | None,
         ai_output_tokens: int | None,
-        reply: str,
+        reply: str | None,
         task: Mapping[str, Any] | None,
         reminders: Sequence[Mapping[str, Any]],
         facts: Sequence[Mapping[str, Any]],
@@ -299,6 +313,23 @@ AudioLoader = Callable[[], Awaitable[bytes]]
 # Скачивание снимка — так же, замыканием из обработчика; байты уходят модели
 # и после запроса не хранятся (`techspec/14-photo.md` §14.2).
 ImageLoader = Callable[[], Awaitable[bytes]]
+
+
+@dataclass(frozen=True, slots=True)
+class Pending:
+    """Сообщение в пачке (`techspec/18-forwarded.md` §18.1): строка в базе,
+    строка переписки и, у голоса, чем его скачать и сколько он длится."""
+
+    saved: SavedMessage
+    telegram_message_id: int
+    line: Line
+    load_audio: AudioLoader | None = None
+    duration: int | None = None
+
+
+# Ответ сообщению переписки, которое не голова (§18.1): обработчик его не
+# отправляет — переписке отвечает одна голова.
+SILENT = RecordOutcome(ok=True, message="")
 
 
 @dataclass(frozen=True, slots=True)
@@ -725,6 +756,7 @@ class TaskService:
         edit_store: EditStore | None = None,
         repeat_next: NextOccurrence | None = None,
         names: NameSource | None = None,
+        batches: Batches[Pending] | None = None,
     ) -> None:
         self._settings = settings
         self._record_message = record_message
@@ -747,6 +779,10 @@ class TaskService:
         # Без источника имён голосовое слышится без подсказок, как до этапа
         # 014 (§9.5). Обычная сборка источник подключает.
         self._names = names
+        # Без пачки каждое сообщение разбирается сразу, как до этапа 017: так
+        # собираются тесты одного сообщения. Обычная сборка пачку подключает
+        # (`techspec/18-forwarded.md` §18.1).
+        self._batches = batches
         # «Сейчас» внедряется: от него зависит расписание напоминаний, и
         # тесты не должны угадывать, который час (`services/reminders.py`).
         self._clock = clock or self._now
@@ -791,7 +827,7 @@ class TaskService:
             ai_model: str | None,
             ai_input_tokens: int | None,
             ai_output_tokens: int | None,
-            reply: str,
+            reply: str | None,
             task: Mapping[str, Any] | None,
             reminders: Sequence[Mapping[str, Any]],
             facts: Sequence[Mapping[str, Any]],
@@ -849,6 +885,7 @@ class TaskService:
             edit_store=DatabaseEditStore(settings, db),
             repeat_next=repeat_next,
             names=DatabaseNames(settings, db),
+            batches=Batches(),
         )
 
     @classmethod
@@ -870,11 +907,16 @@ class TaskService:
         text: str,
         forwarded_from: str | None = None,
         swipe: Swipe | None = None,
+        sent_at: datetime | None = None,
+        from_owner: bool = False,
     ) -> RecordOutcome:
         """Принять текстовое поручение и вернуть готовый ответ.
 
         `swipe` — сообщение, на которое ответили свайпом: подсказка модели,
-        о какой задаче речь (§12.2).
+        о какой задаче речь (§12.2). `sent_at` — время исходного сообщения,
+        `from_owner` — переслано от самого владельца: они нужны строке
+        переписки (§18.2). Записанное сообщение ждёт пачку (§18.1); пустой
+        ответ — сообщение переписки, которое не голова.
         """
         try:
             saved = await self._record_message(
@@ -891,6 +933,17 @@ class TaskService:
 
         if saved.reply:
             return self._repeated(saved.id, saved.reply)
+
+        line = Line(
+            sent_at=sent_at or self._clock(),
+            text=text,
+            forwarded_from=forwarded_from,
+            from_owner=from_owner,
+        )
+        pending = Pending(saved=saved, telegram_message_id=telegram_message_id, line=line)
+        together = await self._as_conversation(chat_id, pending)
+        if together is not None:
+            return together
         return await self._understand(
             saved,
             text,
@@ -911,12 +964,16 @@ class TaskService:
         load_audio: AudioLoader,
         forwarded_from: str | None = None,
         swipe: Swipe | None = None,
+        sent_at: datetime | None = None,
+        from_owner: bool = False,
     ) -> RecordOutcome:
         """Принять голосовое или кружок: сохранить, расслышать, дальше как текст (§9.3).
 
         Файл не качается, пока база не подтвердила, что сообщение записано:
         иначе отвечать было бы не о чем (инвариант 4). Повтор обновления виден
         там же — ответ уже есть, и ни скачивания, ни распознавания не будет.
+        Записанное голосовое ждёт пачку, как текст (§18.1): в переписке его
+        распознаёт голова вместе с остальными.
         """
         try:
             saved = await self._record_message(
@@ -935,6 +992,23 @@ class TaskService:
 
         if saved.reply:
             return self._repeated(saved.id, saved.reply)
+
+        line = Line(
+            sent_at=sent_at or self._clock(),
+            forwarded_from=forwarded_from,
+            from_owner=from_owner,
+            speech=kind,
+        )
+        pending = Pending(
+            saved=saved,
+            telegram_message_id=telegram_message_id,
+            line=line,
+            load_audio=load_audio,
+            duration=duration,
+        )
+        together = await self._as_conversation(chat_id, pending)
+        if together is not None:
+            return together
 
         heard = await self._hear(load_audio)
         if isinstance(heard, NotTranscribed):
@@ -1048,6 +1122,209 @@ class TaskService:
             verdict=verdict,
             photo_text=photo.photo_text,
         )
+
+    async def _as_conversation(self, chat_id: int, pending: Pending) -> RecordOutcome | None:
+        """Встать в пачку чата и, если она переписка, ответить за неё (§18.1).
+
+        `None` — пачки нет или она не переписка: сообщение разбирается само
+        по себе, как до этапа 017, только на секунду позже. Переписку
+        разбирает её голова; остальные её сообщения получают пустой ответ.
+        """
+        if self._batches is None:
+            return None
+        closed = await self._batches.join(chat_id, pending)
+        # В пачку встают в порядке записи в базу, а он плавает на доли
+        # секунды; порядок в чате — номера сообщений Telegram.
+        items = sorted(closed.items, key=lambda item: item.telegram_message_id)
+        lines = [item.line for item in items]
+        head = batches.head_of(lines)
+        if head is None or not batches.is_conversation(lines):
+            return None
+        if items[head] is not pending:
+            return SILENT
+        return await self._conversation(items, head, closed.seconds)
+
+    async def _conversation(
+        self, items: Sequence[Pending], head: int, seconds: float
+    ) -> RecordOutcome:
+        """Переписка целиком — один разбор и один ответ (§18.2–18.4).
+
+        Голосовые распознаются параллельно, расшифровки не голов ложатся в
+        строки их сообщений (§18.3). Читать нечего — модель не зовётся.
+        Отказ модели — одна задача «как есть» с именами собеседников.
+        Разбор, ответ и задача ложатся на голову, как у одного сообщения.
+        """
+        saved = items[head].saved
+        lines = [item.line for item in items]
+        # Журнал — только числа (§18.3): тексты переписки в него не попадают.
+        logger.info(
+            "Переписка: сообщений %s, переслано %s, подпись %s, голосовых %s, "
+            "собрана за %s мс, голова %s",
+            len(lines),
+            sum(line.forwarded for line in lines),
+            "да" if any(not line.forwarded for line in lines) else "нет",
+            sum(line.speech is not None for line in lines),
+            round(seconds * 1000),
+            saved.id,
+        )
+        heard = await self._hear_conversation(items)
+        lines = [self._heard(line, heard.get(index)) for index, line in enumerate(lines)]
+        await asyncio.gather(
+            *(
+                self._write_transcript(items[index].saved, result)
+                for index, result in heard.items()
+                if index != head and isinstance(result, Transcript)
+            )
+        )
+        spoken = heard.get(head)
+        transcript = spoken if isinstance(spoken, Transcript) else None
+        if not batches.has_words(lines):
+            return await self._unrecorded(
+                saved, texts.CONVERSATION_NOT_HEARD, "голосовые переписки не расслышаны"
+            )
+
+        text = batches.conversation_text(lines, self._clock(), self._settings.owner_timezone)
+        asked, context = await asyncio.gather(self._open_question(), self._check_context())
+        verdict = await self._analyst.analyze_conversation(
+            text, open_question=asked, tasks=context.tasks
+        )
+        if not isinstance(verdict, ConversationAnalysis):
+            # Отказ модели (§5.4): одна задача «как есть» — кто писал и подпись.
+            title = batches.as_is_title(lines)
+            decision = Decision(
+                reply=texts.RECORDED_AS_IS.format(text=summarize(title)),
+                task=literal_fields(title),
+                reminders=[],
+            )
+            return await self._write(
+                saved, decision, analysis=None, facts=[], verdict=None, transcript=transcript
+            )
+
+        understanding = verdict.understanding
+        dropped = [name for name in ("edit", "facts") if getattr(understanding, name)]
+        if dropped:
+            # Переписка — данные, а не команда (инвариант 3): задачи она не
+            # правит и память не пишет, что бы модель ни отдала.
+            logger.info("У переписки %s отброшены: %s", saved.id, ", ".join(dropped))
+        read = understanding.model_copy(update={"edit": None, "facts": []})
+        try:
+            decision = await self._conversation_decision(
+                read, asked, context, items[head].telegram_message_id
+            )
+        except DatabaseError as error:
+            logger.warning("Расписание не получено, разбор переписки не записан: %s", error)
+            return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+        return await self._write(
+            saved,
+            decision,
+            analysis=read.model_dump(mode="json"),
+            facts=[],
+            verdict=verdict,
+            transcript=transcript,
+        )
+
+    async def _conversation_decision(
+        self,
+        read: ConversationUnderstanding,
+        asked: OpenQuestion | None,
+        context: EditContext,
+        telegram_message_id: int,
+    ) -> Decision:
+        """Ответ на переписку (§18.4): как у снимка — одно дело и подсказка.
+
+        Дел нет — короткая фраза, без задачи и подсказки; разбор всё равно
+        записывается и снимает открытый вопрос (§10.3). Иначе обычные пути
+        разбора — ответ на вопрос, дубль, запись — и абзац «В переписке ещё»,
+        если что-то записано, найдено или дополнено.
+        """
+        if (asked is None or not read.answers_question) and read.kind not in TASK_KINDS:
+            reply = (
+                texts.CONVERSATION_ABOUT_ME
+                if read.kind == "about_me"
+                else texts.CONVERSATION_NO_ERRAND
+            )
+            return Decision(reply=reply, task=None, reminders=[])
+        decision = await self._decide(read, asked, self._clock(), context, telegram_message_id)
+        if read.more_tasks and any(
+            part is not None for part in (decision.task, decision.amend, decision.same_task)
+        ):
+            more = texts.more_in_conversation(read.more_tasks)
+            decision = replace(decision, reply=paragraphs(decision.reply, more))
+        return decision
+
+    async def _hear_conversation(self, items: Sequence[Pending]) -> dict[int, TranscriptionResult]:
+        """Голосовые переписки — параллельно, с одними подсказками имён (§18.2).
+
+        Распознаются свои и из последних 30 пересланных. Имена читаются,
+        пока файлы качаются, как у одного голосового (§9.5).
+        """
+        indexes = batches.to_hear([item.line for item in items])
+        if not indexes:
+            return {}
+        names, sounds = await asyncio.gather(
+            self._known_names(),
+            asyncio.gather(*(self._fetch(items[index]) for index in indexes)),
+        )
+        results = await asyncio.gather(*(self._transcribe(sound, names) for sound in sounds))
+        for index, result in zip(indexes, results, strict=True):
+            item = items[index]
+            if isinstance(result, NotTranscribed):
+                logger.info("Голосовое %s не расслышано: %s", item.saved.id, result.reason)
+            else:
+                logger.info(
+                    "Расслышано сообщение %s: %s с, знаков %s",
+                    item.saved.id,
+                    item.duration,
+                    len(result.text),
+                )
+        return dict(zip(indexes, results, strict=True))
+
+    async def _fetch(self, item: Pending) -> bytes | NotTranscribed:
+        """Файл голосового из пачки; скачивать нечем — «не расслышал»."""
+        if item.load_audio is None:
+            return NotTranscribed(reason="download: no loader")
+        return await self._download(item.load_audio)
+
+    async def _transcribe(
+        self, sound: bytes | NotTranscribed, names: Sequence[str]
+    ) -> TranscriptionResult:
+        if isinstance(sound, NotTranscribed):
+            return sound
+        return await self._transcriber.transcribe(sound, names)
+
+    @staticmethod
+    def _heard(line: Line, result: TranscriptionResult | None) -> Line:
+        """Строка переписки после распознавания: расшифровка или «не расслышал»."""
+        if result is None:
+            return line
+        if isinstance(result, NotTranscribed):
+            return replace(line, heard=False)
+        return replace(line, text=result.text)
+
+    async def _write_transcript(self, saved: SavedMessage, transcript: Transcript) -> None:
+        """Расшифровка голосового переписки — в строку его сообщения (§18.3).
+
+        Без разбора, ответа и задачи: открытый вопрос такая запись не
+        снимает (§3.4). Сбой — строка в журнал: ответ о задаче, а не о
+        расшифровке.
+        """
+        try:
+            await self._record_understanding(
+                message_id=saved.id,
+                owner_telegram_id=self._settings.owner_telegram_id,
+                analysis=None,
+                ai_model=None,
+                ai_input_tokens=None,
+                ai_output_tokens=None,
+                reply=None,
+                task=None,
+                reminders=[],
+                facts=[],
+                transcript=transcript.text,
+                transcript_confidence=transcript.confidence,
+            )
+        except DatabaseError as error:
+            logger.warning("Расшифровка сообщения %s не записана: %s", saved.id, error)
 
     def _repeated(self, message_id: str, reply: str) -> RecordOutcome:
         """Повтор того же обновления: ответ уже давали, модель не зовём.
@@ -1247,11 +1524,11 @@ class TaskService:
         *,
         analysis: Mapping[str, Any] | None,
         facts: Sequence[Mapping[str, Any]],
-        verdict: Analysis | PhotoAnalysis | None,
+        verdict: Analysis | PhotoAnalysis | ConversationAnalysis | None,
         transcript: Transcript | None = None,
         photo_text: str | None = None,
     ) -> RecordOutcome:
-        """Второй шаг и ответ — общий хвост текста, голоса и снимка.
+        """Второй шаг и ответ — общий хвост текста, голоса, снимка и переписки.
 
         `verdict` — ответ модели, из него модель и токены (§3.2); `None` —
         разбора не было, и записан текст «как есть».
@@ -1414,6 +1691,7 @@ class TaskService:
                 due=self._due_words(understanding.due_at, understanding.due_precision),
                 remind_at=self._remind_words(planned, now),
                 repeat=rule_words(rule.rule),
+                heads=self._heads(understanding),
             )
             task = {
                 **task_fields(understanding, rule),
@@ -1874,6 +2152,8 @@ class TaskService:
             reply = decision.reply
             if isinstance(understanding, PhotoUnderstanding) and understanding.more_tasks:
                 reply = paragraphs(reply, texts.more_on_photo(understanding.more_tasks))
+            if isinstance(understanding, ConversationUnderstanding) and understanding.more_tasks:
+                reply = paragraphs(reply, texts.more_in_conversation(understanding.more_tasks))
             picked = await store.record_separately(
                 stored.id, decision.task, decision.reminders, reply
             )
@@ -1892,14 +2172,19 @@ class TaskService:
     def _stored_understanding(stored: StoredMessage) -> Understanding | None:
         """Разбор из `messages.analysis`; не читается — `None`, правка не угадывается.
 
-        Разбор снимка узнаётся по `more_tasks` и читается моделью снимка: они
-        нужны ответу «Записать отдельно» (§15.4). В разборе, записанном до
-        этапа 013, нет `same_as` — он читается как «не дубль».
+        Разбор снимка узнаётся по `photo_text`, переписки — по `more_tasks` без
+        него; оба читаются своей моделью: они нужны ответу «Записать
+        отдельно» (§15.4, §18.4). В разборе, записанном до этапа 013, нет
+        `same_as` — он читается как «не дубль».
         """
         if stored.analysis is None:
             return None
         analysis = {"same_as": None, **stored.analysis}
-        model = PhotoUnderstanding if "more_tasks" in analysis else Understanding
+        model: type[Understanding] = Understanding
+        if "photo_text" in analysis:
+            model = PhotoUnderstanding
+        elif "more_tasks" in analysis:
+            model = ConversationUnderstanding
         try:
             return model.model_validate(analysis)
         except ValidationError as error:
@@ -2032,7 +2317,15 @@ class TaskService:
             priority=understanding.priority,
             remind_at=self._remind_words(planned, now),
             repeat=rule_words(rule.rule),
+            heads=self._heads(understanding),
         )
+
+    @staticmethod
+    def _heads(understanding: Understanding) -> Mapping[str, str]:
+        """Первые слова записи по видам: у переписки — «Из переписки записал» (§18.4)."""
+        if isinstance(understanding, ConversationUnderstanding):
+            return texts.CONVERSATION_BY_KIND
+        return texts.RECORDED_BY_KIND
 
     @staticmethod
     def _talk_reply(hint: str | None) -> str:

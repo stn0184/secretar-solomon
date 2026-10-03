@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -18,12 +19,14 @@ import pytest
 from solomon import texts
 from solomon.db.reminders import Planned
 from solomon.db.tasks import OpenQuestion, SavedMessage, SpeechKind, Task
+from solomon.services.batches import Batches, Closed
 from solomon.services.names import forms
 from solomon.services.tasks import (
     NAME_FACTS_LIMIT,
     NAME_TASKS_LIMIT,
     SUMMARY_LIMIT,
     DatabaseNames,
+    Pending,
     RecordOutcome,
     TaskService,
     amendment,
@@ -53,6 +56,7 @@ from tests.conftest import (
     FakeUnderstandings,
     load_audio,
     load_image,
+    make_conversation_understanding,
     make_photo_understanding,
     make_settings,
     make_understanding,
@@ -1928,3 +1932,511 @@ def test_conversation_answers_without_an_errand() -> None:
     assert texts.CONVERSATION_NOT_HEARD == (
         "Не расслышал переписку. Сообщения сохранил — перешлите ещё раз или опишите словами."
     )
+
+
+# --- Пачка и разбор переписки (`techspec/18-forwarded.md` §18.1–18.4) -------------
+
+# Окно пачки в тестах — доли секунды: проверяется состав пачки, а не длина окна
+# (она — в `test_batches.py` на подменённых часах).
+WINDOW = 0.05
+# Вечер среды — «вчера» для часов на четверг, 13:00 (`THURSDAY_AFTERNOON`).
+WEDNESDAY_NIGHT = datetime(2026, 9, 16, 21, 40, tzinfo=ZoneInfo(OWNER_TIMEZONE))
+
+
+@dataclass(frozen=True, slots=True)
+class Said:
+    """Сообщение пачки в тесте: номер в Telegram, текст или голос, кто писал."""
+
+    number: int
+    text: str = ""
+    sender: str | None = None
+    voice: bytes | None = None
+    owner: bool = False
+    at: datetime | None = None
+
+
+CAPTION = Said(10, "напомни в пятницу")
+RENATA = Said(11, "Во сколько завтра встреча?", sender="Рената", at=WEDNESDAY_NIGHT)
+MINE = Said(12, "Скажу утром", sender="Тим", owner=True, at=WEDNESDAY_NIGHT + timedelta(minutes=2))
+ANYA = Said(13, "И мне скажите", sender="Аня", at=WEDNESDAY_NIGHT + timedelta(minutes=5))
+CHAT = (CAPTION, RENATA, MINE, ANYA)
+CHAT_TEXT = chr(10).join(
+    [
+        "Переписка (сообщений: 3):",
+        "вчера 21:40 Рената: Во сколько завтра встреча?",
+        "вчера 21:42 Владелец: Скажу утром",
+        "вчера 21:45 Аня: И мне скажите",
+        "Подпись владельца: напомни в пятницу",
+    ]
+)
+# Голова переписки — последнее пересланное, строка «m<номер>» (§18.3).
+HEAD = "m13"
+ERRAND = "ответить Ренате и Ане, во сколько встреча"
+FROM_CHAT = f"Из переписки записал: {ERRAND}"
+
+
+def conversation_service(
+    analyst: FakeAnalyst,
+    *,
+    messages: FakeMessages | None = None,
+    understandings: FakeUnderstandings | None = None,
+    transcriber: FakeTranscriber | None = None,
+    names: FakeNames | None = None,
+    questions: FakeQuestions | None = None,
+    batches: Batches[Pending] | None = None,
+) -> tuple[TaskService, FakeMessages, FakeUnderstandings]:
+    """Сервис с пачкой: окно `WINDOW`, у каждого сообщения своя строка в базе."""
+    record_message = messages or FakeMessages(numbered=True)
+    recorder = understandings or FakeUnderstandings()
+    service = TaskService(
+        settings=SETTINGS,
+        record_message=record_message,
+        record_understanding=recorder,
+        analyst=analyst,
+        transcriber=transcriber or FakeTranscriber(),
+        planner=FakePlanner(),
+        clock=lambda: THURSDAY_AFTERNOON,
+        open_question=questions,
+        names=names,
+        batches=batches or Batches(window=WINDOW, limit=1.0),
+    )
+    return service, record_message, recorder
+
+
+async def deliver(service: TaskService, said: Said) -> RecordOutcome:
+    """Одно сообщение — так, как его отдаёт сервису обработчик."""
+    if said.voice is None:
+        return await service.record_from_message(
+            chat_id=42,
+            telegram_message_id=said.number,
+            text=said.text,
+            forwarded_from=said.sender,
+            sent_at=said.at,
+            from_owner=said.owner,
+        )
+    sound = said.voice
+
+    async def load() -> bytes:
+        return sound
+
+    return await service.record_from_voice(
+        chat_id=42,
+        telegram_message_id=said.number,
+        kind="voice",
+        file_id=f"voice-{said.number}",
+        duration=6,
+        load_audio=load,
+        forwarded_from=said.sender,
+        sent_at=said.at,
+        from_owner=said.owner,
+    )
+
+
+async def send(service: TaskService, *said: Said) -> list[str]:
+    """Сообщения разом, как их присылает Telegram; ответы — в порядке `said`."""
+    outcomes = await asyncio.gather(*(deliver(service, item) for item in said))
+    return [outcome.message for outcome in outcomes]
+
+
+def errand(**fields: Any) -> FakeAnalyst:
+    """Модель нашла в переписке дело владельца; одно сообщение тест не разбирает."""
+    base: dict[str, Any] = {"title": ERRAND}
+    return FakeAnalyst(
+        NotUnderstood(reason="одно сообщение тест не ждал"),
+        conversation=make_conversation_understanding(**{**base, **fields}),
+    )
+
+
+def record_of(understandings: FakeUnderstandings, message_id: str) -> Any:
+    """Запись разбора по строке сообщения: у каждой строки она одна."""
+    [call] = [call for call in understandings.calls if call["message_id"] == message_id]
+    return call
+
+
+async def test_forwarded_messages_get_one_reply() -> None:
+    """Подпись и три пересланных — один вызов модели и один ответ (§18.1)."""
+    analyst = errand()
+    service, _, _ = conversation_service(analyst)
+
+    replies = await send(service, *CHAT)
+
+    assert replies == ["", "", "", FROM_CHAT]
+    assert analyst.calls == []
+    assert len(analyst.conversations) == 1
+
+
+async def test_caption_is_the_last_line_of_the_conversation() -> None:
+    """Строки «время имя: текст» от старых к новым, своё в переписке — «Владелец»,
+    подпись — последней строкой и без своего ответа (§18.2)."""
+    analyst = errand()
+    service, _, _ = conversation_service(analyst)
+
+    replies = await send(service, *CHAT)
+
+    assert analyst.conversations == [CHAT_TEXT]
+    assert replies[0] == ""
+
+
+async def test_conversation_follows_message_numbers_not_arrival() -> None:
+    """Порядок записи в базу плавает; порядок строк — номера сообщений (§18.2)."""
+    analyst = errand()
+    service, _, understandings = conversation_service(analyst)
+
+    replies = await send(service, ANYA, MINE, CAPTION, RENATA)
+
+    assert analyst.conversations == [CHAT_TEXT]
+    assert replies == [FROM_CHAT, "", "", ""]
+    assert understandings.calls[0]["message_id"] == HEAD
+
+
+@pytest.mark.parametrize("said", [Said(10, "купить лампочку"), RENATA], ids=["own", "forwarded"])
+async def test_single_message_is_understood_as_before(said: Said) -> None:
+    """Одно сообщение — своё или пересланное без подписи — как до этапа (§18.1)."""
+    analyst = FakeAnalyst(make_understanding())
+    service, _, understandings = conversation_service(analyst)
+
+    [reply] = await send(service, said)
+
+    assert analyst.calls == [(said.text, said.sender, None)]
+    assert analyst.conversations == []
+    assert reply == "Записал: купить лампочку"
+    assert understandings.calls[0]["message_id"] == f"m{said.number}"
+
+
+async def test_own_messages_without_forwarded_are_understood_one_by_one() -> None:
+    """Пачка без пересланного — не переписка: у каждого сообщения свой ответ."""
+    analyst = FakeAnalyst(make_understanding())
+    service, _, _ = conversation_service(analyst)
+
+    replies = await send(service, Said(10, "купить лампочку"), Said(11, "позвонить маме"))
+
+    assert sorted(call[0] for call in analyst.calls) == ["купить лампочку", "позвонить маме"]
+    assert analyst.conversations == []
+    assert replies == ["Записал: купить лампочку"] * 2
+
+
+async def test_messages_after_a_pause_are_understood_apart() -> None:
+    """Пауза дольше окна — две пачки по одному сообщению (§18.1)."""
+    analyst = FakeAnalyst(make_understanding())
+    service, _, _ = conversation_service(analyst)
+
+    async def later() -> RecordOutcome:
+        await asyncio.sleep(WINDOW * 4)
+        return await deliver(service, ANYA)
+
+    first, second = await asyncio.gather(deliver(service, RENATA), later())
+
+    assert [call[1] for call in analyst.calls] == ["Рената", "Аня"]
+    assert analyst.conversations == []
+    assert first.message == second.message == "Записал: купить лампочку"
+
+
+async def test_photo_beside_the_forwarded_goes_its_own_way() -> None:
+    """Снимок в пачку не встаёт: пересланное рядом с ним — одно, как раньше (§18.1)."""
+    analyst = FakeAnalyst(
+        make_understanding(), photo=make_photo_understanding(title="встреча с Ренатой")
+    )
+    service, _, _ = conversation_service(analyst)
+
+    photo, forwarded = await asyncio.gather(
+        service.record_from_photo(
+            chat_id=42,
+            telegram_message_id=12,
+            file_id="photo-1",
+            media_type="image/jpeg",
+            caption="",
+            load_image=load_image,
+        ),
+        deliver(service, RENATA),
+    )
+
+    assert len(analyst.photos) == 1
+    assert analyst.calls == [(RENATA.text, "Рената", None)]
+    assert analyst.conversations == []
+    assert photo.message == "Записал: встреча с Ренатой"
+    assert forwarded.message == "Записал: купить лампочку"
+
+
+class Watched(Batches[Pending]):
+    """Пачка, которая на входе смотрит, записано ли сообщение в базу."""
+
+    def __init__(self, messages: FakeMessages) -> None:
+        super().__init__(window=WINDOW, limit=1.0)
+        self.messages = messages
+        self.recorded: list[bool] = []
+
+    async def join(self, chat_id: int, item: Pending) -> Closed[Pending]:
+        numbers = [call["telegram_message_id"] for call in self.messages.calls]
+        self.recorded.append(item.telegram_message_id in numbers)
+        return await super().join(chat_id, item)
+
+
+async def test_every_message_is_recorded_before_it_waits_for_the_batch() -> None:
+    """Инвариант 5: сообщение в базе раньше, чем встаёт в пачку (§18.1)."""
+    messages = FakeMessages(numbered=True)
+    batches = Watched(messages)
+    service, _, _ = conversation_service(errand(), messages=messages, batches=batches)
+
+    await send(service, *CHAT)
+
+    assert batches.recorded == [True] * 4
+
+
+async def test_repeated_head_answers_from_the_database() -> None:
+    """Повтор обновления головы — сохранённый ответ без модели (§18.1)."""
+    analyst = errand()
+    messages = FakeMessages(numbered=True, replies={13: FROM_CHAT})
+    service, _, understandings = conversation_service(analyst, messages=messages)
+
+    [reply] = await send(service, ANYA)
+
+    assert reply == FROM_CHAT
+    assert (analyst.calls, analyst.conversations, understandings.calls) == ([], [], [])
+
+
+async def test_conversation_task_lies_on_the_head() -> None:
+    """Разбор, ответ, модель с токенами и задача — на последнем пересланном (§18.3)."""
+    service, _, understandings = conversation_service(errand())
+
+    await send(service, *CHAT)
+
+    [call] = understandings.calls
+    assert call["message_id"] == HEAD
+    task = call["task"]
+    assert isinstance(task, dict)
+    assert task["title"] == ERRAND
+    assert call["reply"] == FROM_CHAT
+    assert (call["ai_model"], call["ai_input_tokens"], call["ai_output_tokens"]) == (
+        "claude-opus-5",
+        2400,
+        380,
+    )
+    analysis = call["analysis"]
+    assert isinstance(analysis, dict)
+    assert analysis["more_tasks"] == []
+    assert call["transcript"] is None
+
+
+async def test_more_errands_are_named_and_not_recorded() -> None:
+    """Остальные дела — вторым абзацем, задача одна (§18.4)."""
+    analyst = errand(more_tasks=["купить хлеб", "позвонить маме"])
+    service, _, understandings = conversation_service(analyst)
+
+    replies = await send(service, *CHAT)
+
+    assert replies[-1].split(chr(10) * 2) == [
+        FROM_CHAT,
+        "В переписке ещё: «купить хлеб», «позвонить маме». "
+        "Нужны — напишите или надиктуйте отдельно.",
+    ]
+    assert [call["task"] is not None for call in understandings.calls] == [True]
+
+
+@pytest.mark.parametrize(
+    ("kind", "reply"),
+    [("chat", texts.CONVERSATION_NO_ERRAND), ("about_me", texts.CONVERSATION_ABOUT_ME)],
+)
+async def test_conversation_without_an_errand_records_no_task(kind: str, reply: str) -> None:
+    """Дел нет — одна фраза: без задачи, без подсказки и без памяти (§18.4)."""
+    analyst = errand(
+        kind=kind,
+        more_tasks=["купить хлеб"],
+        facts=[FactItem(category="family", text="Сына зовут Миша")],
+    )
+    service, _, understandings = conversation_service(analyst)
+
+    replies = await send(service, *CHAT)
+
+    assert replies == ["", "", "", reply]
+    call = record_of(understandings, HEAD)
+    assert (call["task"], call["facts"], call["reply"]) == (None, [], reply)
+    assert call["analysis"]["kind"] == kind
+    assert call["analysis"]["facts"] == []
+
+
+async def test_conversation_never_edits_or_remembers(caplog: pytest.LogCaptureFixture) -> None:
+    """Указание боту в переписке — данные (инвариант 3): правка и память отброшены."""
+    analyst = errand(
+        edit=make_edit(action="done", task=1),
+        facts=[FactItem(category="family", text="Сына зовут Миша")],
+    )
+    service, _, understandings = conversation_service(analyst)
+
+    with caplog.at_level(logging.INFO, logger="solomon.services.tasks"):
+        replies = await send(service, *CHAT)
+
+    call = record_of(understandings, HEAD)
+    assert (call["edit"], call["facts"]) == (None, [])
+    assert (call["analysis"]["edit"], call["analysis"]["facts"]) == (None, [])
+    assert call["task"]["title"] == ERRAND
+    assert replies[-1] == FROM_CHAT
+    assert f"У переписки {HEAD} отброшены: edit, facts" in caplog.messages
+
+
+async def test_refused_conversation_is_recorded_as_is_with_names() -> None:
+    """Отказ модели — одна задача «как есть»: собеседники и подпись (§18.4)."""
+    analyst = FakeAnalyst(NotUnderstood(reason="одно сообщение тест не ждал"))
+    service, _, understandings = conversation_service(analyst)
+
+    replies = await send(service, *CHAT)
+
+    title = "Переписка: Рената, Аня — напомни в пятницу"
+    assert replies == ["", "", "", f"Записал как есть: «{title}». Разобрать сейчас не смог."]
+    call = record_of(understandings, HEAD)
+    assert call["task"]["title"] == title
+    assert call["analysis"] is None
+
+
+async def test_unheard_conversation_asks_again_without_the_model() -> None:
+    """Голосовые не расслышаны, текста нет — модель не зовётся, задачи нет (§18.4)."""
+    analyst = errand()
+    transcriber = FakeTranscriber(NotTranscribed(reason="empty transcript"))
+    service, _, understandings = conversation_service(analyst, transcriber=transcriber)
+
+    replies = await send(service, replace(RENATA, voice=b"r"), replace(ANYA, voice=b"a"))
+
+    assert replies == ["", texts.CONVERSATION_NOT_HEARD]
+    assert analyst.conversations == []
+    call = record_of(understandings, HEAD)
+    assert (call["task"], call["analysis"], call["reply"]) == (
+        None,
+        None,
+        texts.CONVERSATION_NOT_HEARD,
+    )
+    assert len(understandings.calls) == 1
+
+
+async def test_unheard_voices_with_a_caption_still_go_to_the_model() -> None:
+    """Подпись — тоже текст: модель зовётся, голос помечен «не расслышал» (§18.2)."""
+    analyst = errand()
+    transcriber = FakeTranscriber(NotTranscribed(reason="empty transcript"))
+    service, _, _ = conversation_service(analyst, transcriber=transcriber)
+
+    replies = await send(service, CAPTION, replace(RENATA, voice=b"r"))
+
+    assert analyst.conversations == [
+        chr(10).join(
+            [
+                "Переписка (сообщений: 1):",
+                "вчера 21:40 Рената: [голосовое, не расслышал]",
+                "Подпись владельца: напомни в пятницу",
+            ]
+        )
+    ]
+    assert replies == ["", FROM_CHAT]
+
+
+async def test_voice_transcripts_lie_in_their_messages() -> None:
+    """Расшифровки — в строки своих сообщений; у головы — вместе с разбором (§18.3)."""
+    transcriber = FakeTranscriber(
+        heard={
+            b"r": Transcript(text="Во сколько завтра встреча?", confidence=0.91),
+            b"a": Transcript(text="И мне скажите", confidence=0.88),
+        }
+    )
+    analyst = errand()
+    service, _, understandings = conversation_service(analyst, transcriber=transcriber)
+
+    replies = await send(service, CAPTION, replace(RENATA, voice=b"r"), replace(ANYA, voice=b"a"))
+
+    assert analyst.conversations == [
+        chr(10).join(
+            [
+                "Переписка (сообщений: 2):",
+                "вчера 21:40 Рената: [голосовое] Во сколько завтра встреча?",
+                "вчера 21:45 Аня: [голосовое] И мне скажите",
+                "Подпись владельца: напомни в пятницу",
+            ]
+        )
+    ]
+    other = record_of(understandings, "m11")
+    assert (other["transcript"], other["transcript_confidence"]) == (
+        "Во сколько завтра встреча?",
+        0.91,
+    )
+    assert (other["reply"], other["analysis"], other["task"]) == (None, None, None)
+    head = record_of(understandings, HEAD)
+    assert (head["transcript"], head["transcript_confidence"]) == ("И мне скажите", 0.88)
+    assert head["task"]["title"] == ERRAND
+    assert replies == ["", "", FROM_CHAT]
+
+
+async def test_only_the_last_thirty_voices_are_heard() -> None:
+    """Пересланных больше 30 — старые голосовые не распознаются (§18.2)."""
+    transcriber = FakeTranscriber()
+    voices = [
+        Said(number, sender="Рената", voice=bytes([number]), at=WEDNESDAY_NIGHT)
+        for number in range(1, 33)
+    ]
+    service, _, _ = conversation_service(errand(), transcriber=transcriber)
+
+    await send(service, *voices)
+
+    assert sorted(transcriber.calls) == [bytes([number]) for number in range(3, 33)]
+
+
+async def test_voices_of_a_conversation_read_the_names_once() -> None:
+    """Имена для подсказок читаются один раз на всю переписку (§9.5)."""
+    transcriber = FakeTranscriber()
+    names = FakeNames(memory=OWNER_MEMORY, people=OWNER_PEOPLE)
+    service, _, _ = conversation_service(errand(), transcriber=transcriber, names=names)
+
+    await send(service, replace(RENATA, voice=b"r"), replace(ANYA, voice=b"a"))
+
+    assert sorted(names.calls) == [("memory", NAME_FACTS_LIMIT), ("people", NAME_TASKS_LIMIT)]
+    assert transcriber.names == [("Юлай", "Volkswagen Polo", "Анна Петровна")] * 2
+
+
+async def test_conversation_log_has_numbers_and_no_texts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Журнал переписки — числа: сообщений, переслано, подпись, голоса, мс, голова."""
+    service, _, _ = conversation_service(errand())
+
+    with caplog.at_level(logging.INFO, logger="solomon"):
+        await send(service, *CHAT)
+
+    [line] = [message for message in caplog.messages if message.startswith("Переписка:")]
+    prefix, rest = line.split("собрана за ")
+    assert prefix == "Переписка: сообщений 4, переслано 3, подпись да, голосовых 0, "
+    milliseconds, head = rest.split(" мс, ")
+    assert milliseconds.isdigit()
+    assert head == f"голова {HEAD}"
+    for said in CHAT:
+        assert said.text not in caplog.text
+    assert ERRAND not in caplog.text
+
+
+async def test_conversation_answering_the_question_amends_the_task() -> None:
+    """Ответ на открытый вопрос (§10.2) — «Понял: …», как у одного сообщения."""
+    reader = FakeQuestions(ASKED)
+    understandings = FakeUnderstandings(questions=reader, clock=lambda: THURSDAY_AFTERNOON)
+    analyst = errand(
+        title=ASKED.title,
+        answers_question=True,
+        due_at=FRIDAY_DUE,
+        due_precision="day",
+        more_tasks=["купить хлеб"],
+    )
+    service, _, _ = conversation_service(analyst, understandings=understandings, questions=reader)
+
+    replies = await send(service, *CHAT)
+
+    assert analyst.questions == [ASKED]
+    head, hint = replies[-1].split(chr(10) * 2)
+    assert head.startswith("Понял: отправить расчёт клиенту. Срок: пятница, 18 сентября")
+    assert hint.startswith("В переписке ещё: «купить хлеб».")
+    call = record_of(understandings, HEAD)
+    assert call["task"] is None
+    assert call["amend"]["task_id"] == ASKED.task_id
+    assert reader.asked is None
+
+
+async def test_conversation_question_follows_the_record() -> None:
+    """С вопросом (§10.1): «Из переписки записал: <суть>. <вопрос>»."""
+    service, _, understandings = conversation_service(errand(question="К какому сроку?"))
+
+    replies = await send(service, *CHAT)
+
+    assert replies[-1] == f"{FROM_CHAT}. К какому сроку?"
+    assert record_of(understandings, HEAD)["task"]["open_question"] == "К какому сроку?"

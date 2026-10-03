@@ -194,12 +194,26 @@ class RecordingSession(BaseSession):
 
 
 class FakeMessages:
-    """Первый шаг приёма: вместо базы — список того, что в неё просили записать."""
+    """Первый шаг приёма: вместо базы — список того, что в неё просили записать.
 
-    def __init__(self, message: SavedMessage | None = None, broken: bool = False) -> None:
+    `numbered` — у каждого сообщения своя строка: id «m<номер в Telegram>»,
+    сохранённый ответ — из `replies` по номеру. Так тест переписки различает
+    голову и остальные сообщения пачки (`techspec/18-forwarded.md` §18.3).
+    """
+
+    def __init__(
+        self,
+        message: SavedMessage | None = None,
+        broken: bool = False,
+        *,
+        numbered: bool = False,
+        replies: Mapping[int, str] | None = None,
+    ) -> None:
         self.calls: list[dict[str, object]] = []
         self.message = message or SavedMessage(id="9a71", reply=None)
         self.broken = broken
+        self.numbered = numbered
+        self.replies = dict(replies or {})
 
     async def __call__(
         self,
@@ -227,6 +241,10 @@ class FakeMessages:
                 "forwarded_from": forwarded_from,
             }
         )
+        if self.numbered:
+            return SavedMessage(
+                id=f"m{telegram_message_id}", reply=self.replies.get(telegram_message_id)
+            )
         return self.message
 
 
@@ -266,7 +284,7 @@ class FakeUnderstandings:
         ai_model: str | None,
         ai_input_tokens: int | None,
         ai_output_tokens: int | None,
-        reply: str,
+        reply: str | None,
         task: Mapping[str, Any] | None,
         reminders: Sequence[Mapping[str, Any]],
         facts: Sequence[Mapping[str, Any]],
@@ -769,10 +787,17 @@ class FakeTranscriber:
     """Вместо Deepgram — заранее решённый результат и список того, что прислали.
 
     `names` — имена каждого запроса: что ушло бы подсказками (§9.5).
+    `heard` — свой результат на каждый файл, по его байтам: голосовые одной
+    переписки слышатся по-разному (`techspec/18-forwarded.md` §18.2).
     """
 
-    def __init__(self, result: TranscriptionResult | None = None) -> None:
+    def __init__(
+        self,
+        result: TranscriptionResult | None = None,
+        heard: Mapping[bytes, TranscriptionResult] | None = None,
+    ) -> None:
         self.result: TranscriptionResult = result or Transcript(text=SPOKEN, confidence=0.93)
+        self.heard = dict(heard or {})
         self.calls: list[bytes] = []
         self.names: list[tuple[str, ...]] = []
 
@@ -784,7 +809,7 @@ class FakeTranscriber:
         # задаче нужно несколько ходов цикла событий. Пауза короче ~16 мс на
         # Windows попадает под разрешение часов цикла и ведёт себя как `sleep(0)`.
         await asyncio.sleep(0.05)
-        return self.result
+        return self.heard.get(audio, self.result)
 
 
 class FakeNames:
