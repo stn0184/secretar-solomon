@@ -144,7 +144,7 @@
 - [x] Приложение (`lib/tasks.ts`, `lib/format.ts`): точность — пять
   значений; `formatDue` с частью; часть остаётся, пока в форме не
   тронуты день и час; подсказка по §21.4.
-- [ ] Тесты без сети — по пунктам «Приёмки»: `test_parts.py`,
+- [x] Тесты без сети — по пунктам «Приёмки»: `test_parts.py`,
   `test_understanding.py`, `test_reminders.py`, `test_morning.py`,
   `test_edits.py`, `test_tasks_service.py`, `test_chat_edit_service.py`,
   `format.test.ts`, `tasks.test.ts`.

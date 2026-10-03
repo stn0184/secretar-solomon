@@ -45,6 +45,7 @@ from solomon.services.understanding import (
     ANSWER_RULES,
     CONVERSATION_DUPLICATE_RULE,
     CONVERSATION_RULES,
+    EDIT_RULES,
     MAX_TOKENS,
     MODEL,
     MORE_TASKS_LIMIT,
@@ -854,6 +855,27 @@ def test_time_in_another_zone_moves_into_the_owners() -> None:
     for phrase in ("«в 18 мск»", "«18 по Москве»", "UTC+03:00", "в пояс владельца"):
         assert phrase in rules, phrase
     assert "при UTC+05:00 «18 мск» — 20:00" in rules
+
+
+def test_time_rules_name_the_part_of_day_instead_of_an_hour() -> None:
+    """§21.5: часть без часа — частью и с её началом; с часом и у повтора — час."""
+    rules = flat(RULES)
+
+    for phrase in (
+        "«утром» и «с утра», «днём», «вечером»",
+        "due_precision = morning, afternoon, evening",
+        "08:00, 12:00, 18:00",
+        "День назван — этот день; не назван — сегодня, если часть ещё не кончилась",
+        "(утро — до 12:00, день — до 18:00, вечер — до полуночи), иначе завтра",
+        "часть с часом («вечером в 7») — этот час, due_precision = time",
+        "у повторяющейся задачи — час: «утром» — 09:00, «днём» — 14:00, «вечером» — 19:00",
+        "«в обед», «до обеда», «ночью», «после работы» — не часть дня",
+    ):
+        assert phrase in rules, phrase
+    # Прежнее правило «утром — 09:00» для разовой задачи ушло.
+    assert "утром — 09:00, днём — 14:00, вечером — 19:00, due_precision = time" not in rules
+    edit = flat(EDIT_RULES)
+    assert "«перенеси на завтра утром» — часть дня, «на вторник» — день, «на 11» — час" in edit
 
 
 def test_no_recent_talk_means_no_block() -> None:

@@ -313,6 +313,54 @@ async def test_due_with_time_is_retold_with_the_hour() -> None:
     assert task["people"] == ["Аня"]
 
 
+async def test_part_of_day_is_retold_as_said_and_reminded_at_its_start() -> None:
+    """§21.4: срок — частью, без часа; «Напомню» — час, когда постучится бот."""
+    friday_morning = FRIDAY_EVENING.replace(hour=8, minute=0)
+    analyst = FakeAnalyst(
+        make_understanding(
+            title="встреча с Ренатой",
+            due_at=friday_morning,
+            due_precision="morning",
+            people=["Рената"],
+        )
+    )
+    planner = FakePlanner([Planned(stage="due", fire_at=friday_morning)])
+    service, _, understandings = build_service(analyst, planner=planner)
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="в пятницу утром встреча с Ренатой"
+    )
+
+    assert outcome.message == (
+        "Записал: встреча с Ренатой. Срок: пятница, 18 сентября, утром. "
+        "Напомню: 18 сентября в 08:00"
+    )
+    assert planner.calls[0]["due_at"] == friday_morning
+    assert planner.calls[0]["due_precision"] == "morning"
+    task = understandings.calls[0]["task"]
+    assert isinstance(task, dict)
+    assert task["due_precision"] == "morning"
+    assert str(task["due_at"]).startswith("2026-09-18T08:00")
+
+
+async def test_part_of_day_that_already_began_is_recorded_without_a_reminder() -> None:
+    """§21.3: начало части прошло — плана нет, и строки «Напомню» тоже."""
+    analyst = FakeAnalyst(
+        make_understanding(
+            title="позвонить маме",
+            due_at=FRIDAY_EVENING.replace(hour=18, minute=0),
+            due_precision="evening",
+        )
+    )
+    service, _, _ = build_service(analyst, planner=FakePlanner([]))
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="вечером позвонить маме"
+    )
+
+    assert outcome.message == "Записал: позвонить маме. Срок: пятница, 18 сентября, вечером"
+
+
 async def test_idea_is_recorded_as_an_idea() -> None:
     analyst = FakeAnalyst(make_understanding(kind="idea", title="съездить осенью в Карелию"))
     service, _, understandings = build_service(analyst)
