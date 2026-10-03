@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import pytest
 from aiogram import Bot
+from aiogram.enums import MessageOriginType
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramEntityTooLarge,
@@ -14,7 +17,16 @@ from aiogram.exceptions import (
     TelegramServerError,
 )
 from aiogram.methods import GetFile
-from aiogram.types import Message, Update
+from aiogram.types import (
+    Chat,
+    Message,
+    MessageOriginChannel,
+    MessageOriginChat,
+    MessageOriginHiddenUser,
+    MessageOriginUser,
+    Update,
+    User,
+)
 from aiohttp import (
     ClientOSError,
     ClientPayloadError,
@@ -34,12 +46,15 @@ from solomon.handlers import (
     GET_FILE_TIMEOUT,
     PHOTO_LIMIT,
     Photo,
+    forwarded_from_owner,
     is_not_text,
     network_failure,
     photo_of,
     refused_image,
+    written_at,
 )
 from solomon.runner import build_dispatcher
+from solomon.services.batches import Batches
 from solomon.services.tasks import TaskService
 from solomon.services.transcription import NotTranscribed
 from solomon.services.understanding import ImageType, PhotoUnderstanding
@@ -56,6 +71,7 @@ from tests.conftest import (
     FakeTranscriber,
     FakeUnderstandings,
     RecordingSession,
+    make_conversation_understanding,
     make_document_update,
     make_forwarded_update,
     make_photo_understanding,
@@ -812,3 +828,185 @@ async def test_forwarded_message_is_an_errand_with_a_named_sender(
     assert session.texts == ["Записал: принять смету от Ани"]
     assert messages.calls[0]["text"] == "пришлю смету завтра"
     assert analyst.calls == [("пришлю смету завтра", "Аня", None)]
+
+
+# --- Переписка, пересланная разом (`techspec/18-forwarded.md` §18.1–18.2) --------
+
+# Когда Аня написала (вечер среды по поясу владельца) и когда владелец
+# переслал (утро четверга).
+WRITTEN = datetime(2026, 9, 16, 16, 40, tzinfo=UTC)
+FORWARDED = datetime(2026, 9, 17, 3, 0, tzinfo=UTC)
+# Откуда переслано — как это поле описывает aiogram у `Message`.
+Origin = MessageOriginUser | MessageOriginHiddenUser | MessageOriginChat | MessageOriginChannel
+
+
+def owner_message(origin: Origin | None, last_name: str | None = None) -> Message:
+    """Сообщение владельца «Тим» в его чате; `origin` — откуда переслано."""
+    return Message(
+        message_id=7,
+        date=FORWARDED,
+        chat=Chat(id=OWNER_ID, type="private"),
+        from_user=User(id=OWNER_ID, is_bot=False, first_name="Тим", last_name=last_name),
+        text="Скажу утром",
+        forward_origin=origin,
+    )
+
+
+def from_user(user_id: int, name: str = "Тим") -> MessageOriginUser:
+    return MessageOriginUser(
+        type=MessageOriginType.USER,
+        date=WRITTEN,
+        sender_user=User(id=user_id, is_bot=False, first_name=name),
+    )
+
+
+def hidden(name: str) -> MessageOriginHiddenUser:
+    return MessageOriginHiddenUser(
+        type=MessageOriginType.HIDDEN_USER, date=WRITTEN, sender_user_name=name
+    )
+
+
+def test_message_forwarded_from_the_owner_is_his_own() -> None:
+    """Отправитель — сам владелец: в переписке он «Владелец» (§18.2)."""
+    assert forwarded_from_owner(owner_message(from_user(OWNER_ID)))
+
+
+def test_hidden_owner_is_recognised_by_his_name() -> None:
+    """Скрыл себя настройками — узнаётся по имени в Telegram (§18.2)."""
+    assert forwarded_from_owner(owner_message(hidden("Тим Иванов"), last_name="Иванов"))
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        from_user(555, "Тим"),
+        hidden("Аня"),
+        MessageOriginChat(
+            type=MessageOriginType.CHAT,
+            date=WRITTEN,
+            sender_chat=Chat(id=-100, type="group", title="Тим"),
+        ),
+        MessageOriginChannel(
+            type=MessageOriginType.CHANNEL,
+            date=WRITTEN,
+            chat=Chat(id=-200, type="channel", title="Тим"),
+            message_id=3,
+        ),
+        None,
+    ],
+    ids=["namesake", "hidden", "chat", "channel", "own"],
+)
+def test_other_senders_are_not_the_owner(origin: Origin | None) -> None:
+    """Тёзка, скрытый собеседник, чат, канал и не пересланное — не «Владелец»."""
+    assert not forwarded_from_owner(owner_message(origin))
+
+
+def test_forwarded_message_keeps_the_time_it_was_written() -> None:
+    """Время строки — когда написано (`forward_origin.date`), а не когда переслано."""
+    assert written_at(owner_message(from_user(555, "Аня"))) == WRITTEN
+    assert written_at(owner_message(None)) == FORWARDED
+
+
+def conversation_tasks(
+    settings: Settings, transcriber: FakeTranscriber | None = None
+) -> tuple[TaskService, FakeAnalyst]:
+    """Приём с пачкой: окно — доли секунды, часы — утро четверга."""
+    analyst = FakeAnalyst(
+        make_understanding(), conversation=make_conversation_understanding(title="ответить Ане")
+    )
+    service = TaskService(
+        settings=settings,
+        record_message=FakeMessages(numbered=True),
+        record_understanding=FakeUnderstandings(),
+        analyst=analyst,
+        transcriber=transcriber or FakeTranscriber(),
+        planner=FakePlanner(),
+        clock=lambda: FORWARDED,
+        batches=Batches(window=0.05, limit=1.0),
+    )
+    return service, analyst
+
+
+async def test_forwarded_conversation_gets_one_reply(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    """Подпись и пересланные разом — один ответ; сервису — время строки и
+    «переслано от самого владельца» (§18.1–18.2)."""
+    service, analyst = conversation_tasks(settings)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await asyncio.gather(
+        dispatcher.feed_update(bot, make_update("напомни в пятницу", update_id=20)),
+        dispatcher.feed_update(
+            bot,
+            make_forwarded_update(
+                "Во сколько встреча?", sender="Аня", written=WRITTEN, update_id=21
+            ),
+        ),
+        dispatcher.feed_update(
+            bot,
+            make_forwarded_update(
+                "Скажу утром", sender="Тим", sender_id=OWNER_ID, written=WRITTEN, update_id=22
+            ),
+        ),
+    )
+
+    assert session.texts == ["Из переписки записал: ответить Ане"]
+    assert analyst.calls == []
+    assert analyst.conversations == [
+        chr(10).join(
+            [
+                "Переписка (сообщений: 2):",
+                "вчера 21:40 Аня: Во сколько встреча?",
+                "вчера 21:40 Владелец: Скажу утром",
+                "Подпись владельца: напомни в пятницу",
+            ]
+        )
+    ]
+
+
+async def test_voice_in_a_conversation_sends_no_reply_of_its_own(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    """Голосовое переписки не голова — его обработчик ничего не отправляет (§18.1)."""
+    service, analyst = conversation_tasks(settings)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await asyncio.gather(
+        dispatcher.feed_update(bot, make_voice_update(update_id=30, sender="Аня", written=WRITTEN)),
+        dispatcher.feed_update(
+            bot,
+            make_forwarded_update("Жду ответа", sender="Аня", written=WRITTEN, update_id=31),
+        ),
+    )
+
+    assert session.texts == ["Из переписки записал: ответить Ане"]
+    assert analyst.conversations == [
+        chr(10).join(
+            [
+                "Переписка (сообщений: 2):",
+                f"вчера 21:40 Аня: [голосовое] {SPOKEN}",
+                "вчера 21:40 Аня: Жду ответа",
+            ]
+        )
+    ]
+
+
+async def test_sticker_and_command_beside_a_forwarded_go_their_own_way(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    """Стикер и команда в пачку не встают: пересланное рядом — одно, как раньше (§18.1)."""
+    service, analyst = conversation_tasks(settings)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await asyncio.gather(
+        dispatcher.feed_update(bot, make_sticker_update(update_id=40)),
+        dispatcher.feed_update(bot, make_update("/help", update_id=41)),
+        dispatcher.feed_update(
+            bot, make_forwarded_update("Во сколько встреча?", sender="Аня", update_id=42)
+        ),
+    )
+
+    assert analyst.conversations == []
+    assert analyst.calls == [("Во сколько встреча?", "Аня", None)]
+    assert sorted(session.texts) == sorted([texts.NOT_TEXT, texts.HELP, "Записал: купить лампочку"])

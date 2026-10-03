@@ -900,14 +900,24 @@ def make_update(text: str, from_id: int = OWNER_ID, update_id: int = 1) -> Updat
 
 
 def make_forwarded_update(
-    text: str, sender: str = "Аня", from_id: int = OWNER_ID, update_id: int = 1
+    text: str,
+    sender: str = "Аня",
+    from_id: int = OWNER_ID,
+    update_id: int = 1,
+    *,
+    sender_id: int = 555,
+    written: datetime | None = None,
 ) -> Update:
-    """Пересланное владельцу сообщение с текстом: автор оригинала назван."""
+    """Пересланное владельцу сообщение с текстом: автор оригинала назван.
+
+    `sender_id` — id автора (`OWNER_ID` — переслано от самого владельца),
+    `written` — когда автор его написал (`forward_origin.date`).
+    """
     user = User(id=from_id, is_bot=False, first_name="Тим")
     origin = MessageOriginUser(
         type=MessageOriginType.USER,
-        date=datetime.now(UTC),
-        sender_user=User(id=555, is_bot=False, first_name=sender),
+        date=written or datetime.now(UTC),
+        sender_user=User(id=sender_id, is_bot=False, first_name=sender),
     )
     message = Message(
         message_id=update_id,
@@ -926,16 +936,18 @@ def make_voice_update(
     kind: SpeechKind = "voice",
     duration: int = 32,
     sender: str | None = None,
+    written: datetime | None = None,
 ) -> Update:
     """Голосовое или видео-кружок: текста нет, есть файл и длительность.
 
-    `sender` — сообщение переслано владельцу от этого человека.
+    `sender` — сообщение переслано владельцу от этого человека, `written` —
+    когда тот его записал.
     """
     user = User(id=from_id, is_bot=False, first_name="Тим")
     origin = (
         MessageOriginUser(
             type=MessageOriginType.USER,
-            date=datetime.now(UTC),
+            date=written or datetime.now(UTC),
             sender_user=User(id=555, is_bot=False, first_name=sender),
         )
         if sender

@@ -6,6 +6,7 @@ import logging
 from asyncio import sleep
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from io import BytesIO
 
 from aiogram import Bot, F, Router
@@ -243,6 +244,35 @@ def forwarded_sender(message: Message) -> str | None:
     return None
 
 
+def forwarded_from_owner(message: Message) -> bool:
+    """Переслал ли владелец своё же сообщение (`techspec/18-forwarded.md` §18.2).
+
+    В переписке такие строки идут под именем «Владелец»: его обещание —
+    `mine`, а не обещание собеседника. Отправитель — сам владелец, а если
+    скрыл себя настройками — совпадает имя в Telegram. До обработчика
+    доходит только владелец, поэтому сверка — с автором сообщения.
+    """
+    owner = message.from_user
+    origin = message.forward_origin
+    if owner is None:
+        return False
+    if isinstance(origin, MessageOriginUser):
+        return origin.sender_user.id == owner.id
+    if isinstance(origin, MessageOriginHiddenUser):
+        return origin.sender_user_name == owner.full_name
+    return False
+
+
+def written_at(message: Message) -> datetime:
+    """Когда сообщение написано: у пересланного — время оригинала (§18.2).
+
+    Без него «завтра» из вчерашней переписки встало бы на послезавтра.
+    """
+    if message.forward_origin is not None:
+        return message.forward_origin.date
+    return message.date
+
+
 # Скачивание файла из Telegram (`techspec/09-voice.md` §9.3,
 # `techspec/14-photo.md` §14.2). Связь сервера с Telegram временами рвётся
 # (журнал 2026-10-01): запрос повисает до таймаута или обрывается
@@ -346,6 +376,8 @@ async def handle_text(message: Message, tasks: TaskService | None) -> None:
     Пересланное сообщение с текстом — такой же текст: разбирается как
     поручение, а имя отправителя уходит в разбор отдельным полем. Решение
     принимает слой операций, обработчик только отправляет его ответ.
+    Пустой ответ — сообщение пересланной переписки, за которую отвечает
+    другое (`techspec/18-forwarded.md` §18.1): отправлять нечего.
     """
     if tasks is None:
         # Бота запустили без клиента базы — записывать некуда, и молчать о
@@ -360,8 +392,11 @@ async def handle_text(message: Message, tasks: TaskService | None) -> None:
         text=message.text or "",
         forwarded_from=forwarded_sender(message),
         swipe=swipe_of(message),
+        sent_at=written_at(message),
+        from_owner=forwarded_from_owner(message),
     )
-    await message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
+    if outcome.message:
+        await message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
 
 
 async def handle_speech(
@@ -374,7 +409,8 @@ async def handle_speech(
     на диск не попадают (`techspec/09-voice.md` §9.2, §9.3). Пока идёт
     распознавание и разбор, в чате висит «печатает…» — это дольше текста, и
     молчание пугает; статус живёт пять секунд, поэтому его повторяет
-    `ChatActionSender`.
+    `ChatActionSender`. Пустой ответ — голосовое пересланной переписки,
+    за которую отвечает другое сообщение (`techspec/18-forwarded.md` §18.1).
     """
     if tasks is None:
         logger.error("Голосовое некуда записать: бот собран без базы")
@@ -394,8 +430,11 @@ async def handle_speech(
             load_audio=load_audio,
             forwarded_from=forwarded_sender(message),
             swipe=swipe_of(message),
+            sent_at=written_at(message),
+            from_owner=forwarded_from_owner(message),
         )
-    await message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
+    if outcome.message:
+        await message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
 
 
 async def handle_done(callback: CallbackQuery, reminders: ReminderService | None) -> None:
