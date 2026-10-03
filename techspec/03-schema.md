@@ -92,7 +92,7 @@ null`.
 | `kind` | text, `check in ('task', 'idea', 'wish')`, `default 'task'` | задача, идея или желание: одна таблица, разные виды |
 | `status` | text, `check in ('active', 'done', 'cancelled')`, `default 'active'` | активна, выполнена или убрана (§12.3): убранную делать не надо, но она не выполнена и не удалена |
 | `due_at` | timestamptz, nullable | срок; пусто — срок не назван |
-| `due_precision` | text, `check in ('day', 'time')`, nullable | назван день или день и время |
+| `due_precision` | text, `check in ('day', 'time', 'morning', 'afternoon', 'evening')`, nullable | назван день, день и время или часть дня — утро, день, вечер (§21, миграция 020) |
 | `repeat` | jsonb, nullable | правило повтора `{every, interval, weekdays, month_day, month, time}` (§13.2); пусто — разовая задача |
 | `occurrence_at` | timestamptz, nullable | раз серии, на котором стоит задача (§13.2): от него, а не от срока, считается следующий; срок — момент этого раза, если его не переносили |
 | `priority` | text, `check in ('low', 'normal', 'high')`, `default 'normal'` | срочность по словам человека |
@@ -114,13 +114,21 @@ null`.
 (§3.8). Уже
 записанный срок база не пересчитывает.
 
+При части дня (`morning`, `afternoon`, `evening`, §21.1) в `due_at`
+лежит **начало части того дня в поясе владельца**: 08:00, 12:00 или
+18:00. Час ставит бот (`services/parts.py`), а не модель и не база:
+`record_understanding` пишет точность как пришла, ограничение
+`tasks_due_precision_check` пересоздано миграцией 020
+(`20261004100000_part_of_day.sql`). Задачи, записанные до неё, не
+пересчитываются (§21.2).
+
 Правило и раз держат три проверки таблицы (миграция 011,
 `20260929200000_repeat.sql`): `tasks_repeat_valid` — форма правила
 по `repeat_valid` (§3.5); `tasks_repeat_occurrence` — раз есть ровно у
 задачи с правилом; `tasks_repeat_needs_due` — правило только у задачи
 (`kind = 'task'`) со сроком. Каноническую форму — все шесть ключей, дни
 недели по порядку, неположенные поля `null`, `time` — час срока в поясе
-владельца (при точности `day` — `null`) — ставит `repeat_rule` (§3.5):
+владельца (при точности `day` и части дня — `null`, §21.6) — ставит `repeat_rule` (§3.5):
 его зовут `change_task` и `record_understanding`, `time` ни модель, ни
 приложение не шлют. Прямая правка под RLS проходит те же проверки.
 
@@ -488,12 +496,14 @@ timezone text, now timestamptz)` — правило §6.1 в одном мест
 Чистая: таблиц не читает, владельца не знает, «сейчас» и пояс — аргументы.
 Пусто — не `task`, нет срока или срок не позже `now`; точность `time` —
 `before` за час; день и пустая точность — `before` в 09:00 дня срока по
-поясу `timezone`; `before` попадает, только если `now < before < due`;
+поясу `timezone`; часть дня (миграция 020, §21.3) — `before` нет, только
+`due` в начале части; `before` попадает, только если `now < before < due`;
 `due` — всегда. Её зовут бот и ядро правки (`change_task` из
 `edit_task`), поэтому выдана и
 `service_role`, и `authenticated`; `anon` и `public` — `revoke`.
 Миграция 009 (`20260928160000_task_edit.sql`) — она же заводит
-`due_moved_at` (§3.3), функции выше и `owner_settings` (§3.8).
+`due_moved_at` (§3.3), функции выше и `owner_settings` (§3.8); миграция
+020 пересоздаёт `reminder_plan` с той же подписью.
 
 ### 3.6 Действия из Mini App
 
@@ -551,6 +561,17 @@ Mini App ходит в базу под ролью `authenticated` (§4.1), вл�
   записано), `schedule` отбрасывается, сверх того режет RLS
   (`security invoker`). Права — `authenticated` (его зовёт `edit_task`)
   и `service_role`; `anon` и `public` — `revoke`.
+
+  Ключ `due_precision` (миграция 020, §21.2) — точность нового срока:
+  только вместе с непустым `due_at`, значение `time` (то же, что без
+  ключа) или часть дня — `morning`, `afternoon`, `evening`. Вместе с
+  `due_date`, без `due_at`, с `due_at = null` или с другим значением —
+  исключение (`change_task: due_precision goes with due_at, not
+  due_date`, `… needs a due_at`, `… invalid due_precision`), правка не
+  проходит целиком. Ключ шлёт правка словом (`services/edits.py`), когда
+  новый срок — часть дня; приложение его не шлёт: части в форме нет
+  (§11.1). Та же минута с другой точностью — перенос: вечер и 18:00 со
+  временем не одно и то же.
 
   Ключ `repeat` (миграция 011, §13.5): объект — поставить или сменить
   правило: канон `repeat_rule` (§3.5) по сроку после правки, раз

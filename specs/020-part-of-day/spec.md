@@ -148,7 +148,7 @@
   `test_understanding.py`, `test_reminders.py`, `test_morning.py`,
   `test_edits.py`, `test_tasks_service.py`, `test_chat_edit_service.py`,
   `format.test.ts`, `tasks.test.ts`.
-- [ ] Документы — по разделу «Документы».
+- [x] Документы — по разделу «Документы».
 
 ## Приёмка
 
