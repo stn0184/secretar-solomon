@@ -7,7 +7,8 @@
 
 Окно и предел строк — константы, а не настройка (§20.5). Модуль
 импортирует только `texts.py`, `services/asks.py` (день и полночь — одни
-с вопросом о деле без срока) и строку дела из `db/morning.py`.
+с вопросом о деле без срока), `services/parts.py` (часть дня, §21.4) и
+строку дела из `db/morning.py`.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from datetime import date, datetime, time, timedelta, tzinfo
 
 from solomon import texts
 from solomon.db.morning import DayTask
-from solomon.services import asks
+from solomon.services import asks, parts
 
 # Окно по поясу владельца (§20.2): с 08:00 и до 12:00, не включая 12:00.
 # Бот не работал в 8:00 — план догоняет первым тиком, но к обеду это уже не
@@ -59,20 +60,34 @@ def day_bounds(now: datetime, timezone: tzinfo) -> DayBounds:
     )
 
 
-def plan_lines(tasks: Sequence[DayTask], timezone: tzinfo) -> list[str]:
-    """Строки плана (§20.3): со временем — по времени, затем дела на день.
+def _when(task: DayTask, timezone: tzinfo) -> str | None:
+    """Метка строки: час у срока со временем, слово у части дня; у дела на день — нет."""
+    if task.has_time:
+        return texts.format_time(task.due_at.astimezone(timezone))
+    if task.due_precision is not None and parts.is_part(task.due_precision):
+        return texts.part_label(task.due_precision)
+    return None
 
+
+def plan_lines(tasks: Sequence[DayTask], timezone: tzinfo) -> list[str]:
+    """Строки плана (§20.3): со временем и частью дня — по времени, затем дела на день.
+
+    Часть дня стоит среди дел со временем по своему началу — «Утром — …»
+    между 07:30 и 09:00 (§21.4); в одну минуту с часом — в порядке базы.
     Дела на день идут в порядке, в каком их отдала база, — порядке записи
     (§20.1). Время — в поясе владельца. Строк больше `LINE_LIMIT` — первые
     `LINE_LIMIT` и последней строкой, сколько не вошло.
     """
-    timed = sorted((task for task in tasks if task.has_time), key=lambda task: task.due_at)
-    lines = [
-        texts.morning_line(texts.format_time(task.due_at.astimezone(timezone)), task.title)
-        for task in timed
-    ]
+    marked = [(task, _when(task, timezone)) for task in tasks]
+    timed = sorted(
+        ((task, when) for task, when in marked if when is not None),
+        key=lambda pair: pair[0].due_at,
+    )
+    lines = [texts.morning_line(when, task.title) for task, when in timed]
     lines += [
-        texts.morning_line(texts.MORNING_ALL_DAY, task.title) for task in tasks if not task.has_time
+        texts.morning_line(texts.MORNING_ALL_DAY, task.title)
+        for task, when in marked
+        if when is None
     ]
     if len(lines) > LINE_LIMIT:
         return [*lines[:LINE_LIMIT], texts.morning_more(len(lines) - LINE_LIMIT)]

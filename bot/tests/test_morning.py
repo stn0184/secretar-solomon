@@ -296,6 +296,42 @@ def test_timed_tasks_go_first_and_by_time() -> None:
     ]
 
 
+def test_parts_of_day_stand_among_timed_tasks_by_their_start() -> None:
+    """«Утром — …» среди дел со временем по началу части; дела на день — последними (§21.4)."""
+    tasks = [
+        task("купить лампочку в коридор", at(18, 0), "day"),
+        task("позвонить маме", at(18, 0), "evening"),
+        task("встреча с Ренатой", at(8, 0), "morning"),
+        task("ужин с Анной", at(19, 0)),
+        task("забрать посылку", at(12, 0), "afternoon"),
+        task("зарядка", at(7, 30)),
+        task("встреча с Ольгой", at(9, 0)),
+    ]
+
+    assert morning.plan_lines(tasks, TZ) == [
+        "07:30 — зарядка",
+        "Утром — встреча с Ренатой",
+        "09:00 — встреча с Ольгой",
+        "Днём — забрать посылку",
+        "Вечером — позвонить маме",
+        "19:00 — ужин с Анной",
+        "В течение дня — купить лампочку в коридор",
+    ]
+
+
+def test_part_and_hour_of_one_minute_keep_the_order_of_the_base() -> None:
+    """Вечер и 18:00 начинаются в одну минуту — порядок тот, что отдала база (§20.4)."""
+    tasks = [
+        task("позвонить маме", at(18, 0), "evening"),
+        task("забрать сына", at(18, 0)),
+    ]
+
+    assert morning.plan_lines(tasks, TZ) == [
+        "Вечером — позвонить маме",
+        "18:00 — забрать сына",
+    ]
+
+
 def test_time_is_shown_in_owner_zone() -> None:
     """База отдаёт время в UTC; в строке — час владельца."""
     tasks = [task("встреча с Ольгой", datetime(2026, 10, 5, 4, 0, tzinfo=UTC))]

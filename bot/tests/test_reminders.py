@@ -1629,6 +1629,39 @@ async def test_reminder_of_the_same_minute_goes_after_the_plan() -> None:
     assert events == ["plan", "reminder"]
 
 
+async def test_morning_part_goes_in_the_plan_and_reminds_right_after_it() -> None:
+    """Дело на утро — и в плане, и напоминанием следом в том же тике (§21.3)."""
+    events: list[str] = []
+    meeting = DayTask(
+        task_id=MEETING_ID,
+        title="встреча с Ренатой",
+        due_at=PLAN_MORNING,
+        due_precision="morning",
+    )
+    ripe = [
+        make_due(
+            "due",
+            PLAN_MORNING,
+            task_id=MEETING_ID,
+            title="встреча с Ренатой",
+            due_at=PLAN_MORNING,
+            due_precision="morning",
+        )
+    ]
+    notifier = FakeNotifier(events=events)
+    service, _, _, _, announcer = build_planning(
+        day_tasks=FakeDayTasks([meeting]),
+        announcer=FakeAnnouncer(label="plan", events=events),
+        notifier=notifier,
+        due=FakeDue(ripe),
+    )
+
+    assert await service.tick(PLAN_MORNING) == 2
+    assert events == ["plan", "reminder"]
+    assert announcer.sent == ["Доброе утро! На сегодня:\nУтром — встреча с Ренатой"]
+    assert notifier.sent == [(MEETING_ID, "Напоминаю: встреча с Ренатой\nСрок: сегодня утром")]
+
+
 async def test_no_undated_question_in_the_plan_tick() -> None:
     """План ушёл в этом тике — вопрос о деле без срока ждёт (§20.2, §19.2)."""
     late = PLAN_MORNING.replace(hour=10, minute=30)
