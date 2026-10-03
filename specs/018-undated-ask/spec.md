@@ -1,6 +1,6 @@
 # 018. Вопрос о деле без срока
 
-**Статус:** запланировано
+**Статус:** в работе
 **Размер:** M
 **Зависит от:** ничего
 **Прототип:** не нужен — приложение не меняется, меняется чат
@@ -88,7 +88,7 @@
 
 ## Задачи
 
-- [ ] База (миграция `supabase/migrations/<время>_undated_ask.sql`,
+- [x] База (миграция `supabase/migrations/<время>_undated_ask.sql`,
   образец — `20260928160000_task_edit.sql`): ступень `ask` в проверке
   `reminders.stage`; `undated_to_ask` и `record_ask` по §19.4, только
   `service_role`. Тесты `supabase/tests/undated_ask.test.ts`: отбор (вид,
