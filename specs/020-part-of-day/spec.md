@@ -127,7 +127,7 @@
   разбора по §21.2 — у поручения и у правки, часть с повтором — `time`.
   Вызов — там, где ответ модели становится `Analysis`, во всех трёх
   путях (`services/understanding.py`).
-- [ ] Бот, модель (`services/understanding.py`): правила времени по
+- [x] Бот, модель (`services/understanding.py`): правила времени по
   §21.5, схема `due_precision` — пять значений у поручения и у правки;
   отпечаток промпта в `test_understanding.py`; пометка строки «вечером
   позвонить маме» в `fixtures/understanding.jsonl`.
