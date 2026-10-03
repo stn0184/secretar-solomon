@@ -199,6 +199,8 @@ class FakeMessages:
     `numbered` — у каждого сообщения своя строка: id «m<номер в Telegram>»,
     сохранённый ответ — из `replies` по номеру. Так тест переписки различает
     голову и остальные сообщения пачки (`techspec/18-forwarded.md` §18.3).
+    `received` — когда строка заведена, по номеру: от него считается граница
+    блока 6 (§17.3); номера нет — времени нет, как у ответа без поля.
     """
 
     def __init__(
@@ -208,12 +210,14 @@ class FakeMessages:
         *,
         numbered: bool = False,
         replies: Mapping[int, str] | None = None,
+        received: Mapping[int, datetime] | None = None,
     ) -> None:
         self.calls: list[dict[str, object]] = []
         self.message = message or SavedMessage(id="9a71", reply=None)
         self.broken = broken
         self.numbered = numbered
         self.replies = dict(replies or {})
+        self.received = dict(received or {})
 
     async def __call__(
         self,
@@ -243,7 +247,9 @@ class FakeMessages:
         )
         if self.numbered:
             return SavedMessage(
-                id=f"m{telegram_message_id}", reply=self.replies.get(telegram_message_id)
+                id=f"m{telegram_message_id}",
+                reply=self.replies.get(telegram_message_id),
+                received_at=self.received.get(telegram_message_id),
             )
         return self.message
 
@@ -500,8 +506,8 @@ class FakeAnalyst:
             if isinstance(conversation, ConversationUnderstanding)
             else conversation or NotUnderstood(reason="переписки тест не ждал")
         )
-        # Тексты переписок, с которыми звали модель (§18.2). Открытый вопрос и
-        # список задач ложатся в общие `questions` и `tasks`.
+        # Тексты переписок, с которыми звали модель (§18.2). Открытый вопрос,
+        # список задач и блок 6 ложатся в общие `questions`, `tasks` и `recents`.
         self.conversations: list[str] = []
 
     async def analyze(
@@ -548,10 +554,12 @@ class FakeAnalyst:
         *,
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
+        recent: str | None = None,
     ) -> ConversationVerdict:
         self.conversations.append(text)
         self.questions.append(open_question)
         self.tasks.append(None if tasks is None else list(tasks))
+        self.recents.append(recent)
         return self.conversation_verdict
 
 

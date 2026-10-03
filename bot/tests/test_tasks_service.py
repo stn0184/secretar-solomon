@@ -18,8 +18,9 @@ import pytest
 
 from solomon import texts
 from solomon.db.reminders import Planned
-from solomon.db.tasks import OpenQuestion, SavedMessage, SpeechKind, Task
+from solomon.db.tasks import OpenQuestion, RecentMessage, SavedMessage, SpeechKind, Task
 from solomon.services.batches import Batches, Closed
+from solomon.services.conversation import recent_block
 from solomon.services.names import forms
 from solomon.services.tasks import (
     NAME_FACTS_LIMIT,
@@ -48,6 +49,7 @@ from tests.conftest import (
     OWNER_TIMEZONE,
     SPOKEN,
     FakeAnalyst,
+    FakeEdits,
     FakeMessages,
     FakeNames,
     FakePlanner,
@@ -1984,8 +1986,10 @@ def conversation_service(
     names: FakeNames | None = None,
     questions: FakeQuestions | None = None,
     batches: Batches[Pending] | None = None,
+    edits: FakeEdits | None = None,
 ) -> tuple[TaskService, FakeMessages, FakeUnderstandings]:
-    """Сервис с пачкой: окно `WINDOW`, у каждого сообщения своя строка в базе."""
+    """Сервис с пачкой: окно `WINDOW`, у каждого сообщения своя строка в базе.
+    Без `edits` хранилища нет: ни списка для дубля, ни блока 6."""
     record_message = messages or FakeMessages(numbered=True)
     recorder = understandings or FakeUnderstandings()
     service = TaskService(
@@ -1999,6 +2003,7 @@ def conversation_service(
         open_question=questions,
         names=names,
         batches=batches or Batches(window=WINDOW, limit=1.0),
+        edit_store=edits,
     )
     return service, record_message, recorder
 
@@ -2252,6 +2257,109 @@ async def test_conversation_without_an_errand_records_no_task(kind: str, reply: 
     assert (call["task"], call["facts"], call["reply"]) == (None, [], reply)
     assert call["analysis"]["kind"] == kind
     assert call["analysis"]["facts"] == []
+
+
+# Догадка модели при неясной подписи (§18.4): что записать и когда — в поясе
+# владельца.
+GUESS = "Записать: сказать Ренате и Ане время встречи — сегодня в 20:00, это 18 по Москве?"
+
+
+async def test_unclear_caption_gets_the_models_guess_instead_of_no_errand() -> None:
+    """Подпись есть, а дело неясно (§18.4): вместо «дел не нашёл» — вопрос
+    модели с догадкой. Задачи нет; вопрос — ответ головы, его увидит блок 6,
+    и «да» запишет дело."""
+    analyst = errand(kind="chat", reply_hint=f"  {GUESS} ")
+    service, _, understandings = conversation_service(analyst)
+
+    replies = await send(service, *CHAT)
+
+    assert replies == ["", "", "", GUESS]
+    call = record_of(understandings, HEAD)
+    assert (call["task"], call["reply"]) == (None, GUESS)
+
+
+@pytest.mark.parametrize(
+    ("said", "kind", "hint", "reply"),
+    [
+        ((RENATA, MINE, ANYA), "chat", GUESS, texts.CONVERSATION_NO_ERRAND),
+        (CHAT, "chat", None, texts.CONVERSATION_NO_ERRAND),
+        (CHAT, "chat", "Записал встречу на 20:00.", texts.CONVERSATION_NO_ERRAND),
+        (CHAT, "about_me", GUESS, texts.CONVERSATION_ABOUT_ME),
+    ],
+    ids=["no-caption", "no-guess", "reports-action", "about-me"],
+)
+async def test_conversation_asks_only_with_a_caption_and_a_plain_question(
+    said: tuple[Said, ...], kind: str, hint: str | None, reply: str
+) -> None:
+    """Без подписи вопрос модели не уходит; пустой и о сделанном (инвариант 4)
+    — тоже, у переписки о владельце — своя фраза: на месте вопроса прежний ответ."""
+    analyst = errand(kind=kind, reply_hint=hint)
+    service, _, _ = conversation_service(analyst)
+
+    replies = await send(service, *said)
+
+    assert replies[-1] == reply
+
+
+# Прошлый час (§17.3): своё сообщение владельца и ответ бота на него.
+EARLIER = RecentMessage(
+    received_at=THURSDAY_AFTERNOON - timedelta(minutes=20),
+    kind="text",
+    text="встреча будет по московскому времени",
+    forwarded_from=None,
+    reply="Записать встречу задачей?",
+)
+
+
+async def test_conversation_sees_the_last_hour_before_its_first_message() -> None:
+    """Блок 6 у переписки (§18.2): тот же час, что у своего сообщения. Строки
+    пачки заводятся вперемешку, граница — самая ранняя: сама переписка в
+    блок не попадает."""
+    first = THURSDAY_AFTERNOON - timedelta(seconds=3)
+    received = {
+        10: first + timedelta(seconds=1),
+        11: first,
+        12: first + timedelta(seconds=2),
+        13: first + timedelta(seconds=1),
+    }
+    store = FakeEdits(recent=[EARLIER])
+    analyst = errand()
+    service, _, _ = conversation_service(
+        analyst, messages=FakeMessages(numbered=True, received=received), edits=store
+    )
+
+    await send(service, *CHAT)
+
+    assert store.talks == [(THURSDAY_AFTERNOON - timedelta(hours=1), first, 10)]
+    talk = recent_block([EARLIER], ZoneInfo(OWNER_TIMEZONE))
+    assert talk is not None
+    assert analyst.recents == [talk.text]
+
+
+async def test_conversation_without_times_reads_the_hour_up_to_now() -> None:
+    """Времени у строк нет — граница по часам бота."""
+    store = FakeEdits()
+    analyst = errand()
+    service, _, _ = conversation_service(analyst, edits=store)
+
+    await send(service, *CHAT)
+
+    assert store.talks == [(THURSDAY_AFTERNOON - timedelta(hours=1), THURSDAY_AFTERNOON, 10)]
+    assert analyst.recents == [None]
+
+
+async def test_conversation_without_a_store_or_a_read_has_no_recent_talk() -> None:
+    """Без хранилища блока 6 нет; база не ответила — переписка всё равно
+    разбирается, только без блока."""
+    broken = FakeEdits(recent=[EARLIER], broken={"recent_messages"})
+    for store in (None, broken):
+        analyst = errand()
+        service, _, _ = conversation_service(analyst, edits=store)
+
+        replies = await send(service, *CHAT)
+
+        assert analyst.recents == [None]
+        assert replies[-1] == FROM_CHAT
 
 
 async def test_conversation_never_edits_or_remembers(caplog: pytest.LogCaptureFixture) -> None:

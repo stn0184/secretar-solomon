@@ -301,6 +301,7 @@ class Analyst(Protocol):
         *,
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
+        recent: str | None = None,
     ) -> ConversationVerdict: ...
 
 
@@ -1156,13 +1157,14 @@ class TaskService:
         """
         saved = items[head].saved
         lines = [item.line for item in items]
+        caption = any(not line.forwarded for line in lines)
         # Журнал — только числа (§18.3): тексты переписки в него не попадают.
         logger.info(
             "Переписка: сообщений %s, переслано %s, подпись %s, голосовых %s, "
             "собрана за %s мс, голова %s",
             len(lines),
             sum(line.forwarded for line in lines),
-            "да" if any(not line.forwarded for line in lines) else "нет",
+            "да" if caption else "нет",
             sum(line.speech is not None for line in lines),
             round(seconds * 1000),
             saved.id,
@@ -1184,9 +1186,11 @@ class TaskService:
             )
 
         text = batches.conversation_text(lines, self._clock(), self._settings.owner_timezone)
-        asked, context = await asyncio.gather(self._open_question(), self._check_context())
+        asked, context, recent = await asyncio.gather(
+            self._open_question(), self._check_context(), self._conversation_recent(items)
+        )
         verdict = await self._analyst.analyze_conversation(
-            text, open_question=asked, tasks=context.tasks
+            text, open_question=asked, tasks=context.tasks, recent=recent
         )
         if not isinstance(verdict, ConversationAnalysis):
             # Отказ модели (§5.4): одна задача «как есть» — кто писал и подпись.
@@ -1209,7 +1213,7 @@ class TaskService:
         read = understanding.model_copy(update={"edit": None, "facts": []})
         try:
             decision = await self._conversation_decision(
-                read, asked, context, items[head].telegram_message_id
+                read, asked, context, items[head].telegram_message_id, caption=caption
             )
         except DatabaseError as error:
             logger.warning("Расписание не получено, разбор переписки не записан: %s", error)
@@ -1229,20 +1233,25 @@ class TaskService:
         asked: OpenQuestion | None,
         context: EditContext,
         telegram_message_id: int,
+        *,
+        caption: bool,
     ) -> Decision:
         """Ответ на переписку (§18.4): как у снимка — одно дело и подсказка.
 
         Дел нет — короткая фраза, без задачи и подсказки; разбор всё равно
-        записывается и снимает открытый вопрос (§10.3). Иначе обычные пути
-        разбора — ответ на вопрос, дубль, запись — и абзац «В переписке ещё»,
-        если что-то записано, найдено или дополнено.
+        записывается и снимает открытый вопрос (§10.3). С подписью вместо
+        фразы уходит вопрос модели с её догадкой, если он есть: подпись
+        была, а дело из неё не понять. Иначе обычные пути разбора — ответ на
+        вопрос, дубль, запись — и абзац «В переписке ещё», если что-то
+        записано, найдено или дополнено.
         """
         if (asked is None or not read.answers_question) and read.kind not in TASK_KINDS:
-            reply = (
-                texts.CONVERSATION_ABOUT_ME
-                if read.kind == "about_me"
-                else texts.CONVERSATION_NO_ERRAND
-            )
+            if read.kind == "about_me":
+                reply = texts.CONVERSATION_ABOUT_ME
+            elif caption:
+                reply = self._talk_reply(read.reply_hint, fallback=texts.CONVERSATION_NO_ERRAND)
+            else:
+                reply = texts.CONVERSATION_NO_ERRAND
             return Decision(reply=reply, task=None, reminders=[])
         decision = await self._decide(read, asked, self._clock(), context, telegram_message_id)
         if read.more_tasks and any(
@@ -1251,6 +1260,21 @@ class TaskService:
             more = texts.more_in_conversation(read.more_tasks)
             decision = replace(decision, reply=paragraphs(decision.reply, more))
         return decision
+
+    async def _conversation_recent(self, items: Sequence[Pending]) -> str | None:
+        """Блок 6 у переписки (§18.2): тот же час, что у своего сообщения.
+
+        Граница — первое сообщение пачки, чтобы сама переписка в блок не
+        попала; времени у строк нет — часы бота. Без хранилища блока нет.
+        """
+        store = self._edits
+        if store is None:
+            return None
+        before = min(
+            (item.saved.received_at for item in items if item.saved.received_at is not None),
+            default=self._clock(),
+        )
+        return await self._recent(store, self._clock() - edits.LAST_TASK_WINDOW, before)
 
     async def _hear_conversation(self, items: Sequence[Pending]) -> dict[int, TranscriptionResult]:
         """Голосовые переписки — параллельно, с одними подсказками имён (§18.2).
@@ -2328,17 +2352,18 @@ class TaskService:
         return texts.RECORDED_BY_KIND
 
     @staticmethod
-    def _talk_reply(hint: str | None) -> str:
+    def _talk_reply(hint: str | None, fallback: str = texts.NO_ERRAND) -> str:
         """Ответ разговора (§17.2): текст модели без пробелов по краям, не
-        длиннее предела. Пусто — прежний `NO_ERRAND`.
+        длиннее предела. Пусто — `fallback`: у своего сообщения прежний
+        `NO_ERRAND`, у переписки — своя фраза (§18.4).
 
         Разговор ничего не меняет: ответ, который сообщает о сделанном,
-        заменяется на `NO_ERRAND` (инвариант 4). В журнал — только длина.
+        заменяется на `fallback` (инвариант 4). В журнал — только длина.
         """
         reply = conversation.reply_text(hint)
         if reply is None:
-            return texts.NO_ERRAND
+            return fallback
         if conversation.reports_action(reply):
             logger.warning("Ответ разговора говорит о действии — заменён: знаков %s", len(reply))
-            return texts.NO_ERRAND
+            return fallback
         return reply
