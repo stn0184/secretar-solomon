@@ -45,6 +45,7 @@ from solomon import texts
 from solomon.config import Settings
 from solomon.db import facts as db_facts
 from solomon.db.rpc import DatabaseError
+from solomon.services import parts
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,10 @@ ImageType = Literal["image/jpeg", "image/png", "image/webp"]
 Kind = Literal["task", "idea", "wish", "chat", "about_me"]
 # Виды, которые заводят строку в `tasks`; разговор и сведение о себе — нет.
 TASK_KINDS: tuple[Kind, ...] = ("task", "idea", "wish")
+
+# Точность срока (`techspec/21-part-of-day.md` §21.2): день, час или часть
+# дня. Часы частей ставит бот (`services/parts.py`), модель называет часть.
+DuePrecision = Literal["day", "time", "morning", "afternoon", "evening"]
 
 # Откуда текст (`techspec/05-ai.md` §5.2, §9.4): `None` — набран; иначе
 # распознан с голоса, и модели говорится, каким было качество. Порог «low»
@@ -125,7 +130,7 @@ class TaskEdit(BaseModel):
     candidates: list[int]
     title: str | None
     due_at: datetime | None
-    due_precision: Literal["day", "time"] | None
+    due_precision: DuePrecision | None
     due_removed: bool
     repeat: Repeat | None
     repeat_removed: bool
@@ -144,7 +149,7 @@ class Understanding(BaseModel):
     kind: Kind
     title: str
     due_at: datetime | None
-    due_precision: Literal["day", "time"] | None
+    due_precision: DuePrecision | None
     repeat: Repeat | None
     priority: Literal["low", "normal", "high"]
     promise: Literal["mine", "to_me"] | None
@@ -832,6 +837,31 @@ def build_photo_content(image: bytes, media_type: ImageType, text: str) -> list[
     ]
 
 
+def settle_parts[U: Understanding](parsed: U, timezone: ZoneInfo) -> U:
+    """Часть дня в разборе (`techspec/21-part-of-day.md` §21.2).
+
+    Модель называет часть и день, час ставит бот: у поручения и у правки
+    (`edit`) в `due_at` ложится начало части того же дня по поясу владельца.
+    Часть вместе с повтором — срок со временем с моментом модели (§21.6):
+    у поручения повтор верхнего уровня, у правки — свой. Зовётся там, где
+    ответ модели становится разбором, во всех трёх путях — до плана
+    напоминаний и до записи. Остальные поля не трогаются.
+    """
+    due_at, precision = parts.settle(
+        parsed.due_at, parsed.due_precision, repeating=parsed.repeat is not None, timezone=timezone
+    )
+    update: dict[str, Any] = {"due_at": due_at, "due_precision": precision}
+    edit = parsed.edit
+    if edit is not None:
+        edit_due, edit_precision = parts.settle(
+            edit.due_at, edit.due_precision, repeating=edit.repeat is not None, timezone=timezone
+        )
+        update["edit"] = edit.model_copy(
+            update={"due_at": edit_due, "due_precision": edit_precision}
+        )
+    return parsed.model_copy(update=update)
+
+
 def trim_photo(parsed: PhotoUnderstanding) -> PhotoUnderstanding:
     """Пределы полей снимка (§14.3): `photo_text` — без пробелов по краям,
     пустой — `None`, не длиннее 500 знаков; `more_tasks` — без пустых,
@@ -1099,9 +1129,9 @@ class UnderstandingService:
         if isinstance(answer, NotUnderstood):
             return answer
 
-        parsed = answer.parsed_output
-        if parsed is None:
+        if answer.parsed_output is None:
             return self._not_understood("ответ не прошёл схему")
+        parsed = settle_parts(answer.parsed_output, self._settings.owner_timezone)
 
         logger.info(
             "Разобрано: kind=%s, needs_review=%s, вопрос=%s, ответ на вопрос=%s, "
@@ -1162,7 +1192,7 @@ class UnderstandingService:
         parsed = answer.parsed_output
         if parsed is None:
             return self._not_understood("ответ не прошёл схему")
-        trimmed = trim_photo(parsed)
+        trimmed = settle_parts(trim_photo(parsed), self._settings.owner_timezone)
 
         logger.info(
             "Снимок разобран: kind=%s, needs_review=%s, ответ на вопрос=%s, "
@@ -1224,7 +1254,7 @@ class UnderstandingService:
         parsed = answer.parsed_output
         if parsed is None:
             return self._not_understood("ответ не прошёл схему")
-        trimmed = trim_conversation(parsed)
+        trimmed = settle_parts(trim_conversation(parsed), self._settings.owner_timezone)
 
         logger.info(
             "Переписка разобрана: kind=%s, needs_review=%s, вопрос=%s, ответ на вопрос=%s, "

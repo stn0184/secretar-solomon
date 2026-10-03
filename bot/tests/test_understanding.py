@@ -966,7 +966,7 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 # меняет, — снимок и прочие ветки их не трогают.
 PROMPT_WITH_EMPTY_TASKS_SHA256 = "05eb8cec78045bc67ecc550935009a2f8c994a321276492f523d6351fbfbec6d"
 PROMPT_BARE_SHA256 = "4008e101033db345c0c86db215f22378c7f2dbc427d6d1afa879dc54d0fb6387"
-SCHEMA_SHA256 = "dce15f144f4ac6a8258e60c42b5ba869449f7a070b7f87a60f73035460e8e82c"
+SCHEMA_SHA256 = "8d4da00e45bc920202e0b39525a38ad985f1ac2229c02ed4fab6518cab5e4d68"
 
 # Не настоящая картинка: модели здесь нет, важно только, что байты дошли.
 IMAGE = b"\xff\xd8\xff\xe0 not a real jpeg"
@@ -1617,6 +1617,108 @@ async def test_conversation_call_asks_for_its_schema_with_the_text_limits(
         "messages": [{"role": "user", "content": CONVERSATION}],
         "timeout": 60.0,
     }
+
+
+# ------------------------------------------------------- часть дня (§21.2)
+
+FRIDAY_NINE = datetime(2026, 10, 9, 9, 0, tzinfo=TZ)
+FRIDAY_MORNING = datetime(2026, 10, 9, 8, 0, tzinfo=TZ)
+FRIDAY_EVENING = datetime(2026, 10, 9, 18, 0, tzinfo=TZ)
+DAILY = {
+    "every": "day",
+    "interval": 1,
+    "weekdays": [],
+    "month_day": None,
+    "month": None,
+}
+
+
+async def test_text_part_of_day_gets_the_start_of_the_part() -> None:
+    """Модель дала утро в 09:00 — в разбор ложится начало утра того же дня."""
+    answer = FakeAnswer(
+        parsed_output=make_understanding(due_at=FRIDAY_NINE, due_precision="morning")
+    )
+    service, _ = build_service(answer=answer)
+
+    verdict = await service.analyze("в пятницу утром встреча с Ренатой")
+
+    assert isinstance(verdict, Analysis)
+    assert verdict.understanding.due_at == FRIDAY_MORNING
+    assert verdict.understanding.due_precision == "morning"
+
+
+async def test_text_edit_part_of_day_gets_the_start_of_the_part() -> None:
+    """У правки часть приводится так же: вечер в 19:00 — 18:00."""
+    edit = model_edit(
+        task=1, due_at=datetime(2026, 10, 9, 19, 0, tzinfo=TZ), due_precision="evening"
+    )
+    answer = FakeAnswer(parsed_output=make_understanding(edit=edit))
+    service, _ = build_service(answer=answer)
+
+    verdict = await service.analyze("встречу перенеси на пятницу вечером")
+
+    assert isinstance(verdict, Analysis)
+    assert verdict.understanding.edit is not None
+    assert verdict.understanding.edit.due_at == FRIDAY_EVENING
+    assert verdict.understanding.edit.due_precision == "evening"
+
+
+async def test_text_part_of_day_with_a_repeat_becomes_a_time() -> None:
+    """Часть с повтором — ошибка модели: срок со временем с её моментом (§21.6)."""
+    answer = FakeAnswer(
+        parsed_output=make_understanding(due_at=FRIDAY_NINE, due_precision="morning", repeat=DAILY)
+    )
+    service, _ = build_service(answer=answer)
+
+    verdict = await service.analyze("каждое утро делать зарядку")
+
+    assert isinstance(verdict, Analysis)
+    assert verdict.understanding.due_at == FRIDAY_NINE
+    assert verdict.understanding.due_precision == "time"
+
+
+async def test_text_hour_and_day_stay_as_the_model_said() -> None:
+    answer = FakeAnswer(parsed_output=make_understanding(due_at=FRIDAY_NINE, due_precision="time"))
+    service, _ = build_service(answer=answer)
+
+    verdict = await service.analyze("в пятницу в 9 встреча с Ренатой")
+
+    assert isinstance(verdict, Analysis)
+    assert verdict.understanding.due_at == FRIDAY_NINE
+    assert verdict.understanding.due_precision == "time"
+
+
+async def test_photo_part_of_day_gets_the_start_of_the_part() -> None:
+    edit = model_edit(
+        task=1, due_at=datetime(2026, 10, 9, 13, 0, tzinfo=TZ), due_precision="afternoon"
+    )
+    answer = FakePhotoAnswer(
+        parsed_output=make_photo_understanding(
+            due_at=FRIDAY_NINE, due_precision="evening", edit=edit
+        )
+    )
+    service, _, _ = build_photo_service(answer=answer)
+
+    verdict = await service.analyze_photo(IMAGE, media_type="image/jpeg", caption="")
+
+    assert isinstance(verdict, PhotoAnalysis)
+    assert verdict.understanding.due_at == FRIDAY_EVENING
+    assert verdict.understanding.due_precision == "evening"
+    assert verdict.understanding.edit is not None
+    assert verdict.understanding.edit.due_at == datetime(2026, 10, 9, 12, 0, tzinfo=TZ)
+
+
+async def test_conversation_part_of_day_gets_the_start_of_the_part() -> None:
+    answer = FakeConversationAnswer(
+        parsed_output=make_conversation_understanding(due_at=FRIDAY_NINE, due_precision="afternoon")
+    )
+    service, _, _ = build_conversation_service(answer=answer)
+
+    verdict = await service.analyze_conversation(CONVERSATION)
+
+    assert isinstance(verdict, ConversationAnalysis)
+    assert verdict.understanding.due_at == datetime(2026, 10, 9, 12, 0, tzinfo=TZ)
+    assert verdict.understanding.due_precision == "afternoon"
 
 
 # --------------------------------------------------------------- живой прогон
