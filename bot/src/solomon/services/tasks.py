@@ -105,6 +105,7 @@ from solomon.services.understanding import (
     Analysis,
     AskedQuestion,
     Clock,
+    ConversationVerdict,
     ImageType,
     OpenTask,
     PhotoAnalysis,
@@ -279,6 +280,14 @@ class Analyst(Protocol):
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
     ) -> PhotoVerdict: ...
+
+    async def analyze_conversation(
+        self,
+        text: str,
+        *,
+        open_question: AskedQuestion | None = None,
+        tasks: Sequence[OpenTask] | None = None,
+    ) -> ConversationVerdict: ...
 
 
 # Скачивание звука из Telegram. Приходит из обработчика замыканием над

@@ -62,6 +62,9 @@ from solomon.services.transcription import Transcript, TranscriptionResult
 from solomon.services.understanding import (
     Analysis,
     AskedQuestion,
+    ConversationAnalysis,
+    ConversationUnderstanding,
+    ConversationVerdict,
     ImageType,
     NotUnderstood,
     OpenTask,
@@ -415,16 +418,25 @@ def make_photo_understanding(**fields: Any) -> PhotoUnderstanding:
     return PhotoUnderstanding.model_validate({**base, **fields})
 
 
+def make_conversation_understanding(**fields: Any) -> ConversationUnderstanding:
+    """Ответ модели на переписку (§18.2): разбор §5.3 и остальные дела владельца."""
+    base = make_understanding().model_dump()
+    base.update(more_tasks=[])
+    return ConversationUnderstanding.model_validate({**base, **fields})
+
+
 class FakeAnalyst:
     """Вместо Claude — заранее решённый вердикт и список того, что спросили.
 
     `photo` — вердикт по снимку (§14.3); без него снимок модель «не разобрала».
+    `conversation` — вердикт по переписке (§18.2); без него — тоже отказ.
     """
 
     def __init__(
         self,
         verdict: Understanding | Verdict,
         photo: PhotoUnderstanding | PhotoVerdict | None = None,
+        conversation: ConversationUnderstanding | ConversationVerdict | None = None,
     ) -> None:
         self.verdict: Verdict = (
             Analysis(
@@ -460,6 +472,19 @@ class FakeAnalyst:
         # Открытый вопрос и список задач снимка (§15.2) ложатся в общие
         # `questions` и `tasks`.
         self.photos: list[tuple[bytes, ImageType, str, str | None]] = []
+        self.conversation_verdict: ConversationVerdict = (
+            ConversationAnalysis(
+                understanding=conversation,
+                model="claude-opus-5",
+                input_tokens=2400,
+                output_tokens=380,
+            )
+            if isinstance(conversation, ConversationUnderstanding)
+            else conversation or NotUnderstood(reason="переписки тест не ждал")
+        )
+        # Тексты переписок, с которыми звали модель (§18.2). Открытый вопрос и
+        # список задач ложатся в общие `questions` и `tasks`.
+        self.conversations: list[str] = []
 
     async def analyze(
         self,
@@ -498,6 +523,18 @@ class FakeAnalyst:
         # без неё «печатает…» не успел бы отправиться ни разу.
         await asyncio.sleep(0.05)
         return self.photo_verdict
+
+    async def analyze_conversation(
+        self,
+        text: str,
+        *,
+        open_question: AskedQuestion | None = None,
+        tasks: Sequence[OpenTask] | None = None,
+    ) -> ConversationVerdict:
+        self.conversations.append(text)
+        self.questions.append(open_question)
+        self.tasks.append(None if tasks is None else list(tasks))
+        return self.conversation_verdict
 
 
 def make_details(**fields: Any) -> TaskDetails:
