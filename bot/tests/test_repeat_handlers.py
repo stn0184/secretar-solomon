@@ -197,7 +197,7 @@ async def test_reminder_of_a_repeating_task_goes_with_its_time(
     assert await service.tick(FRIDAY_END_OF_DAY) == 1
     sent = session.sent[0]
     assert isinstance(sent, SendMessage)
-    assert sent.text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
+    assert sent.text == "Напоминаю: отправить расчёт\nСрок: сегодня"
     assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
     data = sent.reply_markup.inline_keyboard[0][0].callback_data
     assert data == f"done:0e2f:{seconds(FRIDAY_END_OF_DAY)}"

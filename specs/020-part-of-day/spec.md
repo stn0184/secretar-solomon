@@ -131,13 +131,13 @@
   §21.5, схема `due_precision` — пять значений у поручения и у правки;
   отпечаток промпта в `test_understanding.py`; пометка строки «вечером
   позвонить маме» в `fixtures/understanding.jsonl`.
-- [ ] Бот, тексты (`texts.py`): слова частей; `format_due`,
+- [x] Бот, тексты (`texts.py`): слова частей; `format_due`,
   `format_short_due`, `format_move_target` — с частью;
   `format_due_moment` получает точность: час — только у `time`.
 - [ ] Бот, правка словом (`services/edits.py`): `_new_due` — ветка части
   (`due_at` и `due_precision`; тот же срок — `{}`); вопрос о переносе
   называет часть.
-- [ ] Бот, напоминания (`services/reminders.py::_text_for`): срок по
+- [x] Бот, напоминания (`services/reminders.py::_text_for`): срок по
   точности, «Срок был» по §21.3.
 - [ ] Бот, план (`services/morning.py`): строки частей среди дел со
   временем по началу части, «В течение дня» — последними.

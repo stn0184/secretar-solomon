@@ -3,7 +3,8 @@
 Части и их начала — константы; начало части по поясу владельца; приведение
 срока, который назвала модель: у части в `due_at` ложится начало этой части
 того же дня, часть вместе с повтором становится сроком со временем (§21.2).
-Сети и базы здесь нет.
+И как часть называется словами — в ответе, на кнопке, в вопросе о переносе,
+в напоминании и в плане (§21.4). Сети и базы здесь нет.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from solomon import texts
 from solomon.services import parts
 from tests.conftest import OWNER_TIMEZONE
 
@@ -116,3 +118,92 @@ def test_other_precisions_pass_as_they_are(precision: str | None, repeating: boo
 def test_part_without_a_due_stays_as_it_is() -> None:
     """Срока нет — ставить нечего: так и остаётся."""
     assert parts.settle(None, "evening", repeating=False, timezone=TZ) == (None, "evening")
+
+
+# ------------------------------------------------------ срок словами (§21.4)
+
+
+def test_part_words_are_the_words_of_the_owner() -> None:
+    assert texts.PART_WORDS == {"morning": "утром", "afternoon": "днём", "evening": "вечером"}
+    assert set(texts.PART_WORDS) == set(parts.PARTS)
+
+
+@pytest.mark.parametrize(
+    ("precision", "start", "words"),
+    [
+        ("morning", 8, "пятница, 9 октября, утром"),
+        ("afternoon", 12, "пятница, 9 октября, днём"),
+        ("evening", 18, "пятница, 9 октября, вечером"),
+        ("time", 15, "пятница, 9 октября, 15:00"),
+        ("day", 18, "пятница, 9 октября"),
+        (None, 18, "пятница, 9 октября"),
+    ],
+)
+def test_due_names_the_part_without_an_hour(precision: str | None, start: int, words: str) -> None:
+    """Ответ при записи и правке, «Перенёс»: часть словом, без часа (§21.4)."""
+    assert texts.format_due(at(start), precision) == words
+
+
+@pytest.mark.parametrize(
+    ("precision", "start", "words"),
+    [
+        ("morning", 8, "9 окт, утром"),
+        ("evening", 18, "9 окт, вечером"),
+        ("time", 15, "9 окт, 15:00"),
+        ("day", 18, "9 окт"),
+    ],
+)
+def test_short_due_on_a_button_names_the_part(precision: str, start: int, words: str) -> None:
+    assert texts.format_short_due(at(start), precision) == words
+
+
+@pytest.mark.parametrize(
+    ("precision", "start", "today", "other_day"),
+    [
+        ("morning", 8, "на сегодня утром", "на пятницу, 9 октября, утром"),
+        ("afternoon", 12, "на сегодня днём", "на пятницу, 9 октября, днём"),
+        ("evening", 18, "на сегодня вечером", "на пятницу, 9 октября, вечером"),
+        ("time", 15, "на сегодня в 15:00", "на пятницу, 9 октября, в 15:00"),
+        ("day", 18, "на сегодня", "на пятницу, 9 октября"),
+    ],
+)
+def test_move_target_names_the_part(precision: str, start: int, today: str, other_day: str) -> None:
+    """Вопрос «Какую задачу перенести …?» (§12.6): сегодня и другой день."""
+    assert texts.format_move_target(at(start), precision, at(7)) == today
+    assert texts.format_move_target(at(start), precision, at(7, day=date(2026, 10, 6))) == (
+        other_day
+    )
+
+
+@pytest.mark.parametrize(
+    ("precision", "start", "today", "other_day"),
+    [
+        ("morning", 8, "сегодня утром", "пятница, 9 октября, утром"),
+        ("afternoon", 12, "сегодня днём", "пятница, 9 октября, днём"),
+        ("evening", 18, "сегодня вечером", "пятница, 9 октября, вечером"),
+        ("time", 15, "сегодня, 15:00", "пятница, 9 октября, 15:00"),
+        # Дело на день — без 18:00, которых владелец не говорил (§21.3).
+        ("day", 18, "сегодня", "пятница, 9 октября"),
+        (None, 18, "сегодня", "пятница, 9 октября"),
+    ],
+)
+def test_due_moment_in_a_reminder_has_an_hour_only_for_a_time(
+    precision: str | None, start: int, today: str, other_day: str
+) -> None:
+    """Срок в напоминании: час — только у срока со временем (§21.3)."""
+    assert texts.format_due_moment(at(start), precision, at(19)) == today
+    assert texts.format_due_moment(at(start), precision, at(19, day=date(2026, 10, 10))) == (
+        other_day
+    )
+
+
+@pytest.mark.parametrize(
+    ("precision", "label"),
+    [("morning", "Утром"), ("afternoon", "Днём"), ("evening", "Вечером")],
+)
+def test_plan_label_of_a_part_starts_with_a_capital(precision: str, label: str) -> None:
+    """Строка утреннего плана: «Утром — встреча с Ренатой» (§20.3)."""
+    assert texts.part_label(precision) == label
+    assert texts.morning_line(texts.part_label(precision), "встреча с Ренатой") == (
+        f"{label} — встреча с Ренатой"
+    )

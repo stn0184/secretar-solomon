@@ -170,16 +170,29 @@ def format_date(moment: datetime) -> str:
     return f"{moment.day} {MONTHS[moment.month - 1]}"
 
 
+# Слова частей дня (`techspec/21-part-of-day.md` §21.4). Часы частей живут
+# в `services/parts.py`; здесь — только то, как часть называется вслух.
+PART_WORDS = {"morning": "утром", "afternoon": "днём", "evening": "вечером"}
+
+
+def part_label(precision: str) -> str:
+    """Часть дня в начале строки плана: «Утром», «Днём», «Вечером» (§20.3)."""
+    return PART_WORDS[precision].capitalize()
+
+
 def format_due(due_at: datetime, precision: str | None) -> str:
-    """Срок словами: день, а со временем — и час.
+    """Срок словами: день, а со временем — и час, у части дня — её слово.
 
     Время показывается, только когда человек его назвал: у срока «в пятницу»
-    в базе стоит 18:00 (`techspec/03-schema.md` §3.3), и произносить этот час
-    вслух значило бы приписать человеку то, чего он не говорил.
+    в базе стоит 18:00 (`techspec/03-schema.md` §3.3), у «утром» — 08:00
+    (§21.2), и произносить этот час вслух значило бы приписать человеку то,
+    чего он не говорил: «пятница, 9 октября, утром».
     """
     day = format_day(due_at)
     if precision == "time":
         return f"{day}, {format_time(due_at)}"
+    if precision in PART_WORDS:
+        return f"{day}, {PART_WORDS[precision]}"
     return day
 
 
@@ -196,11 +209,14 @@ def format_remind_at(fire_at: datetime, now: datetime) -> str:
 def format_short_due(due_at: datetime, precision: str | None) -> str:
     """Короткий срок на кнопке: «2 окт», со временем — «2 окт, 17:00» (§12.6).
 
-    Час — только когда его назвал человек, как у `format_due`.
+    Час — только когда его назвал человек, как у `format_due`; у части дня —
+    её слово: «2 окт, утром».
     """
     day = f"{due_at.day} {MONTHS_SHORT[due_at.month - 1]}"
     if precision == "time":
         return f"{day}, {format_time(due_at)}"
+    if precision in PART_WORDS:
+        return f"{day}, {PART_WORDS[precision]}"
     return day
 
 
@@ -208,7 +224,8 @@ def format_move_target(due_at: datetime, precision: str | None, now: datetime) -
     """Новый срок в вопросе «Какую задачу перенести …?» (§12.6).
 
     «на пятницу, 2 октября», «на сегодня в 17:00», «на среду, 30 сентября,
-    в 09:00». Оба момента ждутся в поясе владельца.
+    в 09:00», «на сегодня утром», «на пятницу, 2 октября, утром». Оба момента
+    ждутся в поясе владельца.
     """
     if due_at.date() == now.date():
         day = "на сегодня"
@@ -219,18 +236,30 @@ def format_move_target(due_at: datetime, precision: str | None, now: datetime) -
         joint = ", "
     if precision == "time":
         return f"{day}{joint}в {format_time(due_at)}"
+    if precision in PART_WORDS:
+        return f"{day}{joint}{PART_WORDS[precision]}"
     return day
 
 
-def format_due_moment(due_at: datetime, now: datetime) -> str:
-    """Срок в самом напоминании: «сегодня, 18:00», «пятница, 25 сентября, 18:00».
+def format_due_moment(due_at: datetime, precision: str | None, now: datetime) -> str:
+    """Срок в самом напоминании: «сегодня, 15:00», «сегодня утром», «сегодня».
 
-    Здесь час называется всегда, даже у срока «в пятницу»
-    (`techspec/06-reminders.md` §6.2): бот стучится именно в этот час, и
-    человеку важно видеть, о каком моменте речь.
+    Срок называется так, как его назвал владелец (`techspec/21-part-of-day.md`
+    §21.3): час — только у срока со временем; у части дня — её слово; у дела
+    на день — один день, без 18:00, которых он не говорил. Не сегодня — день
+    целиком: «пятница, 9 октября, утром». Оба момента ждутся в поясе владельца.
     """
-    day = "сегодня" if due_at.date() == now.date() else format_day(due_at)
-    return f"{day}, {format_time(due_at)}"
+    if due_at.date() == now.date():
+        day = "сегодня"
+        joint = " "
+    else:
+        day = format_day(due_at)
+        joint = ", "
+    if precision == "time":
+        return f"{day}, {format_time(due_at)}"
+    if precision in PART_WORDS:
+        return f"{day}{joint}{PART_WORDS[precision]}"
+    return day
 
 
 START = (
@@ -638,7 +667,7 @@ MORNING_ALL_DAY = "В течение дня"
 
 
 def morning_line(when: str, title: str) -> str:
-    """Строка плана: «09:00 — встреча с Ольгой» или «В течение дня — …»."""
+    """Строка плана: «09:00 — встреча с Ольгой», «Утром — …» или «В течение дня — …»."""
     return f"{when} — {title}"
 
 

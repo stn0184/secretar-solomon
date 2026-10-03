@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import cast
 from zoneinfo import ZoneInfo
 
@@ -34,6 +34,7 @@ from solomon.services.reminders import (
     database_planner,
     latest,
     mirror_timezone,
+    past_due,
 )
 from solomon.services.tasks import TaskService
 from solomon.services.understanding import Understanding
@@ -491,7 +492,7 @@ async def test_ripe_reminder_is_sent_and_marked() -> None:
     assert lister.calls == [(OWNER_ID, FRIDAY_END_OF_DAY)]
     task_id, text = notifier.sent[0]
     assert task_id == "0e2f"
-    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
+    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня"
     assert marks.calls == [(OWNER_ID, ["0e2f-due"], 41)]
 
 
@@ -564,7 +565,7 @@ async def test_overdue_task_says_the_due_date_has_passed() -> None:
 
     assert await service.tick() == 1
     _, text = notifier.sent[0]
-    assert text == "Напоминаю: отправить расчёт\nСрок был: понедельник, 21 сентября, 18:00"
+    assert text == "Напоминаю: отправить расчёт\nСрок был: понедельник, 21 сентября"
 
 
 async def test_loop_stops_on_cancel() -> None:
@@ -690,7 +691,7 @@ async def test_reminder_goes_to_the_owner_with_the_button(
     sent = session.sent[0]
     assert isinstance(sent, SendMessage)
     assert sent.chat_id == OWNER_ID
-    assert sent.text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
+    assert sent.text == "Напоминаю: отправить расчёт\nСрок: сегодня"
     assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
     assert sent.reply_markup.inline_keyboard[0][0].callback_data == "done:0e2f"
     # Тик сначала перекатывает пропущенные разы (§13.4), потом отбирает созревшее.
@@ -709,7 +710,98 @@ async def test_late_reminder_does_not_age_the_due_date() -> None:
 
     assert await service.tick(FRIDAY_END_OF_DAY.replace(hour=12)) == 1
     _, text = notifier.sent[0]
-    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00"
+    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня"
+
+
+# Срок в напоминании и «Срок был» (`techspec/21-part-of-day.md` §21.3).
+
+FRIDAY = FRIDAY_END_OF_DAY.date()
+SATURDAY = date(2026, 9, 26)
+
+
+def local(hour: int, minute: int = 0, second: int = 0, day: date = FRIDAY) -> datetime:
+    """Этот момент пятницы, 25 сентября, — или другого дня — в поясе владельца."""
+    return datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=TZ)
+
+
+@pytest.mark.parametrize(
+    ("now", "passed"),
+    [
+        (local(14, 59, 59), False),
+        # Минута срока: тик пришёл с секундами — срок ещё не прошёл.
+        (local(15, 0, 0), False),
+        (local(15, 0, 42), False),
+        (local(15, 1, 0), True),
+    ],
+)
+def test_time_due_passes_after_its_minute(now: datetime, passed: bool) -> None:
+    assert past_due(local(15), "time", now, TZ) is passed
+
+
+@pytest.mark.parametrize("precision", ["day", "morning", "afternoon", "evening", None])
+@pytest.mark.parametrize(
+    ("now", "passed"),
+    [(local(23, 59, 59), False), (local(0, 0, 0, day=SATURDAY), True)],
+)
+def test_day_and_part_pass_only_the_next_day(
+    precision: str | None, now: datetime, passed: bool
+) -> None:
+    """У дела на день и части — день срока раньше сегодняшнего (§21.3)."""
+    due = local(18) if precision in ("day", None) else local(8)
+    assert past_due(due, precision, now, TZ) is passed
+
+
+def test_day_passes_by_the_owner_timezone() -> None:
+    """Полночь — по поясу владельца: в UTC ещё пятница, у владельца — суббота."""
+    due = local(18).astimezone(UTC)
+    now = local(0, 30, day=SATURDAY).astimezone(UTC)
+
+    assert due.date() == now.date()
+    assert past_due(due, "evening", now, TZ) is True
+
+
+async def test_reminder_in_the_minute_of_the_due_says_due() -> None:
+    """Ступень «к сроку» ушла в минуту срока: «Срок», а не «Срок был»."""
+    ripe = [make_due("due", local(15), due_at=local(15), due_precision="time")]
+    service, _, _, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick(local(15, 0, 37)) == 1
+    _, text = notifier.sent[0]
+    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня, 15:00"
+
+
+async def test_reminder_after_the_minute_of_the_due_says_it_was() -> None:
+    ripe = [make_due("due", local(15), due_at=local(15), due_precision="time")]
+    service, _, _, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick(local(15, 1)) == 1
+    _, text = notifier.sent[0]
+    assert text == "Напоминаю: отправить расчёт\nСрок был: сегодня, 15:00"
+
+
+@pytest.mark.parametrize(
+    ("precision", "start", "words"),
+    [("morning", 8, "утром"), ("afternoon", 12, "днём"), ("evening", 18, "вечером")],
+)
+async def test_part_reminder_after_downtime_the_same_day_says_due(
+    precision: str, start: int, words: str
+) -> None:
+    """Бот лежал с начала части — догнавшее напоминание всё ещё «Срок» (§21.3)."""
+    ripe = [make_due("due", local(start), due_at=local(start), due_precision=precision)]
+    service, _, _, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick(local(23, 30)) == 1
+    _, text = notifier.sent[0]
+    assert text == f"Напоминаю: отправить расчёт\nСрок: сегодня {words}"
+
+
+async def test_part_reminder_the_next_day_says_it_was() -> None:
+    ripe = [make_due("due", local(8), due_at=local(8), due_precision="morning")]
+    service, _, _, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick(local(9, day=SATURDAY)) == 1
+    _, text = notifier.sent[0]
+    assert text == "Напоминаю: отправить расчёт\nСрок был: пятница, 25 сентября, утром"
 
 
 # Строка «Перенёс» (`techspec/11-edit.md` §11.4). Срок сдвинули в приложении

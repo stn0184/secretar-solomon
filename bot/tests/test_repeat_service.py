@@ -963,8 +963,8 @@ async def test_reminder_of_a_repeating_task_carries_its_time() -> None:
     assert await service.tick() == 2
     assert notifier.occurrences == [seconds(FRIDAY_END_OF_DAY), None]
     assert [text for _, text in notifier.sent] == [
-        "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00",
-        "Напоминаю: отправить расчёт\nСрок: сегодня, 18:00",
+        "Напоминаю: отправить расчёт\nСрок: сегодня",
+        "Напоминаю: отправить расчёт\nСрок: сегодня",
     ]
 
 

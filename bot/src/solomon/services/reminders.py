@@ -31,7 +31,7 @@ import asyncio
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, tzinfo
 from typing import Protocol
 
 from supabase import Client
@@ -43,7 +43,7 @@ from solomon.db import reminders as db_reminders
 from solomon.db.morning import DayTask
 from solomon.db.reminders import DueReminder, MovedTask, Planned, UndatedTask
 from solomon.db.rpc import DatabaseError
-from solomon.db.tasks import ACTIVE_STATUS, TaskDetails
+from solomon.db.tasks import ACTIVE_STATUS, TIME_PRECISION, TaskDetails
 from solomon.services import asks, morning
 from solomon.services.repeat import occurrence_seconds
 from solomon.services.understanding import Clock
@@ -127,6 +127,19 @@ def by_task(reminders: Iterable[DueReminder]) -> dict[str, list[DueReminder]]:
 def latest(group: list[DueReminder]) -> DueReminder:
     """Чьими словами говорит сообщение: позднейшая ступень, потом момент."""
     return max(group, key=lambda item: (STAGE_ORDER.get(item.stage, 0), item.fire_at))
+
+
+def past_due(due_at: datetime, precision: str | None, now: datetime, timezone: tzinfo) -> bool:
+    """Прошёл ли срок — «Срок был» вместо «Срок» (`techspec/21-part-of-day.md` §21.3).
+
+    У срока со временем — раньше начала текущей минуты: напоминание, ушедшее
+    в минуту срока тиком с секундами, — ещё «Срок». У дела на день и части
+    дня — день срока раньше сегодняшнего по поясу владельца: часть,
+    догнавшая после простоя в тот же день, — всё ещё «Срок».
+    """
+    if precision == TIME_PRECISION:
+        return due_at < now.replace(second=0, microsecond=0)
+    return due_at.astimezone(timezone).date() < now.astimezone(timezone).date()
 
 
 class Notifier(Protocol):
@@ -604,15 +617,16 @@ class ReminderService:
         return True
 
     def _text_for(self, reminder: DueReminder, now: datetime) -> str:
-        """Текст напоминания: суть и срок в поясе владельца (§6.2)."""
+        """Текст напоминания: суть и срок в поясе владельца (§6.2, §21.3)."""
         timezone = self._settings.owner_timezone
         due = None
         overdue = False
         if reminder.due_at is not None:
             local = reminder.due_at.astimezone(timezone)
-            due = texts.format_due_moment(local, now.astimezone(timezone))
+            precision = reminder.due_precision
+            due = texts.format_due_moment(local, precision, now.astimezone(timezone))
             # «Срок был» — о сроке, а не об опоздании самого напоминания.
-            overdue = reminder.due_at < now
+            overdue = past_due(reminder.due_at, precision, now, timezone)
         return texts.reminder(title=reminder.title, due=due, overdue=overdue)
 
     async def tick_quietly(self) -> None:
