@@ -363,7 +363,7 @@ authenticated`); `execute` у `service_role` оставлен вынужденн
 | `id` | uuid | ключ |
 | `owner_telegram_id` | bigint | владелец (§3.1) |
 | `task_id` | uuid, `references tasks(id) on delete cascade` | о какой задаче |
-| `stage` | text, `check in ('before', 'due')` | заранее или к сроку (§6.1) |
+| `stage` | text, `check in ('before', 'due', 'ask')` | заранее, к сроку (§6.1) или вопрос о деле без срока (§19.4, миграция 018) |
 | `fire_at` | timestamptz | когда стучаться |
 | `sent_at` | timestamptz, nullable | когда отправлено; пусто — ещё ждёт |
 | `telegram_message_id` | bigint, nullable | сообщение в Telegram, под которым кнопка |
@@ -372,6 +372,13 @@ authenticated`); `execute` у `service_role` оставлен вынужденн
 `unique (task_id, stage)`; частичный индекс
 `(owner_telegram_id, fire_at) where sent_at is null` — под запрос тика.
 RLS — как у остальных (§4.2).
+
+Строка `ask` — память о вопросе «Когда займётесь?» (§19.4): одна на
+задачу, с рождения ушедшая (`fire_at = sent_at`), `telegram_message_id`
+— сообщение вопроса. Поэтому её не видит всё, что работает с
+неотправленными: тик, «Напомню» в строке «Перенёс», перепланирование.
+Свайп и «Последняя задача в разговоре» читают таблицу без фильтра по
+ступени и находят задачу по вопросу так же, как по напоминанию (§12.2).
 
 Функции (только `service_role`, как §3.4):
 
@@ -435,6 +442,22 @@ RLS — как у остальных (§4.2).
   timestamptz) returns boolean` — снимает отметку, только если она всё
   ещё равна прочитанной `seen`; правка между чтением и снятием отметку
   сменила, и она остаётся. `true` — снята.
+- `undated_to_ask(owner_telegram_id bigint, day_start timestamptz,
+  asked_before timestamptz, question_since timestamptz, quiet_since
+  timestamptz)` — о каком деле без срока спросить (§19.1, §19.4),
+  миграция 018: `table (task_id uuid, title text, created_at
+  timestamptz, asked_at timestamptz)`, ноль строк или одна. Пусто, если
+  сегодня уже спрашивал, есть живой открытый вопрос или не было 15
+  минут тишины; иначе — первое по порядку §19.1 активное `task` без
+  срока, не тронутое сегодня. Границы считает бот.
+- `record_ask(owner_telegram_id bigint, task_id uuid, question text,
+  telegram_message_id bigint) returns tasks` — записывает ушедший
+  вопрос (§19.4), миграция 018: у задачи `open_question` и
+  `question_asked_at = now()`, у остальных задач владельца открытый
+  вопрос снят, `needs_review` не трогается; строка `ask` — вставка или
+  обновление той же (`on conflict (task_id, stage)`). Задача чужая, не
+  активная, не `task` или со сроком — `null`, ничего не записано;
+  пустой вопрос — исключение.
 
 Правило повтора (миграция 011, §13.2) — три функции без таблиц, права
 `authenticated` и `service_role` (их зовут ядра под токеном и проверка
