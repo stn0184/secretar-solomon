@@ -121,7 +121,7 @@
 - [x] Бот, тексты (`texts.py`): вопросы §19.3, `UNDATED_QUESTION`
   («Когда займётесь?»), `ASK_LATER` («Хорошо, спрошу через неделю.»),
   строка в `HELP`.
-- [ ] Тесты без сети — по пунктам «Приёмки», кроме живых:
+- [x] Тесты без сети — по пунктам «Приёмки», кроме живых:
   `test_asks.py`, `test_reminders.py`, `test_tasks_service.py`,
   `test_chat_edit_service.py`, `test_understanding.py` (правила в
   промпте).

@@ -47,6 +47,7 @@ interface AskRow {
 interface TaskRow {
   id: string | null;
   title: string | null;
+  status: string | null;
   open_question: string | null;
   question_asked_at: Date | null;
   needs_review: boolean | null;
@@ -169,7 +170,7 @@ async function recordAsk(db: PGlite, taskId: string, messageId = 4242, owner = O
 
 async function taskRow(db: PGlite, id: string): Promise<TaskRow> {
   const { rows } = await db.query<TaskRow>(
-    "select id, title, open_question, question_asked_at, needs_review, updated_at from public.tasks where id = $1",
+    "select id, title, status, open_question, question_asked_at, needs_review, updated_at from public.tasks where id = $1",
     [id],
   );
   return only(rows);
@@ -568,5 +569,36 @@ test("правка задачи строку ask не стирает", async () 
 
     const stages = (await remindersOf(db, id)).map((row) => [row.stage, Number(row.telegram_message_id)]);
     assert.deepEqual(stages, [["ask", 4242]]);
+  });
+});
+
+test("свайп и «сделал» находят задачу по строке ask, «Сделано» под вопросом её закрывает", async () => {
+  await withDatabase(async (db) => {
+    const id = await seedTask(db);
+    const since = ago(HOUR);
+    await recordAsk(db, id, 4242);
+
+    // Те же выборки, что `reminder_task_id` и `last_reminder_task` бота (§12.2):
+    // по стадии они не фильтруют, и ушедшая строка ask им видна.
+    const swiped = await db.query<{ task_id: string }>(
+      `select task_id from public.reminders
+        where owner_telegram_id = $1 and telegram_message_id = $2 limit 1`,
+      [OWNER, 4242],
+    );
+    assert.equal(only(swiped.rows).task_id, id);
+    const last = await db.query<{ task_id: string }>(
+      `select task_id from public.reminders
+        where owner_telegram_id = $1 and sent_at >= $2 order by sent_at desc limit 1`,
+      [OWNER, since],
+    );
+    assert.equal(only(last.rows).task_id, id);
+
+    const done = await db.query<{ status: string }>(
+      "select status from public.mark_task_done($1, $2::uuid, null)",
+      [OWNER, id],
+    );
+    assert.equal(only(done.rows).status, "done");
+    assert.equal((await taskRow(db, id)).status, "done");
+    assert.deepEqual((await remindersOf(db, id)).map((row) => row.stage), ["ask"]);
   });
 });
