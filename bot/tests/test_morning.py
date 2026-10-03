@@ -7,16 +7,18 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
 from supabase import Client
 
+from solomon import texts
 from solomon.db import morning as db_morning
 from solomon.db.morning import DayTask
 from solomon.db.rpc import DatabaseError
+from solomon.services import asks, morning
 from tests.conftest import OWNER_ID, OWNER_TIMEZONE
 from tests.test_reminders import FakeRpcClient
 
@@ -184,3 +186,166 @@ async def test_broken_connection_is_a_refusal_for_every_call() -> None:
         await db_morning.record_morning_plan(
             client, owner_telegram_id=OWNER_ID, day=TODAY, telegram_message_id=501
         )
+
+
+# --- Чистые функции: окно, день владельца, строки плана (§20.2, §20.3) ---
+
+
+def task(
+    title: str,
+    due_at: datetime,
+    precision: str | None = "time",
+    task_id: str = TASK_ID,
+) -> DayTask:
+    return DayTask(task_id=task_id, title=title, due_at=due_at, due_precision=precision)
+
+
+def at(hour: int, minute: int = 0) -> datetime:
+    """Сегодня в этот час по поясу владельца."""
+    return datetime(2026, 10, 5, hour, minute, tzinfo=TZ)
+
+
+def test_window_and_line_limit_are_constants() -> None:
+    """Окно 08:00–12:00 и предел в 20 строк — константы, а не настройка (§20.2)."""
+    assert morning.WINDOW_START == time(8, 0)
+    assert morning.WINDOW_END == time(12, 0)
+    assert morning.LINE_LIMIT == 20
+
+
+@pytest.mark.parametrize(
+    ("moment", "open_"),
+    [
+        (at(7, 59), False),
+        (at(8, 0), True),
+        (at(10, 30), True),
+        (at(11, 59), True),
+        (at(12, 0), False),
+        (at(23, 0), False),
+        (at(3, 0), False),
+        # 03:00 по UTC — 08:00 у владельца (+05:00): окно по его поясу.
+        (datetime(2026, 10, 5, 3, 0, tzinfo=UTC), True),
+        (datetime(2026, 10, 5, 7, 0, tzinfo=UTC), False),
+    ],
+)
+def test_window_is_eight_to_noon_by_owner_time(moment: datetime, open_: bool) -> None:
+    """С 08:00 до 12:00 по поясу владельца; с 12:00 план не догоняет (§20.2)."""
+    assert morning.in_window(moment, TZ) is open_
+
+
+def test_day_bounds_are_owner_midnights() -> None:
+    """День владельца и его полуночи — те же, что у вопроса (`services/asks.py`)."""
+    now = at(8, 0)
+
+    bounds = morning.day_bounds(now, TZ)
+
+    assert bounds.day == TODAY
+    assert bounds.day_start == DAY_START
+    assert bounds.day_end == DAY_END
+    assert bounds.day_start == asks.bounds(now, TZ).day_start
+
+
+def test_day_is_taken_by_owner_zone_not_by_utc() -> None:
+    """22:30 по UTC 4 октября — уже 5 октября у владельца."""
+    bounds = morning.day_bounds(datetime(2026, 10, 4, 22, 30, tzinfo=UTC), TZ)
+
+    assert bounds.day == TODAY
+    assert bounds.day_start == DAY_START
+
+
+def test_day_end_is_next_midnight_even_when_clocks_change() -> None:
+    """В день перевода часов сутки длиннее: в базу уходят обе полуночи с их сдвигом."""
+    berlin = ZoneInfo("Europe/Berlin")
+
+    bounds = morning.day_bounds(datetime(2026, 10, 25, 9, 0, tzinfo=berlin), berlin)
+
+    assert bounds.day_start.isoformat() == "2026-10-25T00:00:00+02:00"
+    assert bounds.day_end.isoformat() == "2026-10-26T00:00:00+01:00"
+    assert bounds.day_end.astimezone(UTC) - bounds.day_start.astimezone(UTC) == timedelta(hours=25)
+
+
+def test_plan_reads_as_in_the_techspec() -> None:
+    """Шапка, дела со временем по времени, затем дела на день (§20.3)."""
+    tasks = [
+        task("встреча с Ольгой", at(9, 0)),
+        task("позвонить Сергею", at(15, 30)),
+        task("купить лампочку в коридор", at(18, 0), "day"),
+    ]
+
+    assert morning.plan_text(tasks, TZ) == (
+        "Доброе утро! На сегодня:\n"
+        "09:00 — встреча с Ольгой\n"
+        "15:30 — позвонить Сергею\n"
+        "В течение дня — купить лампочку в коридор"
+    )
+
+
+def test_timed_tasks_go_first_and_by_time() -> None:
+    """Дело на день (18:00 в `due_at`) идёт после дела на 19:00 (§20.1)."""
+    tasks = [
+        task("купить лампочку в коридор", at(18, 0), "day"),
+        task("ужин с Анной", at(19, 0)),
+        task("забрать посылку", at(18, 0), "day"),
+        task("встреча с Ольгой", at(9, 0)),
+    ]
+
+    assert morning.plan_lines(tasks, TZ) == [
+        "09:00 — встреча с Ольгой",
+        "19:00 — ужин с Анной",
+        "В течение дня — купить лампочку в коридор",
+        "В течение дня — забрать посылку",
+    ]
+
+
+def test_time_is_shown_in_owner_zone() -> None:
+    """База отдаёт время в UTC; в строке — час владельца."""
+    tasks = [task("встреча с Ольгой", datetime(2026, 10, 5, 4, 0, tzinfo=UTC))]
+
+    assert morning.plan_lines(tasks, TZ) == ["09:00 — встреча с Ольгой"]
+
+
+def test_task_without_precision_is_a_day_task() -> None:
+    """Точности нет — срок не со временем: строка «В течение дня»."""
+    assert morning.plan_lines([task("оплатить свет", at(18, 0), None)], TZ) == [
+        "В течение дня — оплатить свет"
+    ]
+
+
+def test_empty_day_says_there_is_nothing() -> None:
+    """Дел нет — так и сказано, без пустой шапки (§20.3)."""
+    assert morning.plan_text([], TZ) == "Доброе утро! На сегодня дел нет."
+
+
+def test_twenty_lines_fit_without_a_tail() -> None:
+    tasks = [task(f"дело {n}", at(8, n)) for n in range(20)]
+
+    lines = morning.plan_lines(tasks, TZ)
+
+    assert len(lines) == 20
+    assert lines[-1] == "08:19 — дело 19"
+
+
+def test_more_than_twenty_lines_end_with_a_count() -> None:
+    """Первые 20 строк в порядке плана и «И ещё N — в приложении.» (§20.3)."""
+    timed = [task(f"дело {n}", at(9, n)) for n in range(18)]
+    all_day = [task(f"на день {n}", at(18, 0), "day") for n in range(5)]
+
+    lines = morning.plan_lines(all_day + timed, TZ)
+
+    assert len(lines) == 21
+    assert lines[0] == "09:00 — дело 0"
+    assert lines[17] == "09:17 — дело 17"
+    assert lines[18:20] == ["В течение дня — на день 0", "В течение дня — на день 1"]
+    assert lines[20] == "И ещё 3 — в приложении."
+
+
+def test_texts_of_the_plan() -> None:
+    """Слова плана живут в `texts.py` (§20.3)."""
+    assert texts.MORNING_HEAD == "Доброе утро! На сегодня:"
+    assert texts.MORNING_EMPTY == "Доброе утро! На сегодня дел нет."
+    assert texts.MORNING_ALL_DAY == "В течение дня"
+    assert texts.morning_more(4) == "И ещё 4 — в приложении."
+
+
+def test_help_tells_about_the_morning_plan() -> None:
+    """В /help — что каждое утро в 8:00 бот присылает дела на сегодня (§20.3)."""
+    assert "Каждое утро в 8:00 присылаю дела со сроком на сегодня" in texts.HELP

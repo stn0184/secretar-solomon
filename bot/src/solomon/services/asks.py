@@ -59,7 +59,12 @@ def in_window(now: datetime, timezone: tzinfo) -> bool:
     return WINDOW_START <= clock < WINDOW_END
 
 
-def _midnight(day: date, timezone: tzinfo) -> datetime:
+def midnight(day: date, timezone: tzinfo) -> datetime:
+    """Полночь, с которой начинается день владельца, — момент с его поясом.
+
+    Ею же утренний план меряет сегодняшний день (`services/morning.py`):
+    у плана и вопроса одни сутки.
+    """
     return datetime.combine(day, time(0, 0), tzinfo=timezone)
 
 
@@ -72,8 +77,8 @@ def bounds(now: datetime, timezone: tzinfo) -> AskBounds:
     """
     today = local_day(now, timezone)
     return AskBounds(
-        day_start=_midnight(today, timezone),
-        asked_before=_midnight(today - timedelta(days=REPEAT_DAYS - 1), timezone),
+        day_start=midnight(today, timezone),
+        asked_before=midnight(today - timedelta(days=REPEAT_DAYS - 1), timezone),
         question_since=now - QUESTION_LIFE,
         quiet_since=now - QUIET,
     )
