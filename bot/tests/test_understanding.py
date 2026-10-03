@@ -31,6 +31,7 @@ from anthropic import (
 )
 from pydantic import ValidationError
 
+from solomon import texts
 from solomon.cli import load_environment
 from solomon.config import ConfigError, Settings
 from solomon.db.facts import Fact
@@ -40,6 +41,7 @@ from solomon.handlers import PHOTO_LIMIT
 from solomon.services.batches import Line, conversation_text, is_conversation
 from solomon.services.conversation import recent_block, reply_text, reports_action
 from solomon.services.understanding import (
+    ANSWER_RULES,
     CONVERSATION_DUPLICATE_RULE,
     CONVERSATION_RULES,
     MAX_TOKENS,
@@ -439,6 +441,23 @@ def test_rules_keep_edit_and_same_as_to_the_task_block_and_let_the_answer_win() 
     assert "только если ниже есть блок с открытыми задачами" in text
     assert "edit = null и same_as = null" in text
     assert "answers_question = true, а не правка и не дубль" in text
+    # Исключение этапа 018 (§19.5): «сделал», «уже не нужно» — правка.
+    assert "Исключение — «сделал» или «уже не нужно» о задаче из вопроса" in text
+    assert "правка done или cancel этой задачи, а не ответ" in text
+
+
+def test_answer_rules_turn_done_into_an_edit_and_not_yet_into_an_answer() -> None:
+    """Блок 4 (§19.5): «сделал», «не нужно» — правка; «пока не знаю» — ответ без срока."""
+    text = flat(ANSWER_RULES)
+
+    assert "«Пока не знаю», «потом», «когда будут деньги» — тоже ответ" in text
+    assert "answers_question = true, срока нет (due_at = null)" in text
+    assert "«Сделал» или «уже не нужно» об этой задаче" in text
+    assert "answers_question = false и edit с action = done (сделано) или cancel" in text
+    # Правило — для любого открытого вопроса, а не только «Когда займётесь?».
+    assert texts.UNDATED_QUESTION not in ANSWER_RULES
+    block = format_open_question(Asked(), TZ)
+    assert block.endswith(ANSWER_RULES)
 
 
 def flat(text: str) -> str:
@@ -939,13 +958,13 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 
 # ------------------------------------------------------------ снимок (§14.3)
 
-# Эталоны промпта пересчитаны после этапа 017: в правилах времени — время по
-# другому поясу, у reply_hint — отсылка к правилам переписки (§5.2, §18.2);
+# Эталоны промпта пересчитаны после этапа 018: в блоке 1 — исключение из
+# «ответ — не правка» для done и cancel задачи из вопроса (§5.2, §19.5);
 # схема с этапа 013 не менялась — `reply_hint` в ней уже был. Дальше промпт
 # и схема ответа текста и голоса сдвигаются только правкой, которая их
 # меняет, — снимок и прочие ветки их не трогают.
-PROMPT_WITH_EMPTY_TASKS_SHA256 = "29d0e6e85795dcd04899228cbf3a9e13e1da6ee386f3fa50f0757efaa737eaca"
-PROMPT_BARE_SHA256 = "419f5a03964f06a318e8f49b1d16b3d8deb04940bfa9daaaa027de46760297d3"
+PROMPT_WITH_EMPTY_TASKS_SHA256 = "05eb8cec78045bc67ecc550935009a2f8c994a321276492f523d6351fbfbec6d"
+PROMPT_BARE_SHA256 = "4008e101033db345c0c86db215f22378c7f2dbc427d6d1afa879dc54d0fb6387"
 SCHEMA_SHA256 = "dce15f144f4ac6a8258e60c42b5ba869449f7a070b7f87a60f73035460e8e82c"
 
 # Не настоящая картинка: модели здесь нет, важно только, что байты дошли.
