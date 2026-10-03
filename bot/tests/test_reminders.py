@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import cast
 from zoneinfo import ZoneInfo
 
@@ -20,13 +20,14 @@ from aiogram.types import InlineKeyboardMarkup
 from supabase import Client
 
 from solomon import texts
+from solomon.db.morning import DayTask
 from solomon.db.reminders import DueReminder, MovedTask, Planned, UndatedTask
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import TaskDetails
 from solomon.handlers import done_keyboard
 from solomon.runner import build_dispatcher
 from solomon.runner import build_reminders as build_reminders_service
-from solomon.services import asks
+from solomon.services import asks, morning
 from solomon.services.reminders import (
     ReminderService,
     by_task,
@@ -411,18 +412,25 @@ class FakeClearMoved:
 
 
 class FakeAnnouncer:
-    """Строка в чат без кнопки: вместо Telegram — список текстов."""
+    """Строка в чат без кнопки: вместо Telegram — список текстов.
 
-    def __init__(self, broken: bool = False, events: list[str] | None = None) -> None:
+    `label` — чем сообщение отмечается в общем порядке событий: строкой
+    «Перенёс» или утренним планом — оба уходят без кнопки.
+    """
+
+    def __init__(
+        self, broken: bool = False, events: list[str] | None = None, label: str = "moved"
+    ) -> None:
         self.broken = broken
         self.sent: list[str] = []
         self.events = events if events is not None else []
+        self.label = label
 
     async def __call__(self, *, text: str) -> int:
         if self.broken:
             raise RuntimeError("Telegram: Bad Gateway")
         self.sent.append(text)
-        self.events.append("moved")
+        self.events.append(self.label)
         return 60 + len(self.sent)
 
 
@@ -906,7 +914,15 @@ async def test_moved_line_goes_to_the_owner_without_a_button(
         "due_moved_at": MOVED_AT.isoformat(),
         "next_fire_at": NEXT_FRIDAY.replace(hour=9).isoformat(),
     }
-    client = FakeRpcClient({"due_reminders": [], "moved_tasks": [row], "clear_due_moved": True})
+    # Утренний план в 10:00 уже был (§20.2): шаг плана только спрашивает базу.
+    client = FakeRpcClient(
+        {
+            "morning_plan_sent": True,
+            "due_reminders": [],
+            "moved_tasks": [row],
+            "clear_due_moved": True,
+        }
+    )
     service = build_reminders_service(make_settings(), cast(Client, client), bot)
 
     assert await service.tick(MONDAY_MORNING) == 1
@@ -915,7 +931,13 @@ async def test_moved_line_goes_to_the_owner_without_a_button(
     assert sent.chat_id == OWNER_ID
     assert sent.text.startswith("Перенёс: отправить расчёт клиенту.")
     assert sent.reply_markup is None
-    assert client.calls == ["roll_repeats", "due_reminders", "moved_tasks", "clear_due_moved"]
+    assert client.calls == [
+        "roll_repeats",
+        "morning_plan_sent",
+        "due_reminders",
+        "moved_tasks",
+        "clear_due_moved",
+    ]
     assert client.params[-1] == {
         "owner_telegram_id": OWNER_ID,
         "task_id": "0e2f",
@@ -1265,5 +1287,428 @@ async def test_undated_question_goes_to_the_owner_with_the_button(
         "owner_telegram_id": OWNER_ID,
         "task_id": UNDATED_ID,
         "question": texts.UNDATED_QUESTION,
+        "telegram_message_id": 1,
+    }
+
+
+# --- Утренний план (techspec/20-morning-plan.md §20.2, §20.4) ---
+
+# Понедельник, 5 октября 2026 года, 08:00 у владельца: окно плана открылось.
+PLAN_MORNING = datetime(2026, 10, 5, 8, 0, tzinfo=TZ)
+PLAN_DAY = date(2026, 10, 5)
+MEETING_ID = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f"
+BULB_ID = "0f0e0d0c-0b0a-4908-8706-050403020100"
+
+
+def make_day_tasks() -> list[DayTask]:
+    """Дела дня, как их отдаёт `day_tasks`: в порядке срока, дело на день — в 18:00."""
+    return [
+        DayTask(
+            task_id=MEETING_ID,
+            title="встреча с Ольгой",
+            due_at=PLAN_MORNING.replace(hour=9),
+            due_precision="time",
+        ),
+        DayTask(
+            task_id=BULB_ID,
+            title="купить лампочку в коридор",
+            due_at=PLAN_MORNING.replace(hour=18),
+            due_precision="day",
+        ),
+    ]
+
+
+PLAN_TEXT = "\n".join(
+    [
+        "Доброе утро! На сегодня:",
+        "09:00 — встреча с Ольгой",
+        "В течение дня — купить лампочку в коридор",
+    ]
+)
+
+
+class FakePlanSent:
+    """`morning_plan_sent` без базы: был ли план и о каком дне спросили."""
+
+    def __init__(self, sent: bool = False, broken: bool = False) -> None:
+        self.sent = sent
+        self.broken = broken
+        self.calls: list[tuple[int, date]] = []
+
+    async def __call__(self, *, owner_telegram_id: int, day: date) -> bool:
+        self.calls.append((owner_telegram_id, day))
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return self.sent
+
+
+class FakeDayTasks:
+    """`day_tasks` без базы: какие дела отдать и с какими границами спросили."""
+
+    def __init__(self, tasks: list[DayTask] | None = None, broken: bool = False) -> None:
+        self.tasks = make_day_tasks() if tasks is None else tasks
+        self.broken = broken
+        self.calls: list[tuple[int, morning.DayBounds]] = []
+
+    async def __call__(self, *, owner_telegram_id: int, bounds: morning.DayBounds) -> list[DayTask]:
+        self.calls.append((owner_telegram_id, bounds))
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return list(self.tasks)
+
+
+class FakePlanRecorder:
+    """`record_morning_plan` без базы: что записали; `False` — план за день уже был."""
+
+    def __init__(
+        self, recorded: bool = True, broken: bool = False, events: list[str] | None = None
+    ) -> None:
+        self.recorded = recorded
+        self.broken = broken
+        self.calls: list[tuple[int, date, int]] = []
+        self.events = events if events is not None else []
+
+    async def __call__(
+        self, *, owner_telegram_id: int, day: date, telegram_message_id: int
+    ) -> bool:
+        self.events.append("record")
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        self.calls.append((owner_telegram_id, day, telegram_message_id))
+        return self.recorded
+
+
+def build_planning(
+    plan_sent: FakePlanSent | None = None,
+    day_tasks: FakeDayTasks | None = None,
+    recorder: FakePlanRecorder | None = None,
+    announcer: FakeAnnouncer | None = None,
+    notifier: FakeNotifier | None = None,
+    due: FakeDue | None = None,
+    undated: FakeUndated | None = None,
+) -> tuple[ReminderService, FakePlanSent, FakeDayTasks, FakePlanRecorder, FakeAnnouncer]:
+    """Сервис напоминаний с шагом утреннего плана — на подделках, без базы и сети."""
+    checker = plan_sent or FakePlanSent()
+    lister = day_tasks or FakeDayTasks()
+    record = recorder or FakePlanRecorder()
+    speaker = announcer or FakeAnnouncer(label="plan")
+    service = ReminderService(
+        settings=make_settings(),
+        due=due or FakeDue(),
+        mark_sent=FakeMarks(),
+        close_task=FakeCloser(),
+        notify=notifier or FakeNotifier(),
+        moved=FakeMoved(),
+        clear_moved=FakeClearMoved(),
+        announce=speaker,
+        clock=lambda: PLAN_MORNING,
+        undated=undated,
+        record_ask=FakeAskRecorder() if undated is not None else None,
+        plan_sent=checker,
+        day_tasks=lister,
+        record_plan=record,
+    )
+    return service, checker, lister, record, speaker
+
+
+async def test_morning_plan_is_announced_and_then_recorded() -> None:
+    """В 08:00 план уходит строкой без кнопки — и только потом записывается (§20.4)."""
+    events: list[str] = []
+    service, plan_sent, day_tasks, recorder, announcer = build_planning(
+        recorder=FakePlanRecorder(events=events),
+        announcer=FakeAnnouncer(label="plan", events=events),
+    )
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert plan_sent.calls == [(OWNER_ID, PLAN_DAY)]
+    assert day_tasks.calls == [(OWNER_ID, morning.day_bounds(PLAN_MORNING, TZ))]
+    assert announcer.sent == [PLAN_TEXT]
+    assert events == ["plan", "record"]
+    assert recorder.calls == [(OWNER_ID, PLAN_DAY, 61)]
+
+
+async def test_empty_day_plan_says_there_is_nothing() -> None:
+    """Дел на сегодня нет — план всё равно уходит: «дел нет» тоже ответ (§20.3)."""
+    service, _, _, recorder, announcer = build_planning(day_tasks=FakeDayTasks([]))
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert announcer.sent == ["Доброе утро! На сегодня дел нет."]
+    assert len(recorder.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("moment", "planned"),
+    [
+        (datetime(2026, 10, 5, 7, 59, tzinfo=TZ), False),
+        (datetime(2026, 10, 5, 8, 0, tzinfo=TZ), True),
+        (datetime(2026, 10, 5, 11, 59, tzinfo=TZ), True),
+        (datetime(2026, 10, 5, 12, 0, tzinfo=TZ), False),
+        (datetime(2026, 10, 5, 23, 0, tzinfo=TZ), False),
+        (datetime(2026, 10, 5, 3, 0, tzinfo=TZ), False),
+    ],
+)
+async def test_plan_only_between_eight_and_noon(moment: datetime, planned: bool) -> None:
+    """Вне 08:00–12:00 база о плане даже не спрашивается (§20.2)."""
+    service, plan_sent, _, _, announcer = build_planning()
+
+    assert await service.tick(moment) == (1 if planned else 0)
+    assert bool(plan_sent.calls) is planned
+    assert bool(announcer.sent) is planned
+
+
+async def test_late_start_catches_up_with_the_whole_day() -> None:
+    """Бот запустился в 11:00 — план первым тиком, и дело на 10:00 в нём есть (§20.1)."""
+    late = PLAN_MORNING.replace(hour=11)
+    passed = DayTask(
+        task_id=MEETING_ID,
+        title="встреча с Ольгой",
+        due_at=PLAN_MORNING.replace(hour=10),
+        due_precision="time",
+    )
+    service, _, _, _, announcer = build_planning(day_tasks=FakeDayTasks([passed]))
+
+    assert await service.tick(late) == 1
+    assert announcer.sent == ["Доброе утро! На сегодня:\n10:00 — встреча с Ольгой"]
+
+
+async def test_start_at_noon_waits_for_tomorrow_morning() -> None:
+    """С 12:00 сегодняшний план не догоняется; следующий — завтра в 08:00 (§20.2)."""
+    service, plan_sent, _, _, announcer = build_planning()
+
+    assert await service.tick(PLAN_MORNING.replace(hour=12)) == 0
+    assert await service.tick(datetime(2026, 10, 6, 7, 59, tzinfo=TZ)) == 0
+    assert plan_sent.calls == []
+
+    assert await service.tick(datetime(2026, 10, 6, 8, 0, tzinfo=TZ)) == 1
+    assert plan_sent.calls == [(OWNER_ID, date(2026, 10, 6))]
+    assert len(announcer.sent) == 1
+
+
+async def test_one_plan_a_day_by_process_memory() -> None:
+    """План ушёл — до конца дня база о плане больше не спрашивается."""
+    service, plan_sent, day_tasks, recorder, announcer = build_planning()
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert await service.tick(PLAN_MORNING.replace(minute=1)) == 0
+    assert await service.tick(PLAN_MORNING.replace(hour=11, minute=59)) == 0
+
+    assert len(plan_sent.calls) == 1
+    assert len(day_tasks.calls) == 1
+    assert len(announcer.sent) == 1
+    assert len(recorder.calls) == 1
+
+
+async def test_plan_already_in_the_database_is_not_sent_after_restart() -> None:
+    """После перезапуска память процесса пуста, но строка в базе есть — второго плана нет."""
+    service, plan_sent, day_tasks, recorder, announcer = build_planning(
+        plan_sent=FakePlanSent(sent=True)
+    )
+
+    assert await service.tick(PLAN_MORNING.replace(hour=9)) == 0
+    assert await service.tick(PLAN_MORNING.replace(hour=9, minute=1)) == 0
+
+    # Нашёлся в базе — процесс запомнил день и больше туда не ходит.
+    assert len(plan_sent.calls) == 1
+    assert day_tasks.calls == []
+    assert announcer.sent == []
+    assert recorder.calls == []
+
+
+async def test_next_day_plans_again() -> None:
+    """Назавтра в 08:00 — снова план: память — о дне, а не навсегда."""
+    service, _, _, _, announcer = build_planning()
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert await service.tick(datetime(2026, 10, 6, 8, 0, tzinfo=TZ)) == 1
+    assert len(announcer.sent) == 2
+
+
+async def test_reminder_of_the_same_minute_goes_after_the_plan() -> None:
+    """Сначала обзор дня, потом созревшее напоминание — оба в одном тике (§20.2)."""
+    events: list[str] = []
+    ripe = [make_due("before", PLAN_MORNING, task_id=MEETING_ID)]
+    service, _, _, _, _ = build_planning(
+        announcer=FakeAnnouncer(label="plan", events=events),
+        notifier=FakeNotifier(events=events),
+        due=FakeDue(ripe),
+    )
+
+    assert await service.tick(PLAN_MORNING) == 2
+    assert events == ["plan", "reminder"]
+
+
+async def test_no_undated_question_in_the_plan_tick() -> None:
+    """План ушёл в этом тике — вопрос о деле без срока ждёт (§20.2, §19.2)."""
+    late = PLAN_MORNING.replace(hour=10, minute=30)
+    undated = FakeUndated(make_undated())
+    service, _, _, _, announcer = build_planning(undated=undated)
+
+    assert await service.tick(late) == 1
+    assert announcer.sent == [PLAN_TEXT]
+    assert undated.calls == []
+
+    # Следующий тик плана не шлёт, и о вопросе решает база — с её 15 минутами.
+    await service.tick(late.replace(minute=31))
+    assert len(undated.calls) == 1
+
+
+async def test_failed_send_records_nothing_and_next_tick_sends_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Не ушло — ничего не записано, следующий тик до 12:00 пришлёт снова (§20.4)."""
+    announcer = FakeAnnouncer(label="plan", broken=True)
+    service, _, _, recorder, _ = build_planning(announcer=announcer)
+
+    assert await service.tick(PLAN_MORNING) == 0
+    assert recorder.calls == []
+    assert "Утренний план не ушёл" in caplog.text
+    assert any(record.levelname == "WARNING" for record in caplog.records)
+
+    announcer.broken = False
+    assert await service.tick(PLAN_MORNING.replace(minute=1)) == 1
+    assert announcer.sent == [PLAN_TEXT]
+    assert len(recorder.calls) == 1
+
+
+async def test_failed_plan_record_keeps_the_day(caplog: pytest.LogCaptureFixture) -> None:
+    """Ушло, а база не записала: второго плана сегодня нет (§20.4)."""
+    service, plan_sent, _, _, announcer = build_planning(recorder=FakePlanRecorder(broken=True))
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert "Утренний план ушёл, но не записан" in caplog.text
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+    assert await service.tick(PLAN_MORNING.replace(minute=1)) == 0
+    assert len(plan_sent.calls) == 1
+    assert len(announcer.sent) == 1
+
+
+async def test_plan_already_recorded_is_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """`record_morning_plan` вернула `false`: строка за этот день уже была."""
+    service, _, _, _, announcer = build_planning(recorder=FakePlanRecorder(recorded=False))
+
+    assert await service.tick(PLAN_MORNING) == 1
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert any("ушёл, но не записан" in record.getMessage() for record in warnings)
+
+    assert await service.tick(PLAN_MORNING.replace(minute=1)) == 0
+    assert len(announcer.sent) == 1
+
+
+@pytest.mark.parametrize("broken", ["plan_sent", "day_tasks"])
+async def test_broken_database_is_logged_and_reminders_still_go(
+    broken: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """База не ответила при сборе — строка в журнал, напоминания уходят (§20.4)."""
+    plan_sent = FakePlanSent(broken=broken == "plan_sent")
+    day_tasks = FakeDayTasks(broken=broken == "day_tasks")
+    notifier = FakeNotifier()
+    due = FakeDue([make_due("before", PLAN_MORNING, task_id=MEETING_ID)])
+    service, _, _, recorder, announcer = build_planning(
+        plan_sent=plan_sent, day_tasks=day_tasks, notifier=notifier, due=due
+    )
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert [task_id for task_id, _ in notifier.sent] == [MEETING_ID]
+    assert announcer.sent == []
+    assert recorder.calls == []
+    assert "Утренний план не собран" in caplog.text
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+    # Следующий тик до 12:00 пробует снова; напоминание уже ушло.
+    plan_sent.broken = False
+    day_tasks.broken = False
+    due.ripe = []
+    assert await service.tick(PLAN_MORNING.replace(minute=1)) == 1
+    assert announcer.sent == [PLAN_TEXT]
+
+
+async def test_log_counts_tasks_not_their_titles(caplog: pytest.LogCaptureFixture) -> None:
+    """Журнал: сколько дел в ушедшем плане; сути дел в нём нет (§20.4)."""
+    caplog.set_level(logging.INFO)
+    service, _, _, _, _ = build_planning()
+
+    await service.tick(PLAN_MORNING)
+
+    assert "Утренний план ушёл: дел 2" in caplog.text
+    assert "Ольг" not in caplog.text
+    assert "лампочк" not in caplog.text
+
+
+async def test_without_the_new_dependencies_there_is_no_plan() -> None:
+    """Сервис без шага плана — как до этапа 019: в 08:00 ничего не уходит."""
+    announcer = FakeAnnouncer()
+    service, _, _, _ = build_reminders(announcer=announcer)
+
+    assert await service.tick(PLAN_MORNING) == 0
+    assert announcer.sent == []
+
+
+async def test_morning_plan_goes_to_the_owner_without_a_button(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Сборка из `runner.py`: после перекатывания, до напоминаний, без кнопки, с записью."""
+    tasks: list[dict[str, object]] = [
+        {
+            "task_id": MEETING_ID,
+            "title": "встреча с Ольгой",
+            "due_at": "2026-10-05T04:00:00+00:00",
+            "due_precision": "time",
+        },
+        {
+            "task_id": BULB_ID,
+            "title": "купить лампочку в коридор",
+            "due_at": "2026-10-05T13:00:00+00:00",
+            "due_precision": "day",
+        },
+    ]
+    ripe: dict[str, object] = {
+        "id": "b17c",
+        "task_id": MEETING_ID,
+        "stage": "before",
+        "fire_at": PLAN_MORNING.isoformat(),
+        "title": "встреча с Ольгой",
+        "due_at": PLAN_MORNING.replace(hour=9).isoformat(),
+        "due_precision": "time",
+    }
+    client = FakeRpcClient(
+        {
+            "morning_plan_sent": False,
+            "day_tasks": tasks,
+            "record_morning_plan": True,
+            "due_reminders": [ripe],
+            "moved_tasks": [],
+        }
+    )
+    service = build_reminders_service(make_settings(), cast(Client, client), bot)
+
+    assert await service.tick(PLAN_MORNING) == 2
+    plan, reminder = session.sent[0], session.sent[1]
+    assert isinstance(plan, SendMessage)
+    assert plan.chat_id == OWNER_ID
+    assert plan.text == PLAN_TEXT
+    assert plan.reply_markup is None
+    assert isinstance(reminder, SendMessage)
+    assert isinstance(reminder.reply_markup, InlineKeyboardMarkup)
+    assert client.calls == [
+        "roll_repeats",
+        "morning_plan_sent",
+        "day_tasks",
+        "record_morning_plan",
+        "due_reminders",
+        "mark_reminders_sent",
+        "moved_tasks",
+    ]
+    bounds = morning.day_bounds(PLAN_MORNING, TZ)
+    assert client.params[1] == {"owner_telegram_id": OWNER_ID, "day": "2026-10-05"}
+    assert client.params[2] == {
+        "owner_telegram_id": OWNER_ID,
+        "day_start": bounds.day_start.isoformat(),
+        "day_end": bounds.day_end.isoformat(),
+    }
+    # Строка в `morning_plans` — за сегодняшний день, с id сообщения плана.
+    assert client.params[3] == {
+        "owner_telegram_id": OWNER_ID,
+        "day": "2026-10-05",
         "telegram_message_id": 1,
     }

@@ -18,6 +18,11 @@ aiogram, ни про сеть, и тест подставляет свою за�
 Вопрос о деле без срока (`techspec/19-undated.md`) — последний шаг того же
 тика (§19.2): окно, границы и слова — в `services/asks.py`, отбор и запись —
 в базе, здесь — порядок «отправить → записать» и память о дате вопроса.
+
+Утренний план (`techspec/20-morning-plan.md`) — шаг сразу после
+перекатывания, до созревших напоминаний (§20.2): окно, границы дня и строки —
+в `services/morning.py`, дела дня и память о плане — в базе, здесь — тот же
+порядок «отправить → записать» и дата плана в памяти процесса.
 """
 
 from __future__ import annotations
@@ -33,11 +38,13 @@ from supabase import Client
 
 from solomon import texts
 from solomon.config import Settings
+from solomon.db import morning as db_morning
 from solomon.db import reminders as db_reminders
+from solomon.db.morning import DayTask
 from solomon.db.reminders import DueReminder, MovedTask, Planned, UndatedTask
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import ACTIVE_STATUS, TaskDetails
-from solomon.services import asks
+from solomon.services import asks, morning
 from solomon.services.repeat import occurrence_seconds
 from solomon.services.understanding import Clock
 
@@ -197,6 +204,28 @@ class AskRecorder(Protocol):
     ) -> TaskDetails | None: ...
 
 
+class PlanChecker(Protocol):
+    """Был ли у владельца утренний план за этот день (§20.4)."""
+
+    async def __call__(self, *, owner_telegram_id: int, day: date) -> bool: ...
+
+
+class DayTaskLister(Protocol):
+    """Дела владельца со сроком в границах дня (§20.1), в порядке базы."""
+
+    async def __call__(
+        self, *, owner_telegram_id: int, bounds: morning.DayBounds
+    ) -> list[DayTask]: ...
+
+
+class PlanRecorder(Protocol):
+    """Записать ушедший план (§20.4). `False` — план за день уже записан."""
+
+    async def __call__(
+        self, *, owner_telegram_id: int, day: date, telegram_message_id: int
+    ) -> bool: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Completion:
     """Чем кончилось нажатие «Сделано» и что сказать человеку.
@@ -227,6 +256,9 @@ class ReminderService:
         roll: Roller | None = None,
         undated: UndatedFinder | None = None,
         record_ask: AskRecorder | None = None,
+        plan_sent: PlanChecker | None = None,
+        day_tasks: DayTaskLister | None = None,
+        record_plan: PlanRecorder | None = None,
     ) -> None:
         self._settings = settings
         self._due = due
@@ -245,6 +277,13 @@ class ReminderService:
         # День владельца, когда процесс задал вопрос: второго в этот день не
         # будет, даже если база вопрос не записала (§19.4). Бот один (§16.3).
         self._asked_on: date | None = None
+        # Без них утреннего плана нет — как до этапа 019 (§20.2).
+        self._plan_sent = plan_sent
+        self._day_tasks = day_tasks
+        self._record_plan = record_plan
+        # День владельца, когда план ушёл или нашёлся в базе: до завтра шаг
+        # в базу не ходит, и второго плана нет, даже если запись не удалась.
+        self._planned_on: date | None = None
         self._clock = clock or self._now
 
     def _now(self) -> datetime:
@@ -310,6 +349,29 @@ class ReminderService:
                 telegram_message_id=telegram_message_id,
             )
 
+        async def plan_sent(*, owner_telegram_id: int, day: date) -> bool:
+            return await db_morning.morning_plan_sent(
+                db, owner_telegram_id=owner_telegram_id, day=day
+            )
+
+        async def day_tasks(*, owner_telegram_id: int, bounds: morning.DayBounds) -> list[DayTask]:
+            return await db_morning.day_tasks(
+                db,
+                owner_telegram_id=owner_telegram_id,
+                day_start=bounds.day_start,
+                day_end=bounds.day_end,
+            )
+
+        async def record_plan(
+            *, owner_telegram_id: int, day: date, telegram_message_id: int
+        ) -> bool:
+            return await db_morning.record_morning_plan(
+                db,
+                owner_telegram_id=owner_telegram_id,
+                day=day,
+                telegram_message_id=telegram_message_id,
+            )
+
         return cls(
             settings=settings,
             due=due,
@@ -322,34 +384,87 @@ class ReminderService:
             roll=roll,
             undated=undated,
             record_ask=record_ask,
+            plan_sent=plan_sent,
+            day_tasks=day_tasks,
+            record_plan=record_plan,
         )
 
     async def tick(self, now: datetime | None = None) -> int:
-        """Один заход: перекатывание (§13.4), созревшее (§6.2), строки «Перенёс» (§11.4)
-        и последним — вопрос о деле без срока (§19.2), если до него ничего не ушло.
+        """Один заход: перекатывание (§13.4), утренний план (§20.2), созревшее
+        (§6.2), строки «Перенёс» (§11.4) и последним — вопрос о деле без срока
+        (§19.2), если до него ничего не ушло.
 
         Порядок нарочно такой: новый раз получает свои ступени до выборки, и
-        созревшая уходит этим же тиком; напоминание, ушедшее в этом тике, уже
-        помечено, и «Напомню» в строке о переносе его не назовёт. Возвращает
-        число ушедших сообщений. Сбой перекатывания — строка в журнал, тик
-        идёт дальше. Отказ базы на отборе выходит наружу — цикл его ловит и
-        живёт дальше; отказ на одной задаче не мешает остальным.
+        созревшая уходит этим же тиком; план называет дела уже на сегодняшнем
+        разе и идёт до напоминаний — сначала обзор дня; напоминание, ушедшее в
+        этом тике, уже помечено, и «Напомню» в строке о переносе его не
+        назовёт. Возвращает число ушедших сообщений, план — среди них. Сбой
+        перекатывания или сбора плана — строка в журнал, тик идёт дальше.
+        Отказ базы на отборе выходит наружу — цикл его ловит и живёт дальше;
+        отказ на одной задаче не мешает остальным.
         """
         moment = now or self._clock()
         owner = self._settings.owner_telegram_id
         await self._roll_quietly(moment)
+        sent = 1 if await self._send_plan(moment) else 0
         due = await self._due(owner_telegram_id=owner, now=moment)
-        sent = 0
         for task_id, group in by_task(due).items():
             if await self._send_one(task_id, group, moment):
                 sent += 1
         for task in await self._moved(owner_telegram_id=owner):
             if await self._announce_one(task, moment):
                 sent += 1
-        # В этом тике уже ушло напоминание или «Перенёс» — тишины нет (§19.2).
+        # В этом тике уже ушли план, напоминание или «Перенёс» — тишины нет
+        # (§19.2, §20.2).
         if sent == 0 and await self._ask_undated(moment):
             sent += 1
         return sent
+
+    async def _send_plan(self, now: datetime) -> bool:
+        """Утренний план (§20.4): отправить и только потом записать.
+
+        Окно и «сегодня план уже был» решает бот; был ли план в базе и дела
+        дня — база, по границам из `services/morning.py`. Сбой сбора — строка
+        в журнал, тик идёт к напоминаниям, и следующий тик до 12:00 попробует
+        снова. Не ушло — ничего не записано, следующий тик пришлёт снова.
+        Ушло — процесс помнит день, и второго плана сегодня не будет, даже
+        если запись не удалась. Возвращает, ушёл ли план.
+        """
+        if self._plan_sent is None or self._day_tasks is None or self._record_plan is None:
+            return False
+        timezone = self._settings.owner_timezone
+        if not morning.in_window(now, timezone):
+            return False
+        bounds = morning.day_bounds(now, timezone)
+        if self._planned_on == bounds.day:
+            return False
+        owner = self._settings.owner_telegram_id
+        try:
+            if await self._plan_sent(owner_telegram_id=owner, day=bounds.day):
+                self._planned_on = bounds.day
+                return False
+            tasks = await self._day_tasks(owner_telegram_id=owner, bounds=bounds)
+        except DatabaseError as error:
+            logger.error("Утренний план не собран: %s", error)
+            return False
+        try:
+            message_id = await self._announce(text=morning.plan_text(tasks, timezone))
+        except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
+            logger.warning("Утренний план не ушёл: %s", error)
+            return False
+        self._planned_on = bounds.day
+        # Суть дел в журнал не пишется: только сколько их (§20.4).
+        logger.info("Утренний план ушёл: дел %s", len(tasks))
+        try:
+            recorded = await self._record_plan(
+                owner_telegram_id=owner, day=bounds.day, telegram_message_id=message_id
+            )
+        except DatabaseError as error:
+            logger.error("Утренний план ушёл, но не записан: %s", error)
+            return True
+        if not recorded:
+            logger.warning("Утренний план ушёл, но не записан: план за этот день уже есть")
+        return True
 
     async def _ask_undated(self, now: datetime) -> bool:
         """Вопрос о деле без срока (§19.4): отправить и только потом записать.
