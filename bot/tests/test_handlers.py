@@ -456,6 +456,18 @@ async def test_help_tells_about_questions(
     assert "по записанному" in session.texts[0]
 
 
+async def test_help_tells_about_forwarded_conversations(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    """Переписка (`techspec/18-forwarded.md`): /help знает, что её можно переслать куском."""
+    dispatcher = build_dispatcher(settings)
+
+    await dispatcher.feed_update(bot, make_update("/help"))
+
+    assert "кусок переписки" in session.texts[0]
+    assert "прочитаю её целиком" in session.texts[0]
+
+
 # --- Скачивание с повтором (`techspec/09-voice.md` §9.3) ---------------------
 
 # Адрес файла у Telegram: в нём токен бота, и в журнал он попадать не должен.

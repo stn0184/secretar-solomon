@@ -1877,3 +1877,54 @@ async def test_own_message_records_no_sender() -> None:
     await service.record_from_message(chat_id=42, telegram_message_id=7, text="купить лампочку")
 
     assert messages.calls[0]["forwarded_from"] is None
+
+
+# --- Переписка, пересланная разом (`techspec/18-forwarded.md`) --------------------
+
+
+def test_more_in_conversation_names_the_rest_in_quotes() -> None:
+    """Абзац «В переписке ещё» (§18.4): суть дословно от модели, в кавычках."""
+    assert texts.more_in_conversation(["купить хлеб", "позвонить маме"]) == (
+        "В переписке ещё: «купить хлеб», «позвонить маме». "
+        "Нужны — напишите или надиктуйте отдельно."
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "head"),
+    [
+        ("task", "Из переписки записал: "),
+        ("idea", "Из переписки записал идею: "),
+        ("wish", "Из переписки записал желание: "),
+    ],
+)
+def test_conversation_heads_keep_the_usual_retelling(kind: str, head: str) -> None:
+    """«Из переписки записал: …» и дальше обычный пересказ (§18.4)."""
+    reply = texts.recorded_reply(
+        kind=kind,
+        title="ответить Ренате",
+        due="сегодня, 13:00",
+        remind_at="сегодня в 12:00",
+        heads=texts.CONVERSATION_BY_KIND,
+    )
+
+    assert reply == f"{head}ответить Ренате. Срок: сегодня, 13:00. Напомню: сегодня в 12:00"
+
+
+def test_conversation_question_follows_its_head() -> None:
+    """С вопросом (§10.1): «Из переписки записал: <суть>. <вопрос>»."""
+    reply = texts.asked_reply(
+        title="ответить Ренате", question="К какому сроку?", heads=texts.CONVERSATION_BY_KIND
+    )
+
+    assert reply == "Из переписки записал: ответить Ренате. К какому сроку?"
+
+
+def test_conversation_answers_without_an_errand() -> None:
+    assert texts.CONVERSATION_NO_ERRAND == "В переписке дел для вас не нашёл."
+    assert texts.CONVERSATION_ABOUT_ME == (
+        "Из переписки в память не записываю — скажите словами, что запомнить."
+    )
+    assert texts.CONVERSATION_NOT_HEARD == (
+        "Не расслышал переписку. Сообщения сохранил — перешлите ещё раз или опишите словами."
+    )
