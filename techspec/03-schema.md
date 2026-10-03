@@ -448,8 +448,10 @@ RLS — как у остальных (§4.2).
   миграция 018: `table (task_id uuid, title text, created_at
   timestamptz, asked_at timestamptz)`, ноль строк или одна. Пусто, если
   сегодня уже спрашивал, есть живой открытый вопрос или не было 15
-  минут тишины; иначе — первое по порядку §19.1 активное `task` без
-  срока, не тронутое сегодня. Границы считает бот.
+  минут тишины — в том числе после утреннего плана: строка
+  `morning_plans` младше 15 минут (§3.9; миграция 019 пересоздаёт
+  функцию с той же подписью); иначе — первое по порядку §19.1 активное
+  `task` без срока, не тронутое сегодня. Границы считает бот.
 - `record_ask(owner_telegram_id bigint, task_id uuid, question text,
   telegram_message_id bigint) returns tasks` — записывает ушедший
   вопрос (§19.4), миграция 018: у задачи `open_question` и
@@ -636,3 +638,38 @@ owner_settings` (только `service_role`): незнакомое имя по�
 бот работает дальше. RLS — §4.2, та же политика `for all to
 authenticated`; приложение таблицу не читает, пояс берёт `edit_task`.
 Миграция 009.
+
+### 3.9 `morning_plans` — утренние планы
+
+Строка на день, в который бот прислал утренний план (§20.4): по ней план
+за день один, и после перезапуска второго не будет.
+
+| Колонка | Тип | Что это |
+| --- | --- | --- |
+| `id` | uuid, ключ, `default gen_random_uuid()` | §3.1 |
+| `owner_telegram_id` | bigint | владелец (§3.1) |
+| `day` | date | день владельца по его поясу, за который ушёл план |
+| `telegram_message_id` | bigint, `not null` | сообщение плана в чате |
+| `created_at` | timestamptz, `default now()` | когда план записан — то есть когда ушёл |
+
+`unique (owner_telegram_id, day)` — ограничение
+`morning_plans_owner_day_key`: план за день один. Строка пишется сразу
+после отправки, поэтому id сообщения у неё всегда есть, а `created_at` —
+время плана; по нему вопрос о деле без срока ждёт 15 минут тишины
+(`undated_to_ask`, §3.5). RLS — §4.2, та же политика `for all to
+authenticated`; приложение таблицу не читает.
+
+Функции — только `service_role` (`public`, `anon` и `authenticated` —
+`revoke`), миграция 019 (`20261003200000_morning_plan.sql`):
+
+- `morning_plan_sent(owner_telegram_id bigint, day date) returns
+  boolean` — есть ли строка владельца за этот день.
+- `day_tasks(owner_telegram_id bigint, day_start timestamptz, day_end
+  timestamptz)` → `table (task_id uuid, title text, due_at timestamptz,
+  due_precision text)` — задачи владельца с `status = active`, `kind =
+  task` и `day_start ≤ due_at < day_end`, обе точности; порядок `due_at`,
+  `created_at`, `id`. Повторяющаяся — по сроку своего раза. Границы
+  считает бот: сегодняшняя и завтрашняя полночь по поясу владельца.
+- `record_morning_plan(owner_telegram_id bigint, day date,
+  telegram_message_id bigint) returns boolean` — вставляет строку;
+  строка за этот день уже есть — ничего не меняет и возвращает `false`.
