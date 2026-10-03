@@ -17,8 +17,11 @@ import {
   formatMoment,
   formatRecorded,
   formatTime,
+  isPart,
   isoWithOffset,
   momentFromInputs,
+  PART_WORDS,
+  partLabel,
   plural,
   timeInputValue,
 } from "./format.ts";
@@ -57,6 +60,34 @@ describe("formatDue", () => {
 
   it("точность не задана — как день", () => {
     assert.equal(formatDue(new Date(2026, 9, 15, 18, 0), null, now), "четверг, 15 октября");
+  });
+
+  it("часть дня — словом, без часа её начала (§21.4)", () => {
+    assert.equal(formatDue(new Date(2026, 8, 30, 8, 0), "morning", now), "сегодня утром");
+    assert.equal(formatDue(new Date(2026, 8, 30, 12, 0), "afternoon", now), "сегодня днём");
+    assert.equal(formatDue(new Date(2026, 8, 30, 18, 0), "evening", now), "сегодня вечером");
+    assert.equal(
+      formatDue(new Date(2026, 9, 9, 8, 0), "morning", now),
+      "пятница, 9 октября, утром",
+    );
+  });
+});
+
+describe("часть дня", () => {
+  it("слова частей — те же, что у бота", () => {
+    assert.deepEqual(PART_WORDS, { morning: "утром", afternoon: "днём", evening: "вечером" });
+    assert.equal(partLabel("morning"), "Утром");
+    assert.equal(partLabel("afternoon"), "Днём");
+    assert.equal(partLabel("evening"), "Вечером");
+  });
+
+  it("частью считаются только три значения", () => {
+    assert.equal(isPart("morning"), true);
+    assert.equal(isPart("afternoon"), true);
+    assert.equal(isPart("evening"), true);
+    assert.equal(isPart("day"), false);
+    assert.equal(isPart("time"), false);
+    assert.equal(isPart(null), false);
   });
 });
 

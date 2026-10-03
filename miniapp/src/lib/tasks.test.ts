@@ -25,6 +25,7 @@ import {
   formatDuration,
   groupOf,
   groupTasks,
+  isOverdue,
   messageCaption,
   messageLines,
   needsSaving,
@@ -88,6 +89,23 @@ describe("groupOf", () => {
     assert.equal(groupOf(task({ dueAt: new Date(2026, 8, 30, 18, 0), duePrecision: "day" }), evening), "today");
     // пустая точность — как день
     assert.equal(groupOf(task({ dueAt: new Date(2026, 8, 30, 18, 0), duePrecision: null }), evening), "today");
+  });
+
+  it("часть дня — как день: прошло начало части, но день не кончился — сегодня (§21.4)", () => {
+    const morning = task({ dueAt: new Date(2026, 8, 30, 8, 0), duePrecision: "morning" });
+    assert.equal(isOverdue(morning, now), false);
+    assert.equal(groupOf(morning, now), "today");
+    const evening = task({ dueAt: new Date(2026, 8, 30, 18, 0), duePrecision: "evening" });
+    assert.equal(isOverdue(evening, new Date(2026, 8, 30, 23, 59)), false);
+    assert.equal(groupOf(evening, new Date(2026, 8, 30, 23, 59)), "today");
+  });
+
+  it("часть дня просрочена со следующего дня", () => {
+    const yesterday = task({ dueAt: new Date(2026, 8, 29, 12, 0), duePrecision: "afternoon" });
+    assert.equal(isOverdue(yesterday, now), true);
+    assert.equal(groupOf(yesterday, now), "overdue");
+    const evening = task({ dueAt: new Date(2026, 8, 30, 18, 0), duePrecision: "evening" });
+    assert.equal(isOverdue(evening, new Date(2026, 9, 1, 0, 0)), true);
   });
 
   it("на неделе — ближайшие семь дней, дальше — позже", () => {
@@ -155,6 +173,13 @@ describe("parseTask", () => {
     assert.equal(parsed.priority, "normal");
     assert.equal(parsed.kind, "task");
     assert.deepEqual(parsed.people, []);
+  });
+
+  it("часть дня читается как есть; незнакомая точность — днём", () => {
+    for (const part of ["morning", "afternoon", "evening"] as const) {
+      assert.equal(parseTask({ ...row, due_precision: part })?.duePrecision, part);
+    }
+    assert.equal(parseTask({ ...row, due_precision: "night" })?.duePrecision, "day");
   });
 
   it("без id или названия строка не годится", () => {
@@ -394,6 +419,12 @@ describe("draftOf", () => {
     assert.equal(draftOf(atNoon).day, "2026-10-05");
   });
 
+  it("часть дня — день срока, поле часа пустое", () => {
+    const morning = task({ dueAt: new Date(2026, 9, 5, 8, 0), duePrecision: "morning" });
+    assert.equal(draftOf(morning).day, "2026-10-05");
+    assert.equal(draftOf(morning).time, "");
+  });
+
   it("без срока — флажок и пустые поля; без обещания — «нет»", () => {
     assert.deepEqual(draftOf(task()), draft());
   });
@@ -458,6 +489,30 @@ describe("taskChanges", () => {
     const filled = { ...draftOf(friday), time: "18:00" };
     assert.deepEqual(Object.keys(taskChanges(friday, filled)), ["due_at"]);
     assert.deepEqual(taskChanges(friday, { ...filled, time: "" }), {});
+  });
+
+  it("часть дня: день не тронут и час пуст — часть остаётся (§21.4)", () => {
+    const morning = task({ dueAt: new Date(2026, 9, 5, 8, 0), duePrecision: "morning" });
+    assert.deepEqual(taskChanges(morning, draftOf(morning)), {});
+    assert.deepEqual(taskChanges(morning, { ...draftOf(morning), title: "Встреча" }), { title: "Встреча" });
+  });
+
+  it("часть дня: сменили день — дело на день; поставили час — срок со временем; сняли срок", () => {
+    const evening = task({ dueAt: new Date(2026, 9, 5, 18, 0), duePrecision: "evening" });
+    assert.deepEqual(taskChanges(evening, { ...draftOf(evening), day: "2026-10-06" }), { due_date: "2026-10-06" });
+    // тот же час, что начало части, — всё равно срок со временем
+    const at18 = taskChanges(evening, { ...draftOf(evening), time: "18:00" });
+    assert.deepEqual(Object.keys(at18), ["due_at"]);
+    assert.equal(new Date(at18.due_at as string).getTime(), new Date(2026, 9, 5, 18, 0).getTime());
+    assert.deepEqual(taskChanges(evening, { ...draftOf(evening), noDue: true }), { due_at: null });
+  });
+
+  it("часть дня: выбран повтор — правило и срок формы днём", () => {
+    const morning = task({ dueAt: new Date(2026, 9, 5, 8, 0), duePrecision: "morning" });
+    const edited = { ...draftOf(morning), repeat: { ...draftOf(morning).repeat, every: "day" as const } };
+    const changes = taskChanges(morning, edited);
+    assert.deepEqual(Object.keys(changes).sort(), ["due_date", "repeat"]);
+    assert.equal(changes.due_date, "2026-10-05");
   });
 
   it("«Без срока» снимает срок; у задачи без срока — не правка", () => {
@@ -656,30 +711,64 @@ describe("needsSaving", () => {
 
 describe("dueHint", () => {
   it("без срока и без дня", () => {
-    assert.equal(dueHint(draft(), now), "Без срока напоминать не буду. Час можно указать, когда выбран день.");
-    assert.equal(dueHint(draft({ noDue: false }), now), "Час можно указать, когда выбран день.");
+    assert.equal(dueHint(task(), draft(), now), "Без срока напоминать не буду. Час можно указать, когда выбран день.");
+    assert.equal(dueHint(task(), draft({ noDue: false }), now), "Час можно указать, когда выбран день.");
   });
 
   it("идея и желание — не напоминаю", () => {
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-10-05", kind: "idea" }), now), "Об идеях и желаниях не напоминаю.");
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-10-05", kind: "wish" }), now), "Об идеях и желаниях не напоминаю.");
+    assert.equal(dueHint(task(), draft({ noDue: false, day: "2026-10-05", kind: "idea" }), now), "Об идеях и желаниях не напоминаю.");
+    assert.equal(dueHint(task(), draft({ noDue: false, day: "2026-10-05", kind: "wish" }), now), "Об идеях и желаниях не напоминаю.");
   });
 
   it("день без часа: утром и вечером, а после 09:00 — только вечером", () => {
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-10-05" }), now), "Без часа — напомню в 09:00 и в 18:00 этого дня.");
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30" }), now), "Без часа — напомню в 18:00 этого дня.");
+    assert.equal(dueHint(task(), draft({ noDue: false, day: "2026-10-05" }), now), "Без часа — напомню в 09:00 и в 18:00 этого дня.");
+    assert.equal(dueHint(task(), draft({ noDue: false, day: "2026-09-30" }), now), "Без часа — напомню в 18:00 этого дня.");
   });
 
   it("срок с часом: за час и в срок, а в последний час — только в срок", () => {
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "15:00" }), now), "В 15:00 — напомню за час и в срок.");
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "12:30" }), now), "В 12:30 — напомню в срок.");
+    assert.equal(dueHint(task(), draft({ noDue: false, day: "2026-09-30", time: "15:00" }), now), "В 15:00 — напомню за час и в срок.");
+    assert.equal(dueHint(task(), draft({ noDue: false, day: "2026-09-30", time: "12:30" }), now), "В 12:30 — напомню в срок.");
+  });
+
+  it("часть дня, день не тронут и час пуст — одно напоминание в начале части (§21.4)", () => {
+    const tomorrow = (hour: number, part: "morning" | "afternoon" | "evening") =>
+      task({ dueAt: new Date(2026, 9, 1, hour, 0), duePrecision: part });
+    for (const [hour, part, hint] of [
+      [8, "morning", "Утром — напомню в 08:00."],
+      [12, "afternoon", "Днём — напомню в 12:00."],
+      [18, "evening", "Вечером — напомню в 18:00."],
+    ] as const) {
+      const t = tomorrow(hour, part);
+      assert.equal(dueHint(t, draftOf(t), now), hint);
+    }
+  });
+
+  it("часть дня: начало прошло — не напоминаю; день прошёл — прежняя фраза", () => {
+    const morning = task({ dueAt: new Date(2026, 8, 30, 8, 0), duePrecision: "morning" });
+    assert.equal(dueHint(morning, draftOf(morning), now), "Утром — 08:00 уже прошло, напоминать не буду.");
+    const afternoon = task({ dueAt: new Date(2026, 8, 30, 12, 0), duePrecision: "afternoon" });
+    assert.equal(dueHint(afternoon, draftOf(afternoon), now), "Днём — 12:00 уже прошло, напоминать не буду.");
+    const yesterday = task({ dueAt: new Date(2026, 8, 29, 18, 0), duePrecision: "evening" });
+    assert.equal(dueHint(yesterday, draftOf(yesterday), now), "Срок уже прошёл — напоминаний по нему не будет.");
+  });
+
+  it("часть дня: день сменили, час поставили или выбрали повтор — подсказка формы", () => {
+    const morning = task({ dueAt: new Date(2026, 9, 1, 8, 0), duePrecision: "morning" });
+    assert.equal(
+      dueHint(morning, { ...draftOf(morning), day: "2026-10-02" }, now),
+      "Без часа — напомню в 09:00 и в 18:00 этого дня.",
+    );
+    assert.equal(dueHint(morning, { ...draftOf(morning), time: "15:00" }, now), "В 15:00 — напомню за час и в срок.");
+    const repeated = { ...draftOf(morning), repeat: { ...draftOf(morning).repeat, every: "day" as const } };
+    assert.equal(dueHint(morning, repeated, now), "Без часа — напомню в 09:00 и в 18:00 этого дня.");
+    assert.equal(dueHint(morning, { ...draftOf(morning), noDue: true }, now), "Без срока напоминать не буду. Час можно указать, когда выбран день.");
   });
 
   it("срок прошёл — напоминаний не будет", () => {
     const past = "Срок уже прошёл — напоминаний по нему не будет.";
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-29" }), now), past);
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30", time: "11:00" }), now), past);
-    assert.equal(dueHint(draft({ noDue: false, day: "2026-09-30" }), new Date(2026, 8, 30, 18, 0)), past);
+    assert.equal(dueHint(task(), draft({ noDue: false, day: "2026-09-29" }), now), past);
+    assert.equal(dueHint(task(), draft({ noDue: false, day: "2026-09-30", time: "11:00" }), now), past);
+    assert.equal(dueHint(task(), draft({ noDue: false, day: "2026-09-30" }), new Date(2026, 8, 30, 18, 0)), past);
   });
 });
 

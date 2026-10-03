@@ -216,7 +216,7 @@ export function TaskEdit({
             ) : null}
           </div>
           {moved ? <p className="form__hint">{moved}</p> : null}
-          <p className="form__hint">{dueHint(draft, now)}</p>
+          <p className="form__hint">{dueHint(task, draft, now)}</p>
           {onlyThisTime ? <p className="form__hint">{onlyThisTime}</p> : null}
         </div>
 

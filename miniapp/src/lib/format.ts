@@ -67,17 +67,50 @@ function dayWord(moment: Date, now: Date): string {
   return sameDay(moment, now) ? "сегодня" : formatDay(moment);
 }
 
+/** Точность срока (`techspec/21-part-of-day.md` §21.2): день, час или часть дня. */
+export type DuePrecision = "day" | "time" | "morning" | "afternoon" | "evening";
+export type PartOfDay = "morning" | "afternoon" | "evening";
+
 /**
- * Срок словами: день, а со временем — и час.
+ * Слова частей дня — те же, что у бота (`texts.PART_WORDS`). Часов частей
+ * у приложения нет: начало части лежит в записанном сроке (§21.4).
+ */
+export const PART_WORDS: Record<PartOfDay, string> = {
+  morning: "утром",
+  afternoon: "днём",
+  evening: "вечером",
+};
+
+/** Часть дня — одна из трёх; день, час и пустая точность — нет. */
+export function isPart(precision: DuePrecision | null): precision is PartOfDay {
+  return precision === "morning" || precision === "afternoon" || precision === "evening";
+}
+
+/** Часть в начале фразы: «Утром», «Днём», «Вечером». */
+export function partLabel(part: PartOfDay): string {
+  const word = PART_WORDS[part];
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+/**
+ * Срок словами: день, а со временем — и час, у части дня — её слово.
  *
  * Час показывается только когда человек его назвал: у срока «в пятницу»
- * в базе стоит 18:00 (`techspec/03-schema.md` §3.3), и произносить его
- * значило бы приписать человеку то, чего он не говорил. Пустая точность
+ * в базе стоит 18:00 (`techspec/03-schema.md` §3.3), у «утром» — 08:00
+ * (§21.2), и произносить его значило бы приписать человеку то, чего он не
+ * говорил: «сегодня утром», «пятница, 9 октября, утром». Пустая точность
  * читается как день.
  */
-export function formatDue(dueAt: Date, precision: "day" | "time" | null, now: Date): string {
-  const day = dayWord(dueAt, now);
-  return precision === "time" ? `${day}, ${formatTime(dueAt)}` : day;
+export function formatDue(dueAt: Date, precision: DuePrecision | null, now: Date): string {
+  const today = sameDay(dueAt, now);
+  const day = today ? "сегодня" : formatDay(dueAt);
+  if (precision === "time") {
+    return `${day}, ${formatTime(dueAt)}`;
+  }
+  if (isPart(precision)) {
+    return `${day}${today ? " " : ", "}${PART_WORDS[precision]}`;
+  }
+  return day;
 }
 
 /**

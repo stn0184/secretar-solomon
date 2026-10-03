@@ -19,9 +19,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
+  type DuePrecision,
   dateInputValue,
+  formatTime,
+  isPart,
   isoWithOffset,
   momentFromInputs,
+  partLabel,
   sameDay,
   timeInputValue,
 } from "./format.ts";
@@ -49,7 +53,10 @@ export type { ActionResult } from "./supabase.ts";
 export type TaskKind = "task" | "idea" | "wish";
 export type Priority = "low" | "normal" | "high";
 export type PromiseSide = "mine" | "to_me";
-export type DuePrecision = "day" | "time";
+export type { DuePrecision } from "./format.ts";
+
+/** Точности срока из базы (§21.2); незнакомая читается днём. */
+const PRECISIONS: readonly DuePrecision[] = ["day", "time", "morning", "afternoon", "evening"];
 
 export interface Task {
   id: string;
@@ -138,7 +145,7 @@ export function parseTask(row: unknown): Task | null {
     title: r.title,
     kind: oneOf<TaskKind>(r.kind, ["task", "idea", "wish"], "task"),
     dueAt,
-    duePrecision: dueAt ? oneOf<DuePrecision>(r.due_precision, ["day", "time"], "day") : null,
+    duePrecision: dueAt ? oneOf<DuePrecision>(r.due_precision, PRECISIONS, "day") : null,
     priority: oneOf<Priority>(r.priority, ["low", "normal", "high"], "normal"),
     promise: r.promise === "mine" || r.promise === "to_me" ? r.promise : null,
     people: Array.isArray(r.people)
@@ -280,8 +287,10 @@ function daysAhead(dueAt: Date, now: Date): number {
 }
 
 /**
- * Срок прошёл: для дня — после полуночи в поясе устройства, для часа — сам
- * момент. Бот при напоминании считает по `due_at` (18:00) — это его правило.
+ * Срок прошёл: для дня и части дня — после полуночи в поясе устройства,
+ * для часа — сам момент. Бот при напоминании считает по `due_at` (18:00 или
+ * начало части) — это его правило; «Срок был» у него тоже со следующего дня
+ * (§21.3).
  */
 export function isOverdue(task: Task, now: Date): boolean {
   if (!task.dueAt || task.kind !== "task") {
@@ -538,7 +547,11 @@ export interface TaskChanges {
 
 export type EditResult = { ok: true; task: Task } | { ok: false; message: string };
 
-/** Форма открывается с тем, что сейчас записано. Срок днём — поле часа пустое. */
+/**
+ * Форма открывается с тем, что сейчас записано. Срок днём и частью дня —
+ * поле часа пустое: части в форме нет (§21.4), а нетронутые день и час
+ * оставляют её как есть.
+ */
 export function draftOf(task: Task): TaskDraft {
   return {
     title: task.title,
@@ -591,7 +604,11 @@ function sameList(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((item, i) => item === b[i]);
 }
 
-/** Срок из черновика — ключ `edit_task`, если он отличается от записанного. */
+/**
+ * Срок из черновика — ключ `edit_task`, если он отличается от записанного.
+ * Части дня в форме нет: у дела с частью тот же день без часа — не правка,
+ * другой день — `due_date`, час — `due_at` (§21.4).
+ */
 function dueChange(task: Task, draft: TaskDraft): Pick<TaskChanges, "due_at" | "due_date"> {
   if (draft.noDue) {
     return task.dueAt === null ? {} : { due_at: null };
@@ -741,8 +758,11 @@ export function needsSaving(task: Task, changes: TaskChanges): boolean {
  * Подсказка под сроком — по тому же правилу, что считает база (§6.1):
  * у дня — 09:00 и 18:00, у часа — за час и в срок; что уже прошло, не
  * называется. Часы — устройства, как во всём приложении (`format.ts`).
+ * У дела с частью дня, пока день не тронут и час пуст, — одно напоминание
+ * в начале части (§21.4); час берётся из записанного срока, своей копии
+ * часов частей у приложения нет.
  */
-export function dueHint(draft: TaskDraft, now: Date): string {
+export function dueHint(task: Task, draft: TaskDraft, now: Date): string {
   if (draft.noDue) {
     return "Без срока напоминать не буду. Час можно указать, когда выбран день.";
   }
@@ -752,6 +772,10 @@ export function dueHint(draft: TaskDraft, now: Date): string {
   const day = dayOf(draft);
   if (!day) {
     return "Час можно указать, когда выбран день.";
+  }
+  const part = partHint(task, draft, now);
+  if (part) {
+    return part;
   }
   const withTime = draft.time === "" ? null : momentFromInputs(draft.day, draft.time);
   const due = withTime ?? momentFromInputs(draft.day, "18:00");
@@ -767,4 +791,25 @@ export function dueHint(draft: TaskDraft, now: Date): string {
   return morning && morning.getTime() > now.getTime()
     ? "Без часа — напомню в 09:00 и в 18:00 этого дня."
     : "Без часа — напомню в 18:00 этого дня.";
+}
+
+/**
+ * Подсказка дела с частью дня, пока форма её не меняет: день тот же, час
+ * пуст, повтор не выбран. Иначе `null` — подсказка по сроку формы.
+ */
+function partHint(task: Task, draft: TaskDraft, now: Date): string | null {
+  const part = task.duePrecision;
+  if (!isPart(part) || !task.dueAt) {
+    return null;
+  }
+  if (dateInputValue(task.dueAt) !== draft.day || draft.time !== "" || repeatChanged(task, draft)) {
+    return null;
+  }
+  if (daysAhead(task.dueAt, now) < 0) {
+    return "Срок уже прошёл — напоминаний по нему не будет.";
+  }
+  const start = formatTime(task.dueAt);
+  return task.dueAt.getTime() <= now.getTime()
+    ? `${partLabel(part)} — ${start} уже прошло, напоминать не буду.`
+    : `${partLabel(part)} — напомню в ${start}.`;
 }
