@@ -659,6 +659,26 @@ def amendment(asked: OpenQuestion, understanding: Understanding) -> Amendment:
     )
 
 
+# Правки, которые побеждают ответ на вопрос о той же задаче (§19.5).
+CLOSING_ACTIONS = ("done", "cancel")
+
+
+def edit_closes_asked(
+    edit: TaskEdit | None, asked: OpenQuestion | None, tasks: Sequence[TaskDetails] | None
+) -> bool:
+    """Правка закрывает или убирает ту задачу, о которой вопрос (§19.5).
+
+    «Уже купил», «уже не нужно» в ответ на вопрос — не ответ, а правка:
+    модель могла отдать и ответ, и `done` или `cancel`, и тогда побеждает
+    правка. Номер задачи — по тому же списку, что ушёл в промпт. Остальные
+    правки уступают ответу, как раньше (§12.1).
+    """
+    if edit is None or asked is None or tasks is None or edit.action not in CLOSING_ACTIONS:
+        return False
+    task = edits.task_by_number(tasks, edit.task)
+    return task is not None and task.id == asked.task_id
+
+
 @dataclass(frozen=True, slots=True)
 class Decision:
     """Что записать вторым шагом и что ответить человеку."""
@@ -1623,7 +1643,12 @@ class TaskService:
         Правка — только при блоке 5 в промпте (§12.2): без него `edit` модель
         отдать не могла, а если отдала, бот её не слушает; у пересланного и
         снимка список есть, но правки нет всё равно (§15.2). Ответ на
-        открытый вопрос главнее правки (§12.1), оба главнее дубля (§15.3).
+        открытый вопрос главнее правки (§12.1), кроме `done` и `cancel` той
+        задачи, о которой вопрос (§19.5); оба главнее дубля (§15.3).
+
+        Ответ без срока на свой вопрос о деле без срока (§19.5) — «Хорошо,
+        спрошу через неделю.»: срока нет, а изменённые поля ложатся, как в
+        §10.2. Свой вопрос узнаётся по тексту — константе из `texts.py`.
 
         План берётся у базы, только когда есть что планировать — задача или
         поправка; у разговора и сведения о себе задачи нет, и звать базу
@@ -1632,7 +1657,8 @@ class TaskService:
         `talk` — своё сообщение: разговор отвечает текстом модели (§17.2).
         У пересланного и снимка ответ разговора прежний.
         """
-        if asked is not None and understanding.answers_question:
+        closes = context.edits and edit_closes_asked(understanding.edit, asked, context.tasks)
+        if asked is not None and understanding.answers_question and not closes:
             changed = amendment(asked, understanding)
             planned = await self._planner(
                 due_at=changed.due_at,
@@ -1662,6 +1688,9 @@ class TaskService:
                 "fields": changed.fields,
                 "reminders": [item.as_row() for item in planned],
             }
+            if asked.question == texts.UNDATED_QUESTION and changed.due_at is None:
+                # «Пока не знаю»: срока нет — спросит через неделю (§19.1).
+                reply = texts.ASK_LATER
             return Decision(reply=reply, task=None, reminders=[], amend=amend)
 
         if understanding.edit is not None and context.tasks is not None and context.edits:

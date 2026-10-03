@@ -1240,6 +1240,73 @@ async def test_answer_that_changes_the_priority_names_it() -> None:
     assert outcome.message == "Понял: отправить расчёт клиенту. Приоритет: низкий"
 
 
+# Вопрос о деле без срока (§19.5): бот задал его сам, текст — константа.
+ASKED_UNDATED = replace(
+    ASKED, question=texts.UNDATED_QUESTION, priority="normal", promise=None, people=()
+)
+
+
+async def test_answer_without_due_to_the_undated_question_says_ask_later() -> None:
+    """«Пока не знаю» — срока нет, и бот спросит через неделю (§19.5)."""
+    analyst = FakeAnalyst(answer())
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions(ASKED_UNDATED))
+
+    outcome = await say(service, "пока не знаю")
+
+    assert outcome.ok
+    assert outcome.message == "Хорошо, спрошу через неделю."
+    saved = understandings.calls[0]
+    assert saved["task"] is None
+    assert saved["reply"] == outcome.message
+    assert saved["amend"] == {
+        "task_id": ASKED.task_id,
+        "fields": {"needs_review": False},
+        "reminders": [],
+    }
+
+
+async def test_fields_of_the_ask_later_answer_are_kept() -> None:
+    """Что ответ всё же изменил — ложится в задачу, как в §10.2; срока нет."""
+    analyst = FakeAnalyst(answer(people=["Сергей"]))
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions(ASKED_UNDATED))
+
+    outcome = await say(service, "пока не знаю, Сергей скажет")
+
+    assert outcome.message == texts.ASK_LATER
+    amend = understandings.calls[0]["amend"]
+    assert isinstance(amend, dict)
+    assert amend["fields"] == {"people": ["Сергей"], "needs_review": False}
+    assert amend["reminders"] == []
+
+
+async def test_answer_with_a_due_to_the_undated_question_says_understood() -> None:
+    """Срок в ответ на «Когда займётесь?» — обычное «Понял» со сроком (§19.5)."""
+    analyst = FakeAnalyst(answer(due_at=FRIDAY_DUE, due_precision="day"))
+    planner = FakePlanner([Planned(stage="before", fire_at=FRIDAY_DUE.replace(hour=9))])
+    service, _, understandings = build_dialog_service(
+        analyst, FakeQuestions(ASKED_UNDATED), planner=planner
+    )
+
+    outcome = await say(service, "в пятницу")
+
+    assert outcome.message == (
+        "Понял: отправить расчёт клиенту. Срок: пятница, 18 сентября. Напомню: 18 сентября в 09:00"
+    )
+    amend = understandings.calls[0]["amend"]
+    assert isinstance(amend, dict)
+    assert amend["fields"]["due_at"] == FRIDAY_DUE.isoformat()
+
+
+async def test_answer_without_due_to_another_question_still_says_understood() -> None:
+    """Чужой вопрос — не «Когда займётесь?»: ответ без срока звучит «Понял», как раньше."""
+    analyst = FakeAnalyst(answer(people=["Сергей"]))
+    service, _, _ = build_dialog_service(analyst)
+
+    outcome = await say(service, "Сергей скажет")
+
+    assert outcome.message == "Понял: отправить расчёт клиенту"
+
+
 async def test_new_errand_while_asked_is_an_ordinary_task() -> None:
     """`answers_question = false` — обычная запись; вопрос снимет база (§3.4)."""
     analyst = FakeAnalyst(make_understanding(title="купить лампочку"))

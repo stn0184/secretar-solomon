@@ -32,8 +32,9 @@ from solomon.services.tasks import (
     PressOutcome,
     Swipe,
     TaskService,
+    edit_closes_asked,
 )
-from solomon.services.understanding import NotUnderstood, Understanding
+from solomon.services.understanding import NotUnderstood, TaskEdit, Understanding
 from tests.conftest import (
     OWNER_ID,
     OWNER_TIMEZONE,
@@ -1268,3 +1269,103 @@ async def test_talk_is_logged_only_as_a_count(caplog: pytest.LogCaptureFixture) 
     assert "Недавний разговор: сообщений 2" in caplog.text
     for said in ("четверг", "Ренат", "Во сколько"):
         assert said not in caplog.text
+
+
+# ------------------------------------- правка задачи из вопроса главнее ответа
+
+
+def asked_about(task: Any, question: str = texts.UNDATED_QUESTION) -> OpenQuestion:
+    """Открытый вопрос по задаче из списка — как его читает бот (§10.1)."""
+    return OpenQuestion(
+        task_id=task.id,
+        question=question,
+        title=task.title,
+        kind="task",
+        due_at=task.due_at,
+        due_precision=task.due_precision,
+        priority=task.priority,
+        promise=None,
+        people=task.people,
+        asked_at=NOW - timedelta(hours=1),
+    )
+
+
+def task_edit(task: int | None, action: str) -> TaskEdit | None:
+    return edited(task, action=action).edit
+
+
+# Список, как он ушёл в промпт: номера правки — по нему.
+NUMBERED = [MEETING, REPORT, LAMP]
+
+
+@pytest.mark.parametrize("action", ["done", "cancel"])
+def test_done_or_cancel_of_the_asked_task_beats_the_answer(action: str) -> None:
+    """«Сделал», «уже не нужно» о задаче из вопроса — правка, а не ответ (§19.5)."""
+    assert edit_closes_asked(task_edit(3, action), asked_about(LAMP), NUMBERED) is True
+
+
+@pytest.mark.parametrize("action", ["change", "skip"])
+def test_other_edits_of_the_asked_task_yield_to_the_answer(action: str) -> None:
+    """Перенос и прочее по задаче из вопроса уступают ответу, как раньше (§12.1)."""
+    assert edit_closes_asked(task_edit(3, action), asked_about(LAMP), NUMBERED) is False
+
+
+def test_done_of_another_task_yields_to_the_answer() -> None:
+    assert edit_closes_asked(task_edit(1, "done"), asked_about(LAMP), NUMBERED) is False
+
+
+def test_nothing_to_beat_without_a_question_an_edit_or_a_list() -> None:
+    assert edit_closes_asked(None, asked_about(LAMP), NUMBERED) is False
+    assert edit_closes_asked(task_edit(3, "done"), None, OPEN) is False
+    assert edit_closes_asked(task_edit(3, "done"), asked_about(LAMP), None) is False
+    assert edit_closes_asked(task_edit(9, "done"), asked_about(LAMP), NUMBERED) is False
+    assert edit_closes_asked(task_edit(None, "done"), asked_about(LAMP), NUMBERED) is False
+
+
+@pytest.mark.parametrize(
+    ("action", "reply"),
+    [("done", "Закрыл: купить лампочку."), ("cancel", "Убрал из списка: купить лампочку.")],
+)
+async def test_answer_and_closing_edit_of_the_asked_task_make_an_edit(
+    action: str, reply: str
+) -> None:
+    """Модель отдала и ответ, и `done`/`cancel` задачи из вопроса — побеждает правка."""
+    verdict = make_understanding(
+        title="купить лампочку", answers_question=True, edit=edit(task=3, action=action)
+    )
+    service, _, understandings, _, _ = build(verdict, questions=FakeQuestions(asked_about(LAMP)))
+
+    outcome = await say(service, "уже купил")
+
+    assert saved(understandings, "amend") is None
+    assert saved_edit(understandings)["task_id"] == LAMP_ID
+    assert saved_edit(understandings)["action"] == action
+    assert outcome.message == reply
+    assert outcome.buttons == (Button(text="Вернуть", data=f"reopen:{LAMP_ID}"),)
+
+
+async def test_answer_and_done_of_another_task_stay_an_answer() -> None:
+    """Правка другой задачи уступает ответу, как раньше (§12.1)."""
+    verdict = make_understanding(
+        title="купить лампочку", answers_question=True, edit=edit(task=1, action="done")
+    )
+    service, _, understandings, _, _ = build(verdict, questions=FakeQuestions(asked_about(LAMP)))
+
+    outcome = await say(service, "пока не знаю")
+
+    assert saved_edit(understandings) is None
+    assert saved(understandings, "amend")["task_id"] == LAMP_ID
+    assert outcome.message == texts.ASK_LATER
+
+
+async def test_forwarded_answer_hears_no_closing_edit() -> None:
+    """У пересланного правки нет (§15.2): ответ остаётся ответом."""
+    verdict = make_understanding(
+        title="купить лампочку", answers_question=True, edit=edit(task=3, action="done")
+    )
+    service, _, understandings, _, _ = build(verdict, questions=FakeQuestions(asked_about(LAMP)))
+
+    await say(service, "уже купил", forwarded_from="Сергей")
+
+    assert saved_edit(understandings) is None
+    assert saved(understandings, "amend")["task_id"] == LAMP_ID
