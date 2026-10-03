@@ -125,7 +125,7 @@
   `test_asks.py`, `test_reminders.py`, `test_tasks_service.py`,
   `test_chat_edit_service.py`, `test_understanding.py` (правила в
   промпте).
-- [ ] Живые примеры (`fixtures/understanding.jsonl`,
+- [x] Живые примеры (`fixtures/understanding.jsonl`,
   `test_understanding.py`, маркер `live`) — по пунктам «Приёмки» с
   пометкой «живой»: открытый вопрос «Когда займётесь?» по задаче без
   срока и ответы сроком, «уже купил», «уже не нужно», «пока не знаю».

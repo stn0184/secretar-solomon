@@ -40,6 +40,7 @@ from solomon.db.tasks import RecentMessage, TaskDetails
 from solomon.handlers import PHOTO_LIMIT
 from solomon.services.batches import Line, conversation_text, is_conversation
 from solomon.services.conversation import recent_block, reply_text, reports_action
+from solomon.services.tasks import CLOSING_ACTIONS
 from solomon.services.understanding import (
     ANSWER_RULES,
     CONVERSATION_DUPLICATE_RULE,
@@ -1621,15 +1622,16 @@ async def test_conversation_call_asks_for_its_schema_with_the_text_limits(
 # --------------------------------------------------------------- живой прогон
 
 # Десять русских сообщений с ожидаемым разбором, три примера памяти, три
-# примера диалога, девять примеров повтора, семнадцать примеров со списком
-# открытых задач — тринадцать о правке словом (пять — по повторяющейся
-# задаче) и четыре о дубле (§15), — одиннадцать примеров разговора (§17) и
-# девять примеров пересланной переписки (§18).
+# примера диалога, четыре ответа на вопрос о деле без срока (§19), девять
+# примеров повтора, семнадцать примеров со списком открытых задач —
+# тринадцать о правке словом (пять — по повторяющейся задаче) и четыре о
+# дубле (§15), — одиннадцать примеров разговора (§17) и девять примеров
+# пересланной переписки (§18).
 # Этим владелец смотрит, как помощник понимает.
 # Прогон ходит в модель по-настоящему, поэтому в воротах не участвует —
 # `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 62
+FIXTURE_COUNT = 66
 EDIT_COUNT = 17
 DUPLICATE_COUNT = 4
 REPEAT_COUNT = 9
@@ -1644,8 +1646,8 @@ RULE_FIELDS = {"every", "interval", "weekdays", "month_day", "month"}
 # «Сейчас» для живого прогона: среда, 10:30. Даты в примерах посчитаны от
 # него, иначе «в пятницу» значило бы разное в разные дни.
 LIVE_MOMENT = (2026, 9, 16, 10, 30)
-# Сколько примеров разбирается разом: все пятьдесят три сразу упираются в
-# лимит запросов, а ключ — тот же, что у работающего бота.
+# Сколько примеров разбирается разом: все сразу упираются в лимит запросов,
+# а ключ — тот же, что у работающего бота.
 LIVE_CONCURRENCY = 4
 # Из десяти обычных примеров двум разрешено разойтись: модель — не таблица.
 # Примеры памяти (поле `facts`) сходятся строго — по виду и по статусу,
@@ -1656,6 +1658,9 @@ MEMORY_EXPECTATIONS = ("fact", "guess", "none")
 # Диалог (`techspec/10-dialog.md`): бот спрашивает, сообщение отвечает на
 # открытый вопрос, сообщение — новое поручение при открытом вопросе.
 DIALOG_EXPECTATIONS = ("asks", "answers", "new")
+# Ответ на вопрос о деле без срока (`techspec/19-undated.md` §19.5): сроком,
+# «уже купил», «уже не нужно», «пока не знаю».
+UNDATED_EXPECTATIONS = ("due", "done", "cancel", "later")
 
 
 def load_fixtures() -> list[dict[str, Any]]:
@@ -1809,6 +1814,47 @@ def dialog_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     return None
 
 
+def asked_number(case: dict[str, Any]) -> int | None:
+    """Номер задачи из открытого вопроса в списке примера — по её названию."""
+    title = case["open_question"]["title"]
+    for index, raw in enumerate(case.get("open_tasks", []), start=1):
+        if raw["title"] == title:
+            return index
+    return None
+
+
+def undated_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) -> str | None:
+    """Чем ответ на вопрос о деле без срока разошёлся с ожиданием (§19.5).
+
+    Проверки мягкие: ответ или правка, вид правки, срок есть или нет.
+    `done` и `cancel` — правка задачи из вопроса; признак ответа рядом с ней
+    не мешает, правка его побеждает. `due` — ответ с днём `due_date`, `later`
+    — ответ без срока; закрыть задачу из вопроса ответ не должен.
+    """
+    expected = case["undated"]
+    text = case["text"]
+    edit = got.edit
+    number = asked_number(case)
+    if expected in CLOSING_ACTIONS:
+        if edit is None:
+            return f"{text}: ждали правку {expected}, edit = null"
+        if edit.action != expected:
+            return f"{text}: ждали {expected}, получили {edit.action}"
+        if edit.task != number:
+            return f"{text}: ждали задачу {number}, получили {edit.task}"
+        return None
+    if not got.answers_question:
+        return f"{text}: ждали ответ на вопрос, answers_question = false"
+    if edit is not None and edit.action in CLOSING_ACTIONS and edit.task == number:
+        return f"{text}: ждали ответ, а правка {edit.action} закрыла бы задачу"
+    actual = got.due_at.astimezone(timezone).date().isoformat() if got.due_at else None
+    if expected == "later":
+        return None if actual is None else f"{text}: срока не называли, получили {actual}"
+    if actual != case["due_date"]:
+        return f"{text}: ждали срок {case['due_date']}, получили {actual}"
+    return None
+
+
 def edit_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) -> str | None:
     """Чем пример правки разошёлся с ожиданием; `None` — сошёлся.
 
@@ -1947,7 +1993,10 @@ def test_fixtures_have_the_expected_count_and_fields() -> None:
     for case in dialog:
         asked = asked_for(case)
         assert (asked is None) == (case["dialog"] == "asks"), case["text"]
-    assert not any("open_question" in case for case in fixtures if "dialog" not in case)
+    # Открытый вопрос — только у диалога и у ответа на вопрос о деле без срока.
+    assert not any(
+        "open_question" in case for case in fixtures if not {"dialog", "undated"} & set(case)
+    )
 
 
 def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
@@ -1959,9 +2008,12 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
 
     assert len(edits) == EDIT_COUNT
     assert all(case.get("open_tasks") for case in edits)
-    # Открытые задачи без правки — только у переписки: в ней правки быть не может.
+    # Открытые задачи без правки — только у переписки, где правки быть не может,
+    # и у ответа на вопрос о деле без срока: там правку сверяет своя функция.
     assert not any(
-        "open_tasks" in case for case in fixtures if not {"edit", "conversation"} & set(case)
+        "open_tasks" in case
+        for case in fixtures
+        if not {"edit", "conversation", "undated"} & set(case)
     )
     assert not any({"facts", "dialog", "repeat"} & set(case) for case in edits)
     expected = [case["edit"] for case in edits if case["edit"] is not None]
@@ -1978,6 +2030,26 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
         tasks = tasks_for(case)
         assert tasks, case["text"]
         assert all(task.status == "active" for task in tasks)
+
+
+def test_undated_fixtures_cover_the_answers_of_the_stage() -> None:
+    """Вопрос о деле без срока (`techspec/19-undated.md` §19.5): ответ сроком,
+    «уже купил», «уже не нужно», «пока не знаю». Вопрос — тот, что задаёт бот,
+    задача из него — без срока и есть в списке открытых задач."""
+    fixtures = load_fixtures()
+    undated = [case for case in fixtures if "undated" in case]
+
+    assert sorted(case["undated"] for case in undated) == sorted(UNDATED_EXPECTATIONS)
+    for case in undated:
+        asked = asked_for(case)
+        assert asked is not None, case["text"]
+        assert asked.question == texts.UNDATED_QUESTION, case["text"]
+        assert asked.due_at is None, case["text"]
+        assert asked_number(case) is not None, case["text"]
+        assert all(task.status == "active" for task in tasks_for(case)), case["text"]
+        assert not {"facts", "dialog", "repeat", "edit", "talk", "forwarded_from"} & set(case)
+    assert all(case["due_date"] for case in undated if case["undated"] == "due")
+    assert all(case["due_date"] is None for case in undated if case["undated"] != "due")
 
 
 def test_talk_fixtures_cover_the_cases_of_the_stage() -> None:
@@ -2139,6 +2211,59 @@ def test_dialog_mismatch_checks_the_question_and_the_answer_flag() -> None:
     )
     assert dialog_mismatch(new, make_understanding()) is None
     assert dialog_mismatch(new, make_understanding(answers_question=True)) is not None
+
+
+def test_undated_mismatch_checks_answer_or_edit_and_the_due() -> None:
+    """Ответ на вопрос о деле без срока (§19.5): сроком — ответ с этим днём,
+    «пока не знаю» — ответ без срока, «уже купил» и «уже не нужно» — правка
+    done и cancel задачи из вопроса. Её номер — по названию в списке."""
+    base = {
+        "open_question": {"question": texts.UNDATED_QUESTION, "title": "купить фильтр для воды"},
+        "open_tasks": [{"title": "встреча с Ренатой"}, {"title": "купить фильтр для воды"}],
+    }
+    due = {**base, "text": "в субботу", "due_date": "2026-09-19", "undated": "due"}
+    later = {**base, "text": "пока не знаю", "due_date": None, "undated": "later"}
+    done = {**base, "text": "уже купил", "due_date": None, "undated": "done"}
+    cancel = {**base, "text": "уже не нужно", "due_date": None, "undated": "cancel"}
+    saturday = datetime(2026, 9, 19, 18, 0, tzinfo=TZ)
+    sunday = datetime(2026, 9, 20, 18, 0, tzinfo=TZ)
+
+    def answer(**fields: Any) -> Understanding:
+        return make_understanding(answers_question=True, **fields)
+
+    assert asked_number(due) == 2
+    assert undated_mismatch(due, answer(due_at=saturday, due_precision="day"), TZ) is None
+    assert undated_mismatch(due, answer(due_at=sunday, due_precision="day"), TZ) is not None
+    assert undated_mismatch(due, answer(), TZ) is not None
+    assert (
+        undated_mismatch(due, make_understanding(due_at=saturday, due_precision="day"), TZ)
+        is not None
+    )
+    assert undated_mismatch(later, answer(), TZ) is None
+    assert undated_mismatch(later, answer(due_at=saturday, due_precision="day"), TZ) is not None
+    assert undated_mismatch(later, make_understanding(), TZ) is not None
+    # Ответ вместе с закрытием той же задачи бот прочтёт как закрытие.
+    assert undated_mismatch(later, answer(edit=model_edit(action="cancel", task=2)), TZ) is not None
+    assert undated_mismatch(later, answer(edit=model_edit(action="cancel", task=1)), TZ) is None
+
+    assert (
+        undated_mismatch(done, make_understanding(edit=model_edit(action="done", task=2)), TZ)
+        is None
+    )
+    assert undated_mismatch(done, answer(edit=model_edit(action="done", task=2)), TZ) is None
+    assert undated_mismatch(done, answer(), TZ) is not None
+    assert (
+        undated_mismatch(done, make_understanding(edit=model_edit(action="cancel", task=2)), TZ)
+        is not None
+    )
+    assert (
+        undated_mismatch(done, make_understanding(edit=model_edit(action="done", task=1)), TZ)
+        is not None
+    )
+    assert (
+        undated_mismatch(cancel, make_understanding(edit=model_edit(action="cancel", task=2)), TZ)
+        is None
+    )
 
 
 def test_duplicate_mismatch_checks_the_number() -> None:
@@ -2309,7 +2434,8 @@ def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -
 async def test_live_model_understands_the_fixtures() -> None:
     """Вживую: kind сходится хотя бы у восьми обычных примеров, даты — у всех,
     примеры памяти — строго по виду и статусу записей, диалога — по вопросу
-    и признаку ответа, повтора — по виду, правилу, пометке и вопросу, правки —
+    и признаку ответа, ответа на вопрос о деле без срока — ответ это или
+    правка, её вид и есть ли срок, повтора — по виду, правилу, пометке и вопросу, правки —
     по действию, задаче, сроку и правилу, дубля — по номеру задачи,
     разговора — по виду и ответу, как его отправил бы бот. Переписка — своим
     прогоном, ниже. Блок
@@ -2347,10 +2473,16 @@ async def test_live_model_understands_the_fixtures() -> None:
     edits: list[str] = []
     duplicates: list[str] = []
     talks: list[str] = []
+    undated: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
         got = verdict.understanding
+        if "undated" in case:
+            mismatch = undated_mismatch(case, got, settings.owner_timezone)
+            if mismatch:
+                undated.append(mismatch)
+            continue
         mismatch = edit_mismatch({"edit": None, **case}, got, settings.owner_timezone)
         if mismatch:
             edits.append(mismatch)
@@ -2391,6 +2523,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not dates, "Даты разошлись:\n" + "\n".join(dates)
     assert not memory, "Память разошлась:\n" + "\n".join(memory)
     assert not dialog, "Диалог разошёлся:\n" + "\n".join(dialog)
+    assert not undated, "Вопрос о деле без срока разошёлся:\n" + "\n".join(undated)
     assert not repeats, "Повтор разошёлся:\n" + "\n".join(repeats)
     assert not edits, "Правка разошлась:\n" + "\n".join(edits)
     assert not duplicates, "Дубль разошёлся:\n" + "\n".join(duplicates)
