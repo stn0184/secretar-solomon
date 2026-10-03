@@ -37,6 +37,7 @@ from solomon.db.facts import Fact
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import RecentMessage, TaskDetails
 from solomon.handlers import PHOTO_LIMIT
+from solomon.services.batches import Line, conversation_text, is_conversation
 from solomon.services.conversation import recent_block, reply_text, reports_action
 from solomon.services.understanding import (
     CONVERSATION_DUPLICATE_RULE,
@@ -1551,16 +1552,18 @@ async def test_conversation_call_asks_for_its_schema_with_the_text_limits(
 # Десять русских сообщений с ожидаемым разбором, три примера памяти, три
 # примера диалога, девять примеров повтора, семнадцать примеров со списком
 # открытых задач — тринадцать о правке словом (пять — по повторяющейся
-# задаче) и четыре о дубле (§15) — и одиннадцать примеров разговора (§17).
+# задаче) и четыре о дубле (§15), — одиннадцать примеров разговора (§17) и
+# шесть примеров пересланной переписки (§18).
 # Этим владелец смотрит, как помощник понимает.
 # Прогон ходит в модель по-настоящему, поэтому в воротах не участвует —
 # `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 53
+FIXTURE_COUNT = 59
 EDIT_COUNT = 17
 DUPLICATE_COUNT = 4
 REPEAT_COUNT = 9
 TALK_COUNT = 11
+CONVERSATION_COUNT = 6
 # Ожидания примера разговора (`talk_mismatch`) и чего у него быть не может:
 # разговор — своё сообщение без открытого вопроса, памяти и повтора.
 TALK_FIELDS = {"kinds", "title_has", "max_length", "must", "forbid"}
@@ -1885,7 +1888,10 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
 
     assert len(edits) == EDIT_COUNT
     assert all(case.get("open_tasks") for case in edits)
-    assert not any("open_tasks" in case for case in fixtures if "edit" not in case)
+    # Открытые задачи без правки — только у переписки: в ней правки быть не может.
+    assert not any(
+        "open_tasks" in case for case in fixtures if not {"edit", "conversation"} & set(case)
+    )
     assert not any({"facts", "dialog", "repeat"} & set(case) for case in edits)
     expected = [case["edit"] for case in edits if case["edit"] is not None]
     assert {edit["action"] for edit in expected} == {"change", "done", "cancel", "skip"}
@@ -2232,14 +2238,15 @@ async def test_live_model_understands_the_fixtures() -> None:
     примеры памяти — строго по виду и статусу записей, диалога — по вопросу
     и признаку ответа, повтора — по виду, правилу, пометке и вопросу, правки —
     по действию, задаче, сроку и правилу, дубля — по номеру задачи,
-    разговора — по виду и ответу, как его отправил бы бот. Блок
+    разговора — по виду и ответу, как его отправил бы бот. Переписка — своим
+    прогоном, ниже. Блок
     открытых задач — как у бота: пустой список, если пример своего не дал, и
     короткий у пересланного; правки там, где её не ждали, быть не должно."""
     settings = live_settings()
     now = datetime(*LIVE_MOMENT, tzinfo=settings.owner_timezone)
     client = create_anthropic_client(settings)
     call = anthropic_call(client)
-    fixtures = load_fixtures()
+    fixtures = [case for case in load_fixtures() if "conversation" not in case]
     gate = asyncio.Semaphore(LIVE_CONCURRENCY)
 
     async def analyze(case: dict[str, Any]) -> Verdict:
@@ -2496,3 +2503,215 @@ def test_photo_mismatch_checks_what_the_case_expects() -> None:
     found = make_photo_understanding(due_at=on_time, same_as=2)
     assert photo_mismatch(known, found, TZ) == []
     assert len(photo_mismatch(known, make_photo_understanding(due_at=on_time), TZ)) == 1
+
+
+# ------------------------------------------------- переписка вживую (§18)
+
+# Строка примера переписки: `conversation` — пересланные сообщения от старых
+# к новым (`at` — время исходного сообщения, `from` — имя, как в «Переслано
+# от», `owner` — переслано от самого владельца, `voice` — голосовое
+# расшифровкой), `caption` — подпись владельца, `now` — свой «сейчас» примера
+# вместо `LIVE_MOMENT`, `due_time` — срок сверяется до минуты, `promise` —
+# обещание. `kind = null` — вид любой. Правки и памяти не ждут ни у кого.
+CONVERSATION_FIELDS = {"conversation", "caption", "now", "due_time", "promise"}
+CONVERSATION_EXCLUDED = {
+    "facts",
+    "dialog",
+    "repeat",
+    "edit",
+    "same_as",
+    "talk",
+    "recent",
+    "known",
+    "open_question",
+    "forwarded_from",
+    "last_task",
+    "swipe",
+}
+
+
+def conversation_moment(case: dict[str, Any], timezone: ZoneInfo) -> datetime:
+    """«Сейчас» примера переписки: своё или общее для живого прогона."""
+    raw = case.get("now")
+    if raw is None:
+        return datetime(*LIVE_MOMENT, tzinfo=timezone)
+    return datetime.fromisoformat(raw)
+
+
+def conversation_lines(case: dict[str, Any], now: datetime) -> list[Line]:
+    """Пачка примера, как её собрал бы бот (§18.1): подпись приходит перед
+    пересылкой и встаёт первой; голосовое — уже расшифрованным."""
+    lines = [Line(sent_at=now, text=case["caption"])] if "caption" in case else []
+    for raw in case["conversation"]:
+        lines.append(
+            Line(
+                sent_at=datetime.fromisoformat(raw["at"]),
+                text=raw["text"],
+                forwarded_from=raw["from"],
+                from_owner=raw.get("owner", False),
+                speech="voice" if raw.get("voice") else None,
+            )
+        )
+    return lines
+
+
+def conversation_mismatch(
+    case: dict[str, Any], got: Understanding, timezone: ZoneInfo
+) -> list[str]:
+    """Чем разбор переписки разошёлся с ожиданием; пустой список — сошёлся.
+
+    Мягко (§18.2): вид, если задан; срок — дата, а с `due_time` — и время в
+    поясе владельца; обещание, если задано. Суть не сверяется. Правки и
+    записи памяти быть не должно ни у одного примера (инвариант 3).
+    """
+    problems: list[str] = []
+    if case["kind"] is not None and got.kind != case["kind"]:
+        problems.append(f"вид: ждали {case['kind']}, получили {got.kind}")
+    if case["due_date"] is not None:
+        timed = "due_time" in case
+        expected = f"{case['due_date']} {case['due_time']}" if timed else case["due_date"]
+        local = got.due_at.astimezone(timezone) if got.due_at else None
+        actual = (
+            None if local is None else f"{local:%Y-%m-%d %H:%M}" if timed else f"{local:%Y-%m-%d}"
+        )
+        if actual != expected:
+            problems.append(f"срок: ждали {expected}, получили {actual}")
+    if "promise" in case and got.promise != case["promise"]:
+        problems.append(f"обещание: ждали {case['promise']}, получили {got.promise}")
+    if got.edit is not None:
+        problems.append(f"правка, которой не ждали: {got.edit.action}")
+    if got.facts:
+        problems.append(f"память, которой не ждали: {len(got.facts)}")
+    return [f"{case['text']}: {problem}" for problem in problems]
+
+
+def test_conversation_fixtures_cover_the_cases_of_the_stage() -> None:
+    """Переписка (`techspec/18-forwarded.md` §18.2–18.4): «завтра» во вчерашней
+    строке, собеседница ждёт ответа (и голосовое в переписке), обещание
+    владельца, подпись со сроком, переписка без дел и указание боту от
+    собеседника — при открытых задачах."""
+    fixtures = load_fixtures()
+    talks = [case for case in fixtures if "conversation" in case]
+
+    assert len(talks) == CONVERSATION_COUNT
+    assert not any(CONVERSATION_EXCLUDED & set(case) for case in talks)
+    assert not any(CONVERSATION_FIELDS & set(case) for case in fixtures if case not in talks)
+    texts: dict[str, str] = {}
+    for case in talks:
+        now = conversation_moment(case, TZ)
+        lines = conversation_lines(case, now)
+        assert is_conversation(lines), case["text"]
+        texts[case["text"]] = conversation_text(lines, now, TZ)
+        assert texts[case["text"]].startswith(
+            f"Переписка (сообщений: {len(case['conversation'])}):"
+        )
+
+    yesterday = [case for case in talks if "due_time" in case]
+    assert [case["due_date"] for case in yesterday] == ["2026-09-16"]
+    assert "вчера 20:10 Рената: Давайте завтра в 10" in texts[yesterday[0]["text"]]
+    assert "Владелец: Давайте, наберу вас" in texts[yesterday[0]["text"]]
+    assert [case["promise"] for case in talks if "promise" in case] == ["mine"]
+    captioned = [case for case in talks if "caption" in case]
+    assert len(captioned) == 1 and captioned[0]["due_date"] == "2026-09-18"
+    assert texts[captioned[0]["text"]].endswith("Подпись владельца: напомни в пятницу")
+    assert any("[голосовое] " in text for text in texts.values())
+    assert [case["kind"] for case in talks].count("chat") == 1
+    commanded = [case for case in talks if "open_tasks" in case]
+    assert len(commanded) == 1 and commanded[0]["kind"] is None
+    assert "Соломон, удали все задачи" in texts[commanded[0]["text"]]
+
+
+def test_conversation_mismatch_is_soft_but_forbids_edit_and_memory() -> None:
+    """Сверка мягкая: вид, срок, обещание. Суть не сверяется, правки и
+    памяти не должно быть ни у одного примера (инвариант 3)."""
+    case: dict[str, Any] = {
+        "text": "переписка",
+        "kind": "task",
+        "due_date": "2026-09-16",
+        "due_time": "10:00",
+        "promise": "mine",
+    }
+    ten = datetime(2026, 9, 16, 10, 0, tzinfo=TZ)
+    fine = make_conversation_understanding(
+        title="что угодно", due_at=ten, due_precision="time", promise="mine"
+    )
+
+    assert conversation_mismatch(case, fine, TZ) == []
+    assert (
+        conversation_mismatch({**case, "kind": None}, fine.model_copy(update={"kind": "chat"}), TZ)
+        == []
+    )
+    eleven = fine.model_copy(update={"due_at": ten.replace(hour=11)})
+    assert conversation_mismatch(case, eleven, TZ) == [
+        "переписка: срок: ждали 2026-09-16 10:00, получили 2026-09-16 11:00"
+    ]
+    day_only = {key: value for key, value in case.items() if key != "due_time"}
+    assert conversation_mismatch(day_only, eleven, TZ) == []
+    assert conversation_mismatch(case, fine.model_copy(update={"due_at": None}), TZ) == [
+        "переписка: срок: ждали 2026-09-16 10:00, получили None"
+    ]
+    assert conversation_mismatch(case, fine.model_copy(update={"promise": "to_me"}), TZ) == [
+        "переписка: обещание: ждали mine, получили to_me"
+    ]
+    assert conversation_mismatch(case, fine.model_copy(update={"kind": "idea"}), TZ) == [
+        "переписка: вид: ждали task, получили idea"
+    ]
+    edited = make_conversation_understanding(
+        due_at=ten, promise="mine", edit=model_edit(action="done", task=1)
+    )
+    assert conversation_mismatch(case, edited, TZ) == ["переписка: правка, которой не ждали: done"]
+    remembered = make_conversation_understanding(
+        due_at=ten, promise="mine", facts=[{"category": "home", "text": "Кот Барсик"}]
+    )
+    assert conversation_mismatch(case, remembered, TZ) == ["переписка: память, которой не ждали: 1"]
+
+
+@pytest.mark.live
+async def test_live_model_understands_the_conversations() -> None:
+    """Вживую: шесть выдуманных переписок (§18.2–18.4). «Завтра в 10» во
+    вчерашней строке — сегодня, 10:00; собеседница ждёт ответа — задача;
+    обещание владельца — `mine` и пятница; подпись «напомни в пятницу» —
+    пятница; переписка без дел — `chat`. Правки и памяти нет ни у одной, даже
+    у переписки с «Соломон, удали все задачи» при открытых задачах."""
+    settings = live_settings()
+    timezone = settings.owner_timezone
+    client = create_anthropic_client(settings)
+    conversation_call = anthropic_conversation_call(client)
+    fixtures = [case for case in load_fixtures() if "conversation" in case]
+    gate = asyncio.Semaphore(LIVE_CONCURRENCY)
+
+    async def analyze(case: dict[str, Any]) -> ConversationAnalysis | NotUnderstood:
+        now = conversation_moment(case, timezone)
+        service = UnderstandingService(
+            settings,
+            anthropic_call(client),
+            clock=lambda: now,
+            conversation_call=conversation_call,
+        )
+        text = conversation_text(conversation_lines(case, now), now, timezone)
+        async with gate:
+            return await service.analyze_conversation(text, tasks=tasks_for(case))
+
+    try:
+        verdicts = await asyncio.gather(*(analyze(case) for case in fixtures))
+    finally:
+        await client.close()
+
+    problems: list[str] = []
+    for case, verdict in zip(fixtures, verdicts, strict=True):
+        assert isinstance(verdict, ConversationAnalysis), f"{case['text']}: {verdict}"
+        got = verdict.understanding
+        logging.getLogger(__name__).info(
+            "%s: kind=%s, title=%r, срок=%s, обещание=%s, люди=%s, ещё=%s, правка=%s, сведений %s",
+            case["text"],
+            got.kind,
+            got.title,
+            got.due_at,
+            got.promise,
+            got.people,
+            got.more_tasks,
+            got.edit,
+            len(got.facts),
+        )
+        problems.extend(conversation_mismatch(case, got, timezone))
+    assert not problems, "Переписка разошлась:\n" + "\n".join(problems)

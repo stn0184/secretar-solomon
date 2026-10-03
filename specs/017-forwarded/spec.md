@@ -113,7 +113,7 @@
 - [x] Тесты без сети — по пунктам «Приёмки», кроме живых:
   `test_batches.py`, `test_understanding.py`, `test_tasks_service.py`,
   `test_duplicates_service.py`, `test_handlers.py`.
-- [ ] Живые примеры (`fixtures/understanding.jsonl`,
+- [x] Живые примеры (`fixtures/understanding.jsonl`,
   `test_understanding.py`, маркер `live`) — по пунктам «Приёмки» с
   пометкой «живой»; формат строки расширяется перепиской. Фразы
   выдуманные, не из базы. Проверки мягкие: вид, срок, обещание, нет
