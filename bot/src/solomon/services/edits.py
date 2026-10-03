@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 from solomon import texts
 from solomon.db.tasks import TaskDetails, TaskEvent
+from solomon.services import parts
 from solomon.services.repeat import clean_rule, same_rule
 from solomon.services.understanding import TaskEdit
 
@@ -193,12 +194,17 @@ def _new_due(
     """Срок из правки: ключ для базы и срок, какой станет. Не меняется — `{}`.
 
     День уходит датой (`due_date`), и 18:00 ставит база по своему поясу
-    (§3.6); час — моментом со смещением. Новый срок главнее снятия: из двух
+    (§3.6); час — моментом со смещением; часть дня — моментом её начала и
+    ключом `due_precision` (§21.2). Новый срок главнее снятия: из двух
     противоречивых значений бот выбирает то, что ничего не теряет.
     """
     if edit.due_at is not None:
         local = _local(edit.due_at, timezone)
         precision = edit.due_precision or "time"
+        if parts.is_part(precision):
+            if task.due_precision == precision and task.due_at == local:
+                return {}, task.due_at, task.due_precision
+            return {"due_at": local.isoformat(), "due_precision": precision}, local, precision
         if precision == "day":
             day = local.date()
             same = (

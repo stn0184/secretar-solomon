@@ -474,6 +474,33 @@ async def test_move_to_a_day_sends_the_date() -> None:
     )
 
 
+async def test_move_to_a_part_of_day_sends_its_start_and_the_part() -> None:
+    """«Перенеси на завтра утром» — часть дня: одно напоминание в 08:00 (§21.2, §21.3)."""
+    plan = [Planned(stage="due", fire_at=datetime(2026, 9, 30, 8, 0, tzinfo=TZ))]
+    service, _, understandings, planner, _ = build(
+        edited(1, due_at="2026-09-30T08:00:00+05:00", due_precision="morning"),
+        planner=FakePlanner(plan),
+    )
+
+    outcome = await say(service, "встречу с Ренатой перенеси на завтра утром")
+
+    assert planner.calls == [
+        {
+            "due_at": datetime(2026, 9, 30, 8, 0, tzinfo=TZ),
+            "due_precision": "morning",
+            "kind": "task",
+            "now": NOW,
+        }
+    ]
+    assert saved_edit(understandings)["changes"] == {
+        "due_at": "2026-09-30T08:00:00+05:00",
+        "due_precision": "morning",
+    }
+    assert outcome.message == (
+        "Перенёс: встреча с Ренатой. Срок: среда, 30 сентября, утром. Напомню: 30 сентября в 08:00"
+    )
+
+
 async def test_move_names_a_priority_back_to_normal() -> None:
     """Сменилась и срочность — словом в той же строке, «обычный» тоже."""
     service, _, understandings, _, _ = build(
@@ -687,6 +714,16 @@ async def test_candidates_ask_with_buttons_and_change_nothing() -> None:
         Button(text="отправить отчёт — 2 окт", data=f"pick:{MESSAGE_ID}:{REPORT_ID}"),
         Button(text="встреча с Ренатой — 2 окт, 17:00", data=f"pick:{MESSAGE_ID}:{MEETING_ID}"),
     )
+
+
+async def test_candidates_of_a_move_to_a_part_of_day_hear_the_part() -> None:
+    service, _, _, _, _ = build(
+        edited(None, candidates=[2, 1], due_at="2026-09-29T18:00:00+05:00", due_precision="evening")
+    )
+
+    outcome = await say(service, "перенеси на вечер")
+
+    assert outcome.message == "Какую задачу перенести на сегодня вечером?"
 
 
 async def test_single_candidate_still_asks() -> None:

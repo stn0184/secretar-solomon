@@ -122,6 +122,29 @@ async def test_due_for_a_day_is_not_compared() -> None:
     assert store.minutes == []
 
 
+async def test_part_of_day_is_not_compared() -> None:
+    """Часть дня, как и день, — не встреча в ту же минуту (§21.4): базу не спрашивают."""
+    morning = datetime(2026, 10, 2, 8, 0, tzinfo=TZ)
+    service, _, _, _, store = build(kirill(due_at=morning, due_precision="morning"))
+
+    outcome = await say(service)
+
+    assert len(paragraphs_of(outcome.message)) == 1
+    assert store.minutes == []
+
+
+async def test_move_to_a_part_of_day_is_not_compared() -> None:
+    service, _, _, _, store = build(
+        edited(1, due_at="2026-10-02T18:00:00+05:00", due_precision="evening")
+    )
+
+    outcome = await say(service, "встречу перенеси на пятницу вечером")
+
+    assert outcome.ok
+    assert len(paragraphs_of(outcome.message)) == 1
+    assert store.minutes == []
+
+
 async def test_more_than_three_at_the_minute_are_counted() -> None:
     """До трёх задач по сути, раньше записанные первыми; остальные — числом."""
     taken = [

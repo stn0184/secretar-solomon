@@ -280,6 +280,81 @@ def test_hour_on_the_same_day_is_a_move_from_day_to_time() -> None:
     assert edits.edit_changes(task, edit, TZ).changes == {"due_at": "2026-10-02T18:00:00+05:00"}
 
 
+# Часть дня (`techspec/21-part-of-day.md` §21.2): срок уходит моментом начала
+# части и ключом `due_precision`; та же часть того же дня — не правка.
+
+
+def test_move_to_a_part_of_day_sends_its_start_and_the_part() -> None:
+    task = make_task(due_at=datetime(2026, 9, 29, 15, 0, tzinfo=TZ), due_precision="time")
+    edit = make_edit(due_at="2026-09-30T08:00:00+05:00", due_precision="morning")
+
+    change = edits.edit_changes(task, edit, TZ)
+
+    assert change.changes == {
+        "due_at": "2026-09-30T08:00:00+05:00",
+        "due_precision": "morning",
+    }
+    assert change.due_at == datetime(2026, 9, 30, 8, 0, tzinfo=TZ)
+    assert change.due_precision == "morning"
+    assert change.due_changed
+
+
+def test_same_part_of_the_same_day_is_no_change() -> None:
+    task = make_task(due_at=datetime(2026, 9, 30, 18, 0, tzinfo=TZ), due_precision="evening")
+    # 13:00 UTC — это 18:00 у владельца: тот же вечер.
+    edit = make_edit(due_at="2026-09-30T13:00:00+00:00", due_precision="evening")
+
+    change = edits.edit_changes(task, edit, TZ)
+
+    assert change.changes == {}
+    assert change.due_precision == "evening"
+    assert not change.due_changed
+
+
+def test_same_moment_with_another_precision_is_a_move() -> None:
+    """18:00 со временем и вечер начинаются в одну минуту — но это разные сроки."""
+    by_hour = make_task(due_at=datetime(2026, 9, 30, 18, 0, tzinfo=TZ), due_precision="time")
+    evening = make_task(due_at=datetime(2026, 9, 30, 18, 0, tzinfo=TZ), due_precision="evening")
+
+    to_evening = edits.edit_changes(
+        by_hour, make_edit(due_at="2026-09-30T18:00:00+05:00", due_precision="evening"), TZ
+    )
+    to_hour = edits.edit_changes(
+        evening, make_edit(due_at="2026-09-30T18:00:00+05:00", due_precision="time"), TZ
+    )
+
+    assert to_evening.changes == {
+        "due_at": "2026-09-30T18:00:00+05:00",
+        "due_precision": "evening",
+    }
+    assert to_hour.changes == {"due_at": "2026-09-30T18:00:00+05:00"}
+    assert to_hour.due_precision == "time"
+
+
+def test_day_of_a_part_task_makes_it_a_day_task() -> None:
+    """«Перенеси на среду» у дела на утро среды — дело на день, а не «то же»."""
+    task = make_task(due_at=datetime(2026, 9, 30, 8, 0, tzinfo=TZ), due_precision="morning")
+    edit = make_edit(due_at="2026-09-30T18:00:00+05:00", due_precision="day")
+
+    change = edits.edit_changes(task, edit, TZ)
+
+    assert change.changes == {"due_date": "2026-09-30"}
+    assert change.due_precision == "day"
+
+
+def test_part_of_day_of_a_repeating_task_moves_only_this_time() -> None:
+    edit = make_edit(due_at="2026-10-06T08:00:00+05:00", due_precision="morning")
+
+    change = edits.edit_changes(weekly(), edit, TZ)
+
+    assert change.changes == {
+        "due_at": "2026-10-06T08:00:00+05:00",
+        "due_precision": "morning",
+    }
+    assert change.repeat == {**MONDAYS, "time": "09:00"}
+    assert not change.repeat_changed
+
+
 def test_removing_the_due_sends_null() -> None:
     task = make_task(due_at=datetime(2026, 10, 2, 18, 0, tzinfo=TZ), due_precision="day")
 
@@ -560,6 +635,12 @@ def test_candidate_button_carries_the_title_and_a_short_due() -> None:
     assert edits.candidate_label(make_task(), TZ) == "встреча с Ренатой"
 
 
+def test_candidate_button_names_the_part_of_day() -> None:
+    task = make_task(due_at=datetime(2026, 10, 2, 8, 0, tzinfo=TZ), due_precision="morning")
+
+    assert edits.candidate_label(task, TZ) == "встреча с Ренатой — 2 окт, утром"
+
+
 def test_candidate_button_cuts_a_long_title_at_forty() -> None:
     label = edits.candidate_label(make_task(title="о" * 60), TZ)
 
@@ -592,4 +673,14 @@ def test_pick_question_about_a_move_names_the_new_due_in_the_accusative() -> Non
     )
     assert edits.pick_question(sunday, NOW, TZ) == (
         "Какую задачу перенести на воскресенье, 4 октября?"
+    )
+
+
+def test_pick_question_about_a_move_names_the_part_of_day() -> None:
+    today = make_edit(due_at="2026-09-29T18:00:00+05:00", due_precision="evening")
+    friday = make_edit(due_at="2026-10-02T08:00:00+05:00", due_precision="morning")
+
+    assert edits.pick_question(today, NOW, TZ) == "Какую задачу перенести на сегодня вечером?"
+    assert edits.pick_question(friday, NOW, TZ) == (
+        "Какую задачу перенести на пятницу, 2 октября, утром?"
     )
