@@ -14,7 +14,7 @@ import { test } from "node:test";
 
 import type { PGlite } from "@electric-sql/pglite";
 
-import { asRole, withDatabase } from "./database.ts";
+import { asRole, withDatabase, withDatabaseBefore } from "./database.ts";
 
 /** Пояс владельца в тестах бота: UTC+5, без перехода на летнее время. */
 const YEKATERINBURG = "Asia/Yekaterinburg";
@@ -179,6 +179,102 @@ test("день срока берётся в поясе владельца, да�
         ["before", utc("2026-09-25T09:00:00-07:00")],
         ["due", utc(evening)],
       ],
+    );
+  });
+});
+
+// --- Часть дня (§21.3) ----------------------------------------------------------
+
+test("часть дня — одно напоминание в её начале, без «заранее»", async () => {
+  await withDatabase(async (db) => {
+    const parts: [string, string][] = [
+      ["morning", "2026-09-25T08:00:00+05:00"],
+      ["afternoon", "2026-09-25T12:00:00+05:00"],
+      ["evening", "2026-09-25T18:00:00+05:00"],
+    ];
+    for (const [precision, start] of parts) {
+      assert.deepEqual(
+        await stages(db, { dueAt: start, precision, now: MONDAY_MORNING }),
+        [["due", utc(start)]],
+        precision,
+      );
+    }
+  });
+});
+
+test("начало части уже прошло — напоминаний нет", async () => {
+  await withDatabase(async (db) => {
+    // «вечером позвонить маме» в 18:30: сегодняшний вечер начался в 18:00.
+    const tonight = "2026-09-21T18:00:00+05:00";
+    assert.deepEqual(
+      await stages(db, { dueAt: tonight, precision: "evening", now: "2026-09-21T18:30:00+05:00" }),
+      [],
+    );
+    // Ровно в начале части — тоже уже не будущее.
+    assert.deepEqual(await stages(db, { dueAt: tonight, precision: "evening", now: tonight }), []);
+  });
+});
+
+test("часть дня у идеи — не дело: стучаться не о чем", async () => {
+  await withDatabase(async (db) => {
+    const morning = "2026-09-25T08:00:00+05:00";
+    assert.deepEqual(await stages(db, { dueAt: morning, precision: "morning", now: MONDAY_MORNING, kind: "idea" }), []);
+  });
+});
+
+test("миграция части дня не трогает задачи и напоминания, записанные до неё", () =>
+  withDatabaseBefore("20261004100000_part_of_day.sql", async (db, migrate) => {
+    const owner = 777;
+    // «вечером» до этапа — 19:00 со временем; дело на день — 18:00.
+    const { rows: tasks } = await db.query<{ id: string }>(
+      `insert into public.tasks (owner_telegram_id, title, due_at, due_precision)
+       values ($1, 'позвонить маме', '2030-10-04T19:00:00+05:00', 'time'),
+              ($1, 'отправить отчёт', '2030-10-04T18:00:00+05:00', 'day')
+       returning id`,
+      [owner],
+    );
+    await db.query(
+      `insert into public.reminders (owner_telegram_id, task_id, stage, fire_at)
+       values ($1, $2, 'before', '2030-10-04T18:00:00+05:00'),
+              ($1, $2, 'due', '2030-10-04T19:00:00+05:00')`,
+      [owner, tasks[0]!.id],
+    );
+    const snapshot = async () => ({
+      tasks: (
+        await db.query(
+          "select id, title, due_at, due_precision, updated_at from public.tasks order by title",
+        )
+      ).rows,
+      reminders: (
+        await db.query("select task_id, stage, fire_at, sent_at from public.reminders order by stage")
+      ).rows,
+    });
+    const before = await snapshot();
+
+    await migrate();
+
+    assert.deepEqual(await snapshot(), before);
+    assert.deepEqual(
+      (await db.query<{ due_precision: string }>("select due_precision from public.tasks order by title")).rows,
+      [{ due_precision: "day" }, { due_precision: "time" }],
+    );
+  }));
+
+test("точность — пять значений: часть дня ложится, другое — отказ", async () => {
+  await withDatabase(async (db) => {
+    for (const precision of ["day", "time", "morning", "afternoon", "evening"]) {
+      await db.query(
+        `insert into public.tasks (owner_telegram_id, title, due_at, due_precision)
+         values (777, 'дело', '2030-10-04T08:00:00+05:00', $1)`,
+        [precision],
+      );
+    }
+    await assert.rejects(
+      db.query(
+        `insert into public.tasks (owner_telegram_id, title, due_at, due_precision)
+         values (777, 'дело', '2030-10-04T13:00:00+05:00', 'noon')`,
+      ),
+      /tasks_due_precision_check/,
     );
   });
 });

@@ -518,6 +518,118 @@ test("снятие срока: неотправленные уходят, уше
     assert.deepEqual(schedule(await remindersOf(db, id)), [["before", FRIDAY_MORNING, true]]);
   }));
 
+// --- Правка словом: часть дня (§21.2) ------------------------------------------
+
+/** Понедельник, 7 октября 2030 года, 08:00 у владельца — начало утра, 03:00 UTC. */
+const MONDAY_EARLY = "2030-10-07T03:00:00.000Z";
+
+test("перенос на часть дня: начало части, часть и одно напоминание по плану бота", () =>
+  withDatabase(async (db) => {
+    const id = await seedFriday(db);
+
+    await editByWord(db, {
+      task_id: id,
+      action: "change",
+      changes: { due_at: "2030-10-07T08:00:00+05:00", due_precision: "morning" },
+      schedule: [{ stage: "due", fire_at: MONDAY_EARLY }],
+    });
+
+    const saved = await taskOf(db, id);
+    assert.equal(iso(saved.due_at), MONDAY_EARLY);
+    assert.equal(saved.due_precision, "morning");
+    assert.deepEqual(schedule(await remindersOf(db, id)), [["due", MONDAY_EARLY, false]]);
+  }));
+
+test("та же минута, другая точность — перенос: вечер и 18:00 со временем не одно и то же", () =>
+  withDatabase(async (db) => {
+    const id = await seedTask(db, { dueAt: "2030-10-07T13:00:00.000Z", precision: "time" });
+
+    await editByWord(db, {
+      task_id: id,
+      action: "change",
+      changes: { due_at: "2030-10-07T18:00:00+05:00", due_precision: "evening" },
+      schedule: [{ stage: "due", fire_at: MONDAY_DUE }],
+    });
+
+    const saved = await taskOf(db, id);
+    assert.equal(iso(saved.due_at), MONDAY_DUE);
+    assert.equal(saved.due_precision, "evening");
+    assert.deepEqual(schedule(await remindersOf(db, id)), [["due", MONDAY_DUE, false]]);
+  }));
+
+test("точность time — то же, что срок без ключа", () =>
+  withDatabase(async (db) => {
+    const id = await seedFriday(db);
+
+    await editByWord(db, {
+      task_id: id,
+      action: "change",
+      changes: { due_at: "2030-10-07T17:00:00+05:00", due_precision: "time" },
+      schedule: MONDAY_PLAN,
+    });
+
+    const saved = await taskOf(db, id);
+    assert.equal(iso(saved.due_at), MONDAY_FIVE);
+    assert.equal(saved.due_precision, "time");
+  }));
+
+test("точность без непустого срока, с днём или не из пяти — правка отклонена целиком", () =>
+  withDatabase(async (db) => {
+    await saveZone(db);
+    const id = await seedFriday(db, { title: "встреча с Ренатой" });
+    const before = await taskOf(db, id);
+    const refused: [Json, RegExp][] = [
+      [{ due_precision: "morning", title: "встреча с Петровым" }, /due_precision needs a due_at/],
+      [{ due_at: null, due_precision: "evening" }, /due_precision needs a due_at/],
+      [{ due_date: "2030-10-07", due_precision: "morning" }, /due_precision goes with due_at/],
+      [{ due_at: "2030-10-07T12:00:00+05:00", due_precision: "noon" }, /invalid due_precision/],
+      [{ due_at: "2030-10-07T18:00:00+05:00", due_precision: "day" }, /invalid due_precision/],
+      [{ due_at: "2030-10-07T18:00:00+05:00", due_precision: null }, /invalid due_precision/],
+    ];
+
+    for (const [changes, reason] of refused) {
+      const messageId = await message(db);
+      await assert.rejects(
+        understand(db, { messageId, edit: { task_id: id, action: "change", changes, schedule: [] } }),
+        reason,
+        JSON.stringify(changes),
+      );
+      assert.equal((await messageOf(db, messageId)).reply, null);
+    }
+
+    assert.deepEqual(await taskOf(db, id), before);
+    assert.equal((await remindersOf(db, id)).length, 2);
+  }));
+
+test("повтор делу с частью дня — правило без часа, как у дела на день; этот раз остаётся частью", () =>
+  withDatabase(async (db) => {
+    await saveZone(db);
+    const id = await seedTask(db, { dueAt: "2030-10-07T08:00:00+05:00", precision: "morning" });
+
+    await editByWord(db, {
+      task_id: id,
+      action: "change",
+      changes: { repeat: { every: "week", interval: 1, weekdays: [1], month_day: null, month: null } },
+      schedule: [],
+    });
+
+    const { rows } = await db.query<{ repeat: Json; due_precision: string; occurrence_at: Date }>(
+      "select repeat, due_precision, occurrence_at from public.tasks where id = $1",
+      [id],
+    );
+    const saved = only(rows);
+    assert.deepEqual(saved.repeat, {
+      every: "week",
+      interval: 1,
+      weekdays: [1],
+      month_day: null,
+      month: null,
+      time: null,
+    });
+    assert.equal(saved.due_precision, "morning");
+    assert.equal(iso(saved.occurrence_at), MONDAY_EARLY);
+  }));
+
 // --- Правка словом: закрыть, убрать, вопрос, «менять нечего» ------------------
 
 test("«сделал» закрывает задачу: неотправленные уходят, ушедшее остаётся", () =>

@@ -328,6 +328,84 @@ test("смена точности при том же моменте — пере
   });
 });
 
+// --- Часть дня (§21.4): форма её не предлагает, но и не теряет --------------------
+
+/** Пятница, 4 октября 2030 года, 08:00 у владельца — начало утра. */
+const FRIDAY_EARLY = "2030-10-04T03:00:00.000Z";
+
+test("часть дня: правка без ключа срока часть и напоминание не трогает", async () => {
+  await withDatabase(async (db) => {
+    await saveZone(db);
+    const id = await seedTask(db, { dueAt: FRIDAY_EARLY, precision: "morning" });
+    await seedReminder(db, id, "due", FRIDAY_EARLY);
+
+    const saved = await edit(db, id, { title: "встреча с Ренатой", priority: "high" });
+
+    assert.equal(iso(saved?.due_at ?? null), FRIDAY_EARLY);
+    assert.equal(saved?.due_precision, "morning");
+    assert.equal(saved?.due_moved_at, null);
+    assert.deepEqual(schedule(await remindersOf(db, id)), [["due", FRIDAY_EARLY, false]]);
+  });
+});
+
+test("смена дня у задачи с частью делает её делом на день", async () => {
+  await withDatabase(async (db) => {
+    await saveZone(db);
+    const id = await seedTask(db, { dueAt: FRIDAY_EARLY, precision: "morning" });
+    await seedReminder(db, id, "due", FRIDAY_EARLY);
+
+    const saved = await edit(db, id, { due_date: "2030-10-07" });
+
+    assert.equal(iso(saved?.due_at ?? null), "2030-10-07T13:00:00.000Z");
+    assert.equal(saved?.due_precision, "day");
+    assert.notEqual(saved?.due_moved_at, null);
+    assert.deepEqual(schedule(await remindersOf(db, id)), [
+      ["before", "2030-10-07T04:00:00.000Z", false],
+      ["due", "2030-10-07T13:00:00.000Z", false],
+    ]);
+  });
+});
+
+test("тот же день у задачи с частью — тоже дело на день: форма шлёт день, только если его тронули", async () => {
+  await withDatabase(async (db) => {
+    await saveZone(db);
+    const id = await seedTask(db, { dueAt: FRIDAY_EARLY, precision: "morning" });
+
+    const saved = await edit(db, id, { due_date: "2030-10-04" });
+
+    assert.equal(iso(saved?.due_at ?? null), FRIDAY_DUE);
+    assert.equal(saved?.due_precision, "day");
+  });
+});
+
+test("час у задачи с частью — срок со временем, за час и в срок", async () => {
+  await withDatabase(async (db) => {
+    await saveZone(db);
+    const id = await seedTask(db, { dueAt: FRIDAY_EARLY, precision: "morning" });
+
+    const saved = await edit(db, id, { due_at: "2030-10-04T10:30:00+05:00" });
+
+    assert.equal(iso(saved?.due_at ?? null), "2030-10-04T05:30:00.000Z");
+    assert.equal(saved?.due_precision, "time");
+    assert.deepEqual(schedule(await remindersOf(db, id)), [
+      ["before", "2030-10-04T04:30:00.000Z", false],
+      ["due", "2030-10-04T05:30:00.000Z", false],
+    ]);
+  });
+});
+
+test("расписание части считает база, когда задача снова становится делом: одна ступень в начале части", async () => {
+  await withDatabase(async (db) => {
+    await saveZone(db);
+    const id = await seedTask(db, { kind: "idea", dueAt: "2030-10-04T12:00:00+05:00", precision: "afternoon" });
+
+    const saved = await edit(db, id, { kind: "task" });
+
+    assert.equal(saved?.due_precision, "afternoon");
+    assert.deepEqual(schedule(await remindersOf(db, id)), [["due", "2030-10-04T07:00:00.000Z", false]]);
+  });
+});
+
 test("смена вида перепланирует, но переносом срока не считается", async () => {
   await withDatabase(async (db) => {
     await saveZone(db);

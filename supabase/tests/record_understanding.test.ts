@@ -528,3 +528,71 @@ test("ответ по убранной задаче — отказ: её бол�
     assert.equal(untouched.due_at, null);
     assert.deepEqual(await remindersOf(db, cancelled.id!), []);
   }));
+
+// --- Часть дня (§21.2) ----------------------------------------------------------
+
+/** Пятница, 2 октября 2026 года, 08:00 у владельца — начало утра. */
+const FRIDAY_EARLY = "2026-10-02T03:00:00.000Z";
+
+test("поручение с частью дня пишется как пришло: начало части, часть и одно напоминание", () =>
+  withDatabase(async (db) => {
+    for (const [precision, start] of [
+      ["morning", FRIDAY_EARLY],
+      ["afternoon", "2026-10-02T07:00:00.000Z"],
+      ["evening", FRIDAY_DUE],
+    ] as const) {
+      const messageId = await message(db);
+
+      const row = await understand(db, {
+        messageId,
+        task: { ...ERRAND, title: "встреча с Ренатой", due_at: start, due_precision: precision, needs_review: false },
+        reminders: [{ stage: "due", fire_at: start }],
+      });
+
+      assert.ok(row, precision);
+      const saved = await taskById(db, row.id!);
+      assert.equal(saved.due_at?.toISOString(), start);
+      assert.equal(saved.due_precision, precision);
+      assert.deepEqual(
+        (await remindersOf(db, row.id!)).map((r) => [r.stage, r.fire_at.toISOString()]),
+        [["due", start]],
+      );
+    }
+  }));
+
+test("ответ на вопрос частью дня — срок ложится частью", () =>
+  withDatabase(async (db) => {
+    const asked = await askedTask(db);
+    const answer = await message(db);
+
+    await understand(db, {
+      messageId: answer,
+      amend: {
+        task_id: asked.id,
+        fields: { due_at: FRIDAY_EARLY, due_precision: "morning", needs_review: false },
+        reminders: [{ stage: "due", fire_at: FRIDAY_EARLY }],
+      },
+    });
+
+    const saved = await taskById(db, asked.id!);
+    assert.equal(saved.due_at?.toISOString(), FRIDAY_EARLY);
+    assert.equal(saved.due_precision, "morning");
+    assertQuestionClosed(saved);
+  }));
+
+test("точность не из пяти — отказ, ничего не записано", () =>
+  withDatabase(async (db) => {
+    const messageId = await message(db);
+
+    await assert.rejects(
+      understand(db, {
+        messageId,
+        task: { ...ERRAND, due_at: FRIDAY_EARLY, due_precision: "noon" },
+        reminders: [],
+      }),
+      /tasks_due_precision_check/,
+    );
+
+    assert.equal(await taskCount(db), 0);
+    assert.equal((await savedMessage(db, messageId)).reply, null);
+  }));

@@ -109,7 +109,7 @@
 
 ## Задачи
 
-- [ ] База (миграция `supabase/migrations/<время>_part_of_day.sql`,
+- [x] База (миграция `supabase/migrations/<время>_part_of_day.sql`,
   образцы — `20261003100000_undated_ask.sql` и текущие тела в
   `20260928160000_task_edit.sql`, `20260929200000_repeat.sql`):
   ограничение `tasks_due_precision_check` заново с пятью значениями;

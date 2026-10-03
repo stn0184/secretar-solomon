@@ -58,7 +58,7 @@ interface Seed {
   kind?: "task" | "idea" | "wish";
   status?: "active" | "done" | "cancelled";
   due?: string | null;
-  precision?: "day" | "time" | null;
+  precision?: "day" | "time" | "morning" | "afternoon" | "evening" | null;
   repeat?: Record<string, unknown> | null;
   created?: string;
 }
@@ -278,6 +278,30 @@ test("порядок: по сроку, при равном — по записи
     assert.deepEqual(
       (await dayTasks(db)).map((row) => row.task_id),
       [meeting, ...twins, call, bulb, parcel],
+    );
+  });
+});
+
+test("часть дня — в плане по своему началу среди дел со временем, дела на день — после", async () => {
+  await withDatabase(async (db) => {
+    const bulb = await seedTask(db, { title: "купить лампочку", due: at("18:00"), precision: "day" });
+    const evening = await seedTask(db, { title: "позвонить маме", due: at("18:00"), precision: "evening" });
+    const early = await seedTask(db, { title: "выгулять собаку", due: at("07:30") });
+    const morning = await seedTask(db, { title: "встреча с Ренатой", due: at("08:00"), precision: "morning" });
+    const meeting = await seedTask(db, { title: "встреча с Ольгой", due: at("09:00") });
+    const afternoon = await seedTask(db, { title: "забрать посылку", due: at("12:00"), precision: "afternoon" });
+
+    const rows = await dayTasks(db);
+
+    // У дела на день и у вечера одно 18:00: порядок — по записи, а дела на
+    // день бот ставит в конец сам (§20.3).
+    assert.deepEqual(
+      rows.map((row) => row.task_id),
+      [early, morning, meeting, afternoon, bulb, evening],
+    );
+    assert.deepEqual(
+      rows.map((row) => row.due_precision),
+      ["time", "morning", "time", "afternoon", "day", "evening"],
     );
   });
 });
