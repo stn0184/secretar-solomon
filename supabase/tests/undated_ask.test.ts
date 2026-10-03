@@ -374,6 +374,29 @@ test("напоминание ушло меньше 15 минут назад — 
   });
 });
 
+test("утренний план ушёл меньше 15 минут назад — пусто (§20.2)", async () => {
+  await withDatabase(async (db) => {
+    const id = await seedTask(db);
+    const today = new Date().toISOString().slice(0, 10);
+    await db.query(
+      `insert into public.morning_plans (owner_telegram_id, day, telegram_message_id, created_at)
+       values ($1, $2::date, 1, $3)`,
+      [OWNER, today, ago(20 * MINUTE)],
+    );
+    assert.equal(await chosen(db), id, "план 20 минут назад — тишина");
+
+    await db.query("update public.morning_plans set created_at = $2 where owner_telegram_id = $1", [
+      OWNER,
+      ago(5 * MINUTE),
+    ]);
+    assert.equal(await chosen(db), null);
+
+    // Чужой план владельцу не мешает.
+    await db.query("update public.morning_plans set owner_telegram_id = $1", [STRANGER]);
+    assert.equal(await chosen(db), id);
+  });
+});
+
 test("чужие вопросы, сообщения и напоминания владельцу не мешают", async () => {
   await withDatabase(async (db) => {
     const id = await seedTask(db);

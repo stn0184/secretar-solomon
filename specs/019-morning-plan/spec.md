@@ -1,6 +1,6 @@
 # 019. Утренний план
 
-**Статус:** запланировано
+**Статус:** в работе
 **Размер:** M
 **Зависит от:** ничего
 **Прототип:** не нужен — приложение не меняется, меняется чат
@@ -83,7 +83,7 @@ RLS); заводит — `bot/src/solomon/services/morning.py`,
 
 ## Задачи
 
-- [ ] База (миграция `supabase/migrations/<время>_morning_plan.sql`,
+- [x] База (миграция `supabase/migrations/<время>_morning_plan.sql`,
   образцы — `20260928160000_task_edit.sql` и
   `20261003100000_undated_ask.sql`): таблица `morning_plans` по §20.4 с
   RLS §4.2; `morning_plan_sent`, `day_tasks`, `record_morning_plan` —
