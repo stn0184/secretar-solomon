@@ -459,19 +459,19 @@ async def test_move_into_the_past_has_no_remind_line() -> None:
 
 
 async def test_move_to_a_day_sends_the_date() -> None:
-    """День уходит датой, 18:00 ставит база; план — по 18:00 того дня."""
+    """У дела на день день уходит датой, 18:00 ставит база; план — по 18:00 того дня."""
     plan = [Planned(stage="before", fire_at=datetime(2026, 10, 4, 18, 0, tzinfo=TZ))]
     service, _, understandings, planner, _ = build(
-        edited(1, due_at=MONDAY, due_precision="day"), planner=FakePlanner(plan)
+        edited(2, due_at=MONDAY, due_precision="day"), planner=FakePlanner(plan)
     )
 
-    outcome = await say(service, "встречу на понедельник")
+    outcome = await say(service, "отчёт на понедельник")
 
     assert saved_edit(understandings)["changes"] == {"due_date": "2026-10-05"}
     assert planner.calls[0]["due_at"] == datetime(2026, 10, 5, 18, 0, tzinfo=TZ)
     assert planner.calls[0]["due_precision"] == "day"
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября. Напомню: 4 октября в 18:00"
+        "Перенёс: отправить отчёт. Срок: понедельник, 5 октября. Напомню: 4 октября в 18:00"
     )
 
 
@@ -835,11 +835,17 @@ def candidate_message(verdict: Understanding, task_id: str | None = None) -> Sto
 
 
 MOVE_CANDIDATES = edited(None, candidates=[2, 1], due_at=MONDAY, due_precision="day")
-MONDAY_PLAN = [Planned(stage="before", fire_at=datetime(2026, 10, 4, 18, 0, tzinfo=TZ))]
+MONDAY_PLAN = [
+    Planned(stage="before", fire_at=datetime(2026, 10, 5, 16, 0, tzinfo=TZ)),
+    Planned(stage="due", fire_at=datetime(2026, 10, 5, 17, 0, tzinfo=TZ)),
+]
 
 
 async def test_pick_writes_the_edit_for_the_chosen_task() -> None:
-    """Нажатие (§12.6): разбор из базы, план на момент нажатия, ответ вместо вопроса."""
+    """Нажатие (§12.6): разбор из базы, план на момент нажатия, ответ вместо вопроса.
+
+    «На понедельник» — только день: выбранная встреча держит свои 17:00 (§12.8).
+    """
     store = FakeEdits(OPEN, messages={MESSAGE_ID: candidate_message(MOVE_CANDIDATES)})
     service, _, _, planner, _ = build(make_understanding(), store, planner=FakePlanner(MONDAY_PLAN))
 
@@ -847,16 +853,21 @@ async def test_pick_writes_the_edit_for_the_chosen_task() -> None:
         chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=MEETING_ID
     )
 
-    reply = "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября. Напомню: 4 октября в 18:00"
+    reply = (
+        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00. "
+        "Напомню: 5 октября в 16:00"
+    )
     assert outcome == PressOutcome(message=reply, replace=True)
     assert planner.calls[0]["now"] == NOW
+    assert planner.calls[0]["due_at"] == datetime(2026, 10, 5, 17, 0, tzinfo=TZ)
+    assert planner.calls[0]["due_precision"] == "time"
     assert store.picks == [
         (
             "9a71",
             {
                 "task_id": MEETING_ID,
                 "action": "change",
-                "changes": {"due_date": "2026-10-05"},
+                "changes": {"due_at": "2026-10-05T17:00:00+05:00"},
                 "schedule": [item.as_row() for item in MONDAY_PLAN],
                 "question": None,
             },

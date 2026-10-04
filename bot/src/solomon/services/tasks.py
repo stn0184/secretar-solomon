@@ -2046,7 +2046,7 @@ class TaskService:
                 buttons=(back,),
             )
         question = (understanding.question or "").strip()
-        change = edits.edit_changes(task, edit, self._settings.owner_timezone)
+        change = edits.edit_changes(task, edit, self._settings.owner_timezone, now)
         if not question and change.needs_start:
             question = texts.REPEAT_START
         if question:

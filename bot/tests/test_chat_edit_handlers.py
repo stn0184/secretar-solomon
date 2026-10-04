@@ -290,7 +290,7 @@ async def test_pick_writes_first_and_then_replaces_the_question(
 
     assert store.picks[0][1]["task_id"] == MEETING_ID
     assert [edit.text for edit in session.edits] == [
-        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября"
+        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00"
     ]
     assert session.edits[0].message_id == 7
     assert session.edits[0].reply_markup is None

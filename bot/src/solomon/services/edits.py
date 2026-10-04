@@ -2,9 +2,10 @@
 
 Здесь решается всё, что не требует ни базы, ни модели: порядок и нумерация
 списка открытых задач в промпте, перевод номера модели в задачу, строка
-свайпа и последняя задача в разговоре, правка для базы из разбора и кнопки
-«какую задачу» и «Вернуть». Чтение и запись — в `services/tasks.py`, сам
-блок промпта — в `services/understanding.py`, рядом с другими блоками.
+свайпа и последняя задача в разговоре, правка для базы из разбора — с
+прежним часом при переносе (§12.8) — и кнопки «какую задачу» и «Вернуть».
+Чтение и запись — в `services/tasks.py`, сам блок промпта — в
+`services/understanding.py`, рядом с другими блоками.
 
 Номер задачи — индекс в списке плюс один: список, по которому модель
 назвала номер, и список, по которому бот его переводит, — один и тот же
@@ -17,7 +18,7 @@ import logging
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -166,6 +167,12 @@ class Change:
     `repeat_changed` — правило поставлено или сменилось, `repeat_removed` —
     снято словом. `needs_start` — правило назвали, а первого раза нет:
     у задачи нет срока, и он не назван; бот спрашивает, ничего не меняя.
+
+    `named` — правка назвала хоть одно значение, которое бот принял: пустые
+    `changes` при нём — «Так и записано», без него — «Не понял» (§12.8).
+    `lost_at` и `lost_precision` — прежний час или часть дня, которые не
+    удержались при переносе на сегодня: час уже наступил, часть кончилась;
+    по ним ответ спрашивает «во сколько?» (§12.8).
     """
 
     changes: dict[str, Any]
@@ -179,6 +186,20 @@ class Change:
     repeat_changed: bool = False
     repeat_removed: bool = False
     needs_start: bool = False
+    named: bool = False
+    lost_at: datetime | None = None
+    lost_precision: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Due:
+    """Срок после правки: ключи для базы, каким он станет и что не удержалось."""
+
+    changes: dict[str, Any]
+    at: datetime | None
+    precision: str | None
+    lost_at: datetime | None = None
+    lost_precision: str | None = None
 
 
 def _local(moment: datetime, timezone: ZoneInfo) -> datetime:
@@ -188,40 +209,106 @@ def _local(moment: datetime, timezone: ZoneInfo) -> datetime:
     return moment.astimezone(timezone)
 
 
-def _new_due(
-    task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo
-) -> tuple[dict[str, Any], datetime | None, str | None]:
-    """Срок из правки: ключ для базы и срок, какой станет. Не меняется — `{}`.
+def _on_day(day: date, precision: str, timezone: ZoneInfo) -> datetime:
+    """Момент срока на день: у части — её начало (§21.2), у дня — 18:00 (§3.3)."""
+    if parts.is_part(precision):
+        return parts.part_start(day, precision, timezone)
+    return datetime.combine(day, DAY_DUE_TIME, tzinfo=timezone)
+
+
+def _prior_on(task: TaskDetails, day: date, timezone: ZoneInfo) -> tuple[datetime, str] | None:
+    """Прежний час или часть задачи на новый день (§12.8); у дня и без срока — `None`.
+
+    Час — по часам владельца и с минутами: 17:30 остаётся 17:30 нового дня,
+    даже если между днями переводили часы.
+    """
+    if task.due_at is None or task.due_precision is None:
+        return None
+    if task.due_precision == "time":
+        clock = task.due_at.astimezone(timezone).time()
+        return datetime.combine(day, clock, tzinfo=timezone), "time"
+    if parts.is_part(task.due_precision):
+        return parts.part_start(day, task.due_precision, timezone), task.due_precision
+    return None
+
+
+def _passed(moment: datetime, precision: str, now: datetime, timezone: ZoneInfo) -> bool:
+    """Час уже наступил или часть дня кончилась (§12.8)."""
+    if precision == "time":
+        return moment <= now
+    return now >= parts.part_end(moment.astimezone(timezone).date(), precision, timezone)
+
+
+def _moved(
+    task: TaskDetails,
+    due_at: datetime,
+    precision: str,
+    timezone: ZoneInfo,
+    lost: tuple[datetime, str] | None = None,
+) -> _Due:
+    """Новый срок задачи и ключи для базы; тот же срок — пустые ключи.
 
     День уходит датой (`due_date`), и 18:00 ставит база по своему поясу
     (§3.6); час — моментом со смещением; часть дня — моментом её начала и
-    ключом `due_precision` (§21.2). Новый срок главнее снятия: из двух
-    противоречивых значений бот выбирает то, что ничего не теряет.
+    ключом `due_precision` (§21.2).
+    """
+    lost_at, lost_precision = lost if lost is not None else (None, None)
+    if precision == "day":
+        same = (
+            task.due_precision == "day"
+            and task.due_at is not None
+            and task.due_at.astimezone(timezone).date() == due_at.date()
+        )
+        if same:
+            return _Due({}, task.due_at, task.due_precision, lost_at, lost_precision)
+        return _Due({"due_date": due_at.date().isoformat()}, due_at, "day", lost_at, lost_precision)
+    if task.due_precision == precision and task.due_at == due_at:
+        return _Due({}, task.due_at, task.due_precision, lost_at, lost_precision)
+    changes: dict[str, Any] = {"due_at": due_at.isoformat()}
+    if parts.is_part(precision):
+        changes["due_precision"] = precision
+    return _Due(changes, due_at, precision, lost_at, lost_precision)
+
+
+def _new_due(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo, now: datetime) -> _Due:
+    """Срок из правки по §12.8. Не меняется — пустые ключи и срок задачи.
+
+    Назван час — он и есть срок. Назван только день — прежний час или часть
+    задачи на этот день; названа часть — прежний час, если он в ней лежит,
+    иначе начало части. `time_removed` прежнего не держит: срок — день или
+    названная часть, а без нового дня — тот же день. Перенос на сегодня, а
+    прежний час уже наступил или часть кончилась, — срок как назван, и
+    `lost_*` говорит, что не удержалось. Новый срок главнее снятия, снять
+    час — главнее снять срок: из противоречивых значений бот выбирает то,
+    что теряет меньше.
     """
     if edit.due_at is not None:
         local = _local(edit.due_at, timezone)
         precision = edit.due_precision or "time"
-        if parts.is_part(precision):
-            if task.due_precision == precision and task.due_at == local:
-                return {}, task.due_at, task.due_precision
-            return {"due_at": local.isoformat(), "due_precision": precision}, local, precision
-        if precision == "day":
-            day = local.date()
-            same = (
-                task.due_precision == "day"
-                and task.due_at is not None
-                and task.due_at.astimezone(timezone).date() == day
-            )
-            if same:
-                return {}, task.due_at, task.due_precision
-            due = datetime.combine(day, DAY_DUE_TIME, tzinfo=timezone)
-            return {"due_date": day.isoformat()}, due, "day"
-        if task.due_precision == "time" and task.due_at == local:
-            return {}, task.due_at, task.due_precision
-        return {"due_at": local.isoformat()}, local, "time"
-    if edit.due_removed and task.due_at is not None:
-        return {"due_at": None}, None, None
-    return {}, task.due_at, task.due_precision
+        if precision == "time":
+            return _moved(task, local, "time", timezone)
+        day = local.date()
+        named = _on_day(day, precision, timezone)
+        prior = None if edit.time_removed else _prior_on(task, day, timezone)
+        if prior is not None and parts.is_part(precision):
+            # Названа часть: держится только прежний час, лежащий в ней.
+            moment, kind = prior
+            if kind != "time" or parts.part_of(moment.astimezone(timezone).time()) != precision:
+                prior = None
+        if prior is None:
+            return _moved(task, named, precision, timezone)
+        today = now.astimezone(timezone).date()
+        if day == today and _passed(*prior, now, timezone):
+            return _moved(task, named, precision, timezone, lost=prior)
+        return _moved(task, *prior, timezone)
+    if task.due_at is None:
+        return _Due({}, None, None)
+    if edit.time_removed:
+        day = task.due_at.astimezone(timezone).date()
+        return _moved(task, _on_day(day, "day", timezone), "day", timezone)
+    if edit.due_removed:
+        return _Due({"due_at": None}, None, None)
+    return _Due({}, task.due_at, task.due_precision)
 
 
 def _new_rule(task: TaskDetails, edit: TaskEdit) -> dict[str, Any] | None:
@@ -241,8 +328,12 @@ def _new_rule(task: TaskDetails, edit: TaskEdit) -> dict[str, Any] | None:
     return rule
 
 
-def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo) -> Change:
+def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo, now: datetime) -> Change:
     """Слить правку модели с задачей: только отличия, пустое — «не менял» (§12.1).
+
+    Прежний час при переносе ставит бот, а не модель (§12.8): модель называет
+    только сказанное, а у кнопки кандидата (§12.6) она задачу и не знала.
+    `now` — момент правки или нажатия: по нему «час уже прошёл».
 
     Люди — список целиком: «не Кузнецову, а Петрову» заменяет, а не
     дописывает (в отличие от ответа на вопрос, §10.2). Обещание словом не
@@ -258,7 +349,8 @@ def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo) -> Chang
     rule = _new_rule(task, edit)
     if rule is not None and edit.due_removed:
         edit = edit.model_copy(update={"due_removed": False})
-    changes, due_at, due_precision = _new_due(task, edit, timezone)
+    due = _new_due(task, edit, timezone, now)
+    changes, due_at, due_precision = due.changes, due.at, due.precision
     due_changed = bool(changes)
     repeat: Mapping[str, Any] | None = task.repeat if due_at is not None else None
     repeat_changed = repeat_removed = needs_start = False
@@ -280,6 +372,20 @@ def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo) -> Chang
         changes["promise"] = edit.promise
     if edit.people is not None and list(edit.people) != list(task.people):
         changes["people"] = list(edit.people)
+    # Названное — то, что бот принял: отброшенное правило и пустая суть не в счёт.
+    named = any(
+        (
+            edit.due_at is not None,
+            edit.due_removed,
+            edit.time_removed,
+            bool(title),
+            edit.priority is not None,
+            edit.promise is not None,
+            edit.people is not None,
+            rule is not None,
+            edit.repeat_removed,
+        )
+    )
     return Change(
         changes=changes,
         title=changes.get("title", task.title),
@@ -292,6 +398,9 @@ def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo) -> Chang
         repeat_changed=repeat_changed,
         repeat_removed=repeat_removed,
         needs_start=needs_start,
+        named=named,
+        lost_at=due.lost_at,
+        lost_precision=due.lost_precision,
     )
 
 
