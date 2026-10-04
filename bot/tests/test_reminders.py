@@ -21,13 +21,13 @@ from supabase import Client
 
 from solomon import texts
 from solomon.db.morning import DayTask
-from solomon.db.reminders import DueReminder, MovedTask, Planned, UndatedTask
+from solomon.db.reminders import DueReminder, MovedTask, OverdueTask, Planned, UndatedTask
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import TaskDetails
 from solomon.handlers import done_keyboard
 from solomon.runner import build_dispatcher
 from solomon.runner import build_reminders as build_reminders_service
-from solomon.services import asks, morning
+from solomon.services import asks, morning, overdue
 from solomon.services.reminders import (
     ReminderService,
     by_task,
@@ -1360,22 +1360,25 @@ async def test_undated_question_goes_to_the_owner_with_the_button(
     assert sent.text == "Вчера вы просили записать: купить фильтр для воды. Когда займётесь?"
     assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
     assert sent.reply_markup.inline_keyboard[0][0].callback_data == f"done:{UNDATED_ID}"
+    # В полдень шаг о прошедшем деле уже открыт: дел нет — очередь вопроса
+    # о деле без срока (§22.2).
     assert client.calls == [
         "roll_repeats",
         "due_reminders",
         "moved_tasks",
+        "overdue_to_ask",
         "undated_to_ask",
         "record_ask",
     ]
     bounds = asks.bounds(SATURDAY_NOON, TZ)
-    assert client.params[3] == {
+    assert client.params[4] == {
         "owner_telegram_id": OWNER_ID,
         "day_start": bounds.day_start.isoformat(),
         "asked_before": bounds.asked_before.isoformat(),
         "question_since": bounds.question_since.isoformat(),
         "quiet_since": bounds.quiet_since.isoformat(),
     }
-    assert client.params[4] == {
+    assert client.params[5] == {
         "owner_telegram_id": OWNER_ID,
         "task_id": UNDATED_ID,
         "question": texts.UNDATED_QUESTION,
@@ -1815,10 +1818,12 @@ async def test_morning_plan_goes_to_the_owner_without_a_button(
     assert plan.reply_markup is None
     assert isinstance(reminder, SendMessage)
     assert isinstance(reminder.reply_markup, InlineKeyboardMarkup)
+    # Прошедших дел нет: план без абзаца, записывать вопрос нечего (§22.4).
     assert client.calls == [
         "roll_repeats",
         "morning_plan_sent",
         "day_tasks",
+        "overdue_to_ask",
         "record_morning_plan",
         "due_reminders",
         "mark_reminders_sent",
@@ -1832,8 +1837,635 @@ async def test_morning_plan_goes_to_the_owner_without_a_button(
         "day_end": bounds.day_end.isoformat(),
     }
     # Строка в `morning_plans` — за сегодняшний день, с id сообщения плана.
-    assert client.params[3] == {
+    assert client.params[4] == {
         "owner_telegram_id": OWNER_ID,
         "day": "2026-10-05",
+        "telegram_message_id": 1,
+    }
+
+
+# --- Вопрос о прошедшем деле (techspec/22-overdue.md §22.2, §22.4) ---
+
+OVERDUE_ID = "3d4e5f60-7a8b-4c9d-8e0f-1a2b3c4d5e6f"
+NEXT_OVERDUE_ID = "4e5f6071-8b9c-4dae-9f10-2b3c4d5e6f70"
+# Понедельник, 5 октября 2026 года, 14:00 у владельца: план уже не догоняет.
+MONDAY_AFTERNOON = datetime(2026, 10, 5, 14, 0, tzinfo=TZ)
+YESTERDAY_EVENING = datetime(2026, 10, 4, 18, 0, tzinfo=TZ)
+OCTOBER_SECOND = datetime(2026, 10, 2, 10, 0, tzinfo=TZ)
+QUESTION_YESTERDAY = "Вчера осталось: позвонить в сервис. Получилось?"
+
+
+def make_overdue(
+    task_id: str = OVERDUE_ID,
+    title: str = "позвонить в сервис",
+    due_at: datetime = YESTERDAY_EVENING,
+    asked_at: datetime | None = None,
+) -> OverdueTask:
+    """Задача со вчерашним сроком — как её отдаёт `overdue_to_ask`."""
+    return OverdueTask(
+        task_id=task_id, title=title, due_at=due_at, due_precision="time", asked_at=asked_at
+    )
+
+
+class FakeOverdue:
+    """`overdue_to_ask` без базы: какое дело отдать и с какими границами спросили."""
+
+    def __init__(self, task: OverdueTask | None = None, broken: bool = False) -> None:
+        self.task = task
+        self.broken = broken
+        self.calls: list[tuple[int, overdue.OverdueBounds]] = []
+
+    async def __call__(
+        self, *, owner_telegram_id: int, bounds: overdue.OverdueBounds
+    ) -> OverdueTask | None:
+        self.calls.append((owner_telegram_id, bounds))
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return self.task
+
+
+class FakeOverdueRecorder:
+    """`record_overdue_ask` без базы: что записали; `None` — дело уже не то."""
+
+    def __init__(
+        self, broken: bool = False, events: list[str] | None = None, missing: bool = False
+    ) -> None:
+        self.missing = missing
+        self.broken = broken
+        self.calls: list[dict[str, object]] = []
+        self.events = events if events is not None else []
+
+    async def __call__(
+        self,
+        *,
+        owner_telegram_id: int,
+        task_id: str,
+        question: str,
+        telegram_message_id: int | None,
+    ) -> TaskDetails | None:
+        self.events.append("record_overdue")
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        self.calls.append(
+            {
+                "owner_telegram_id": owner_telegram_id,
+                "task_id": task_id,
+                "question": question,
+                "telegram_message_id": telegram_message_id,
+            }
+        )
+        return None if self.missing else make_details(id=task_id)
+
+
+def build_overdue(
+    finder: FakeOverdue,
+    recorder: FakeOverdueRecorder | None = None,
+    notifier: FakeNotifier | None = None,
+    *,
+    planning: bool = False,
+    plan_sent: FakePlanSent | None = None,
+    day_tasks: FakeDayTasks | None = None,
+    plan_recorder: FakePlanRecorder | None = None,
+    announcer: FakeAnnouncer | None = None,
+    due: FakeDue | None = None,
+    moved: FakeMoved | None = None,
+    undated: FakeUndated | None = None,
+) -> tuple[ReminderService, FakeOverdueRecorder, FakeNotifier, FakeAnnouncer]:
+    """Сервис напоминаний с вопросом о прошедшем деле; `planning` — и с планом."""
+    record = recorder or FakeOverdueRecorder()
+    sender = notifier or FakeNotifier()
+    speaker = announcer or FakeAnnouncer(label="plan")
+    service = ReminderService(
+        settings=make_settings(),
+        due=due or FakeDue(),
+        mark_sent=FakeMarks(),
+        close_task=FakeCloser(),
+        notify=sender,
+        moved=moved or FakeMoved(),
+        clear_moved=FakeClearMoved(),
+        announce=speaker,
+        clock=lambda: MONDAY_AFTERNOON,
+        undated=undated,
+        record_ask=FakeAskRecorder() if undated is not None else None,
+        plan_sent=(plan_sent or FakePlanSent()) if planning else None,
+        day_tasks=(day_tasks or FakeDayTasks()) if planning else None,
+        record_plan=(plan_recorder or FakePlanRecorder()) if planning else None,
+        overdue_task=finder,
+        record_overdue=record,
+    )
+    return service, record, sender, speaker
+
+
+async def test_overdue_question_is_sent_with_the_button_and_then_recorded() -> None:
+    """Отдельный вопрос: ушёл с кнопкой «Сделано» — и только потом записан (§22.4)."""
+    events: list[str] = []
+    finder = FakeOverdue(make_overdue())
+    service, recorder, notifier, _ = build_overdue(
+        finder, FakeOverdueRecorder(events=events), FakeNotifier(events=events)
+    )
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    assert finder.calls == [(OWNER_ID, overdue.step_bounds(MONDAY_AFTERNOON, TZ))]
+    assert notifier.sent == [(OVERDUE_ID, QUESTION_YESTERDAY)]
+    # Кнопка «Сделано» — та же, что под напоминанием; задача разовая.
+    assert notifier.occurrences == [None]
+    assert events == ["reminder", "record_overdue"]
+    assert recorder.calls == [
+        {
+            "owner_telegram_id": OWNER_ID,
+            "task_id": OVERDUE_ID,
+            "question": "Получилось?",
+            "telegram_message_id": 41,
+        }
+    ]
+
+
+async def test_earlier_due_is_named_by_date() -> None:
+    """Срок раньше вчерашнего — «Срок был 2 октября: …» (§22.3)."""
+    finder = FakeOverdue(make_overdue(due_at=OCTOBER_SECOND))
+    service, _, notifier, _ = build_overdue(finder)
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    assert notifier.sent[0][1] == "Срок был 2 октября: позвонить в сервис. Получилось?"
+
+
+async def test_next_question_of_the_day_says_more() -> None:
+    """Ответили, 15 минут тишины — следующий вопрос с «Ещё» (§22.2, §22.3)."""
+    finder = FakeOverdue(make_overdue())
+    service, recorder, notifier, _ = build_overdue(finder)
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    finder.task = make_overdue(task_id=NEXT_OVERDUE_ID, title="отправить расчёт")
+    assert await service.tick(MONDAY_AFTERNOON.replace(minute=20)) == 1
+    finder.task = make_overdue(task_id="5f60", title="забрать посылку", due_at=OCTOBER_SECOND)
+    assert await service.tick(MONDAY_AFTERNOON.replace(minute=40)) == 1
+
+    assert [text for _, text in notifier.sent] == [
+        QUESTION_YESTERDAY,
+        "Ещё вчера осталось: отправить расчёт. Получилось?",
+        "Ещё одно, срок был 2 октября: забрать посылку. Получилось?",
+    ]
+    assert [call["task_id"] for call in recorder.calls] == [OVERDUE_ID, NEXT_OVERDUE_ID, "5f60"]
+
+
+async def test_repeated_question_offers_to_remove_the_task() -> None:
+    """Спрашивал неделю назад — в конце «Если уже не нужно…» (§22.3)."""
+    asked = datetime(2026, 9, 28, 8, 0, tzinfo=TZ)
+    finder = FakeOverdue(make_overdue(due_at=OCTOBER_SECOND.replace(day=1), asked_at=asked))
+    service, _, notifier, _ = build_overdue(finder)
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    assert notifier.sent[0][1] == (
+        "Срок был 1 октября: позвонить в сервис. Получилось? "
+        "Если уже не нужно, скажите — уберу из списка."
+    )
+
+
+@pytest.mark.parametrize(
+    "moment",
+    [
+        datetime(2026, 10, 5, 7, 59, tzinfo=TZ),
+        datetime(2026, 10, 5, 20, 0, tzinfo=TZ),
+        datetime(2026, 10, 5, 23, 0, tzinfo=TZ),
+        datetime(2026, 10, 5, 3, 0, tzinfo=TZ),
+    ],
+)
+async def test_no_overdue_question_outside_the_window(moment: datetime) -> None:
+    """До 08:00 и с 20:00 база о прошедшем деле не спрашивается (§22.2)."""
+    finder = FakeOverdue(make_overdue())
+    service, recorder, notifier, _ = build_overdue(finder)
+
+    assert await service.tick(moment) == 0
+    assert finder.calls == []
+    assert notifier.sent == []
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize(
+    ("moment", "asked"),
+    [
+        (datetime(2026, 10, 5, 8, 0, tzinfo=TZ), False),
+        (datetime(2026, 10, 5, 11, 59, tzinfo=TZ), False),
+        (datetime(2026, 10, 5, 12, 0, tzinfo=TZ), True),
+        (datetime(2026, 10, 5, 19, 59, tzinfo=TZ), True),
+    ],
+)
+async def test_before_noon_the_step_waits_for_today_plan(moment: datetime, asked: bool) -> None:
+    """Плана сегодня не было: до 12:00 шаг ждёт его, с 12:00 спрашивает сам (§22.2)."""
+    finder = FakeOverdue(make_overdue())
+    service, _, notifier, _ = build_overdue(finder)
+
+    assert await service.tick(moment) == (1 if asked else 0)
+    assert bool(finder.calls) is asked
+    assert bool(notifier.sent) is asked
+
+
+async def test_after_the_plan_the_step_goes_before_noon() -> None:
+    """План с вопросом ушёл в 08:00 — в 08:20 следующий вопрос уже отдельно, с «Ещё»."""
+    finder = FakeOverdue(make_overdue())
+    service, recorder, notifier, announcer = build_overdue(finder, planning=True)
+
+    assert await service.tick(PLAN_MORNING) == 1
+    finder.task = make_overdue(task_id=NEXT_OVERDUE_ID, title="отправить расчёт")
+    later = PLAN_MORNING.replace(minute=20)
+    assert await service.tick(later) == 1
+
+    assert announcer.sent[0].endswith("\n\n" + QUESTION_YESTERDAY)
+    assert notifier.sent == [(NEXT_OVERDUE_ID, "Ещё вчера осталось: отправить расчёт. Получилось?")]
+    assert finder.calls[1] == (OWNER_ID, overdue.step_bounds(later, TZ))
+    assert [call["telegram_message_id"] for call in recorder.calls] == [None, 41]
+
+
+async def test_plan_found_in_the_database_lets_the_step_go() -> None:
+    """Перезапуск после плана: план уже в базе — шаг идёт и до 12:00 (§22.2)."""
+    finder = FakeOverdue(make_overdue())
+    service, _, notifier, announcer = build_overdue(
+        finder, planning=True, plan_sent=FakePlanSent(sent=True)
+    )
+
+    assert await service.tick(PLAN_MORNING.replace(hour=9)) == 1
+    assert announcer.sent == []
+    assert notifier.sent == [(OVERDUE_ID, QUESTION_YESTERDAY)]
+
+
+async def test_no_overdue_question_when_a_reminder_went_out_this_tick() -> None:
+    """В этом тике ушло напоминание — тишины нет, вопроса тоже (§22.2)."""
+    finder = FakeOverdue(make_overdue())
+    ripe = [make_due("due", MONDAY_AFTERNOON, task_id="0e2f")]
+    service, recorder, notifier, _ = build_overdue(finder, due=FakeDue(ripe))
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    assert [task_id for task_id, _ in notifier.sent] == ["0e2f"]
+    assert finder.calls == []
+    assert recorder.calls == []
+
+
+async def test_no_overdue_question_when_a_moved_line_went_out_this_tick() -> None:
+    """Ушла строка «Перенёс» — вопрос ждёт следующей тишины (§22.2)."""
+    finder = FakeOverdue(make_overdue())
+    service, _, notifier, _ = build_overdue(finder, moved=FakeMoved([make_moved()]))
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    assert notifier.sent == []
+    assert finder.calls == []
+
+
+async def test_undated_question_waits_while_overdue_ones_go() -> None:
+    """Пока идут вопросы о прошедшем, вопрос о деле без срока ждёт; кончились — уходит."""
+    finder = FakeOverdue(make_overdue())
+    undated = FakeUndated(make_undated())
+    service, _, notifier, _ = build_overdue(finder, undated=undated)
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    assert undated.calls == []
+
+    finder.task = None
+    assert await service.tick(MONDAY_AFTERNOON.replace(minute=20)) == 1
+    assert len(undated.calls) == 1
+    assert [task_id for task_id, _ in notifier.sent] == [OVERDUE_ID, UNDATED_ID]
+
+
+async def test_nothing_overdue_is_asked_again_next_tick() -> None:
+    """Дела нет, живой вопрос или нет тишины — база решает заново на следующем тике."""
+    finder = FakeOverdue(None)
+    service, recorder, notifier, _ = build_overdue(finder)
+
+    assert await service.tick(MONDAY_AFTERNOON) == 0
+    finder.task = make_overdue()
+    assert await service.tick(MONDAY_AFTERNOON.replace(minute=1)) == 1
+
+    assert len(finder.calls) == 2
+    assert len(notifier.sent) == 1
+    assert len(recorder.calls) == 1
+
+
+async def test_failed_overdue_send_records_nothing_and_next_tick_asks_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Не ушло — ничего не записано, следующий тик спросит снова и без «Ещё» (§22.4)."""
+    notifier = FakeNotifier(broken=True)
+    service, recorder, _, _ = build_overdue(FakeOverdue(make_overdue()), notifier=notifier)
+
+    assert await service.tick(MONDAY_AFTERNOON) == 0
+    assert recorder.calls == []
+    assert f"Вопрос о прошедшем деле {OVERDUE_ID} не ушёл" in caplog.text
+    assert any(record.levelname == "WARNING" for record in caplog.records)
+
+    notifier.broken = False
+    assert await service.tick(MONDAY_AFTERNOON.replace(minute=1)) == 1
+    assert notifier.sent == [(OVERDUE_ID, QUESTION_YESTERDAY)]
+    assert len(recorder.calls) == 1
+
+
+async def test_unrecorded_question_is_not_repeated_today(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ушло, запись не легла, отбор вернул то же дело — до завтра шаг молчит (§22.4)."""
+    finder = FakeOverdue(make_overdue())
+    service, _, notifier, _ = build_overdue(finder, FakeOverdueRecorder(broken=True))
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    assert f"Вопрос о прошедшем деле {OVERDUE_ID} ушёл, но не записан" in caplog.text
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+    assert await service.tick(MONDAY_AFTERNOON.replace(minute=20)) == 0
+    assert await service.tick(MONDAY_AFTERNOON.replace(hour=16)) == 0
+    assert len(notifier.sent) == 1
+    # Второй тик увидел то же дело и остановил шаг; третий в базу не ходил.
+    assert len(finder.calls) == 2
+
+    assert await service.tick(datetime(2026, 10, 6, 12, 0, tzinfo=TZ)) == 1
+    assert len(notifier.sent) == 2
+    assert notifier.sent[1][1] == "Срок был 4 октября: позвонить в сервис. Получилось?"
+
+
+async def test_overdue_task_changed_between_pick_and_record_is_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`record_overdue_ask` вернула `null`: дело за этот миг закрыли или перенесли."""
+    service, _, notifier, _ = build_overdue(
+        FakeOverdue(make_overdue()), FakeOverdueRecorder(missing=True)
+    )
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert any("ушёл, но не записан" in record.getMessage() for record in warnings)
+    assert len(notifier.sent) == 1
+
+
+async def test_broken_overdue_pick_does_not_kill_the_tick(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Сбой `overdue_to_ask` — строка в журнал, шаг кончился, тик живёт (§22.4)."""
+    service, recorder, notifier, _ = build_overdue(FakeOverdue(broken=True))
+
+    assert await service.tick(MONDAY_AFTERNOON) == 0
+    assert notifier.sent == []
+    assert recorder.calls == []
+    assert "Прошедшее дело для вопроса не выбрано" in caplog.text
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+
+async def test_overdue_log_names_the_task_not_its_title(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Журнал: id задачи, первый или повторный, в плане или отдельно; сути нет."""
+    caplog.set_level(logging.INFO)
+    asked = datetime(2026, 9, 28, 8, 0, tzinfo=TZ)
+    first, _, _, _ = build_overdue(FakeOverdue(make_overdue()))
+    again, _, _, _ = build_overdue(FakeOverdue(make_overdue(asked_at=asked)))
+    planned, _, _, _ = build_overdue(FakeOverdue(make_overdue()), planning=True)
+
+    await first.tick(MONDAY_AFTERNOON)
+    await again.tick(MONDAY_AFTERNOON)
+    await planned.tick(PLAN_MORNING)
+
+    assert f"Вопрос о прошедшем деле {OVERDUE_ID}: первый, отдельно" in caplog.text
+    assert f"Вопрос о прошедшем деле {OVERDUE_ID}: повторный, отдельно" in caplog.text
+    assert f"Вопрос о прошедшем деле {OVERDUE_ID}: первый, в плане" in caplog.text
+    assert "сервис" not in caplog.text
+
+
+async def test_without_the_overdue_dependencies_there_is_no_question() -> None:
+    """Сервис без отбора и записи — как до этапа 022: ни шага, ни абзаца."""
+    service, _, _, notifier = build_reminders()
+
+    assert await service.tick(MONDAY_AFTERNOON) == 0
+    assert notifier.sent == []
+
+    planning, _, _, _, announcer = build_planning()
+    assert await planning.tick(PLAN_MORNING) == 1
+    assert announcer.sent == [PLAN_TEXT]
+
+
+async def test_plan_asks_about_the_overdue_and_records_it_after_the_plan() -> None:
+    """Абзац в плане (§22.2): отбор с границами плана, запись — после плана, без id."""
+    events: list[str] = []
+    finder = FakeOverdue(make_overdue())
+    service, recorder, notifier, announcer = build_overdue(
+        finder,
+        FakeOverdueRecorder(events=events),
+        planning=True,
+        plan_recorder=FakePlanRecorder(events=events),
+        announcer=FakeAnnouncer(label="plan", events=events),
+    )
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert finder.calls == [(OWNER_ID, overdue.plan_bounds(PLAN_MORNING, TZ))]
+    assert announcer.sent == [PLAN_TEXT + "\n\n" + QUESTION_YESTERDAY]
+    # Кнопок под планом нет: отдельного сообщения с «Сделано» тоже.
+    assert notifier.sent == []
+    assert events == ["plan", "record", "record_overdue"]
+    assert recorder.calls == [
+        {
+            "owner_telegram_id": OWNER_ID,
+            "task_id": OVERDUE_ID,
+            "question": "Получилось?",
+            "telegram_message_id": None,
+        }
+    ]
+
+
+async def test_empty_day_plan_keeps_the_overdue_question() -> None:
+    """Дел на сегодня нет — «дел нет» и тот же абзац (§22.3)."""
+    service, _, _, announcer = build_overdue(
+        FakeOverdue(make_overdue(due_at=OCTOBER_SECOND)),
+        planning=True,
+        day_tasks=FakeDayTasks([]),
+    )
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert announcer.sent == [
+        "Доброе утро! На сегодня дел нет.\n\nСрок был 2 октября: позвонить в сервис. Получилось?"
+    ]
+
+
+async def test_broken_pick_leaves_the_plan_without_the_paragraph(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Сбой отбора — план уходит без абзаца, строка в журнал (§22.4)."""
+    plan_recorder = FakePlanRecorder()
+    service, recorder, _, announcer = build_overdue(
+        FakeOverdue(broken=True), planning=True, plan_recorder=plan_recorder
+    )
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert announcer.sent == [PLAN_TEXT]
+    assert len(plan_recorder.calls) == 1
+    assert recorder.calls == []
+    assert "Прошедшее дело для вопроса не выбрано" in caplog.text
+
+
+async def test_failed_plan_records_neither_plan_nor_question() -> None:
+    """План не ушёл — ничего не записано; следующий тик пришлёт план с вопросом."""
+    announcer = FakeAnnouncer(label="plan", broken=True)
+    plan_recorder = FakePlanRecorder()
+    service, recorder, _, _ = build_overdue(
+        FakeOverdue(make_overdue()),
+        planning=True,
+        plan_recorder=plan_recorder,
+        announcer=announcer,
+    )
+
+    assert await service.tick(PLAN_MORNING) == 0
+    assert plan_recorder.calls == []
+    assert recorder.calls == []
+
+    announcer.broken = False
+    assert await service.tick(PLAN_MORNING.replace(minute=1)) == 1
+    # Вопрос — всё ещё первый за день: несостоявшийся не считается.
+    assert announcer.sent == [PLAN_TEXT + "\n\n" + QUESTION_YESTERDAY]
+    assert len(recorder.calls) == 1
+
+
+async def test_failed_question_record_does_not_undo_the_plan(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Вопрос в плане не записан — строка в журнал; план ушёл и записан (§22.4)."""
+    plan_recorder = FakePlanRecorder()
+    service, _, _, announcer = build_overdue(
+        FakeOverdue(make_overdue()),
+        FakeOverdueRecorder(broken=True),
+        planning=True,
+        plan_recorder=plan_recorder,
+    )
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert len(announcer.sent) == 1
+    assert len(plan_recorder.calls) == 1
+    assert f"Вопрос о прошедшем деле {OVERDUE_ID} ушёл, но не записан" in caplog.text
+
+
+async def test_failed_plan_record_still_records_the_question(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """План не записался — вопрос всё равно записывается: он ушёл (§22.4)."""
+    service, recorder, _, _ = build_overdue(
+        FakeOverdue(make_overdue()),
+        planning=True,
+        plan_recorder=FakePlanRecorder(broken=True),
+    )
+
+    assert await service.tick(PLAN_MORNING) == 1
+    assert "Утренний план ушёл, но не записан" in caplog.text
+    assert len(recorder.calls) == 1
+
+
+def overdue_rows() -> tuple[dict[str, object], dict[str, object]]:
+    """Строка `overdue_to_ask` и задача из `record_overdue_ask` — как их отдаёт PostgREST."""
+    due = YESTERDAY_EVENING.isoformat()
+    row: dict[str, object] = {
+        "task_id": OVERDUE_ID,
+        "title": "позвонить в сервис",
+        "due_at": due,
+        "due_precision": "time",
+        "asked_at": None,
+    }
+    recorded: dict[str, object] = {
+        "id": OVERDUE_ID,
+        "title": "позвонить в сервис",
+        "kind": "task",
+        "status": "active",
+        "due_at": due,
+        "due_precision": "time",
+        "priority": "normal",
+        "promise": None,
+        "people": [],
+        "created_at": datetime(2026, 10, 1, 9, 0, tzinfo=TZ).isoformat(),
+    }
+    return row, recorded
+
+
+async def test_overdue_question_in_the_plan_goes_through_the_runner(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Сборка из `runner.py`: план с абзацем, без кнопки; вопрос записан без id."""
+    row, recorded = overdue_rows()
+    client = FakeRpcClient(
+        {
+            "morning_plan_sent": False,
+            "day_tasks": [],
+            "overdue_to_ask": [row],
+            "record_morning_plan": True,
+            "record_overdue_ask": recorded,
+            "due_reminders": [],
+            "moved_tasks": [],
+        }
+    )
+    service = build_reminders_service(make_settings(), cast(Client, client), bot)
+
+    assert await service.tick(PLAN_MORNING) == 1
+    plan = session.sent[0]
+    assert isinstance(plan, SendMessage)
+    assert plan.text == "Доброе утро! На сегодня дел нет.\n\n" + QUESTION_YESTERDAY
+    assert plan.reply_markup is None
+    assert client.calls == [
+        "roll_repeats",
+        "morning_plan_sent",
+        "day_tasks",
+        "overdue_to_ask",
+        "record_morning_plan",
+        "record_overdue_ask",
+        "due_reminders",
+        "moved_tasks",
+    ]
+    bounds = overdue.plan_bounds(PLAN_MORNING, TZ)
+    assert client.params[3] == {
+        "owner_telegram_id": OWNER_ID,
+        "day_start": bounds.day_start.isoformat(),
+        "asked_before": bounds.asked_before.isoformat(),
+        "question_since": bounds.day_start.isoformat(),
+        "quiet_since": None,
+    }
+    assert client.params[5] == {
+        "owner_telegram_id": OWNER_ID,
+        "task_id": OVERDUE_ID,
+        "question": texts.OVERDUE_QUESTION,
+        "telegram_message_id": None,
+    }
+
+
+async def test_separate_overdue_question_goes_through_the_runner(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Сборка из `runner.py`: отдельный вопрос с кнопкой, запись с id сообщения."""
+    row, recorded = overdue_rows()
+    client = FakeRpcClient(
+        {
+            "due_reminders": [],
+            "moved_tasks": [],
+            "overdue_to_ask": [row],
+            "record_overdue_ask": recorded,
+        }
+    )
+    service = build_reminders_service(make_settings(), cast(Client, client), bot)
+
+    assert await service.tick(MONDAY_AFTERNOON) == 1
+    sent = session.sent[0]
+    assert isinstance(sent, SendMessage)
+    assert sent.chat_id == OWNER_ID
+    assert sent.text == QUESTION_YESTERDAY
+    assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
+    assert sent.reply_markup.inline_keyboard[0][0].callback_data == f"done:{OVERDUE_ID}"
+    assert client.calls == [
+        "roll_repeats",
+        "due_reminders",
+        "moved_tasks",
+        "overdue_to_ask",
+        "record_overdue_ask",
+    ]
+    bounds = overdue.step_bounds(MONDAY_AFTERNOON, TZ)
+    assert bounds.quiet_since is not None
+    assert client.params[3] == {
+        "owner_telegram_id": OWNER_ID,
+        "day_start": bounds.day_start.isoformat(),
+        "asked_before": bounds.asked_before.isoformat(),
+        "question_since": bounds.question_since.isoformat(),
+        "quiet_since": bounds.quiet_since.isoformat(),
+    }
+    assert client.params[4] == {
+        "owner_telegram_id": OWNER_ID,
+        "task_id": OVERDUE_ID,
+        "question": texts.OVERDUE_QUESTION,
         "telegram_message_id": 1,
     }

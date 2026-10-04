@@ -23,6 +23,11 @@ aiogram, ни про сеть, и тест подставляет свою за�
 перекатывания, до созревших напоминаний (§20.2): окно, границы дня и строки —
 в `services/morning.py`, дела дня и память о плане — в базе, здесь — тот же
 порядок «отправить → записать» и дата плана в памяти процесса.
+
+Вопрос о прошедшем деле (`techspec/22-overdue.md`) — абзацем в утреннем
+плане и отдельным шагом тика перед вопросом о деле без срока (§22.2): окно,
+границы и слова — в `services/overdue.py`, отбор и запись — в базе, здесь —
+«отправить → записать» и память о делах, о которых процесс спрашивал сегодня.
 """
 
 from __future__ import annotations
@@ -41,10 +46,10 @@ from solomon.config import Settings
 from solomon.db import morning as db_morning
 from solomon.db import reminders as db_reminders
 from solomon.db.morning import DayTask
-from solomon.db.reminders import DueReminder, MovedTask, Planned, UndatedTask
+from solomon.db.reminders import DueReminder, MovedTask, OverdueTask, Planned, UndatedTask
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import ACTIVE_STATUS, TIME_PRECISION, TaskDetails
-from solomon.services import asks, morning
+from solomon.services import asks, morning, overdue
 from solomon.services.repeat import occurrence_seconds
 from solomon.services.understanding import Clock
 
@@ -217,6 +222,31 @@ class AskRecorder(Protocol):
     ) -> TaskDetails | None: ...
 
 
+class OverdueFinder(Protocol):
+    """О каком прошедшем деле спросить сейчас (§22.4): одно дело или `None`."""
+
+    async def __call__(
+        self, *, owner_telegram_id: int, bounds: overdue.OverdueBounds
+    ) -> OverdueTask | None: ...
+
+
+class OverdueRecorder(Protocol):
+    """Записать ушедший вопрос о прошедшем деле (§22.4). `None` — не записано.
+
+    `telegram_message_id` у вопроса в плане — `None`: свайп на план —
+    обычное сообщение.
+    """
+
+    async def __call__(
+        self,
+        *,
+        owner_telegram_id: int,
+        task_id: str,
+        question: str,
+        telegram_message_id: int | None,
+    ) -> TaskDetails | None: ...
+
+
 class PlanChecker(Protocol):
     """Был ли у владельца утренний план за этот день (§20.4)."""
 
@@ -272,6 +302,8 @@ class ReminderService:
         plan_sent: PlanChecker | None = None,
         day_tasks: DayTaskLister | None = None,
         record_plan: PlanRecorder | None = None,
+        overdue_task: OverdueFinder | None = None,
+        record_overdue: OverdueRecorder | None = None,
     ) -> None:
         self._settings = settings
         self._due = due
@@ -297,6 +329,16 @@ class ReminderService:
         # День владельца, когда план ушёл или нашёлся в базе: до завтра шаг
         # в базу не ходит, и второго плана нет, даже если запись не удалась.
         self._planned_on: date | None = None
+        # Без них вопроса о прошедшем деле нет — ни в плане, ни отдельно, как
+        # до этапа 022 (§22.2).
+        self._overdue_task = overdue_task
+        self._record_overdue = record_overdue
+        # Дела, о которых процесс спрашивал в этот день владельца (§22.4): по
+        # ним вопрос получает «Ещё», и по ним ловится незаписанный вопрос —
+        # тогда до завтра шаг больше не спрашивает. Бот один (§16.3).
+        self._overdue_on: date | None = None
+        self._overdue_asked: set[str] = set()
+        self._overdue_stuck = False
         self._clock = clock or self._now
 
     def _now(self) -> datetime:
@@ -385,6 +427,33 @@ class ReminderService:
                 telegram_message_id=telegram_message_id,
             )
 
+        async def overdue_task(
+            *, owner_telegram_id: int, bounds: overdue.OverdueBounds
+        ) -> OverdueTask | None:
+            return await db_reminders.overdue_to_ask(
+                db,
+                owner_telegram_id=owner_telegram_id,
+                day_start=bounds.day_start,
+                asked_before=bounds.asked_before,
+                question_since=bounds.question_since,
+                quiet_since=bounds.quiet_since,
+            )
+
+        async def record_overdue(
+            *,
+            owner_telegram_id: int,
+            task_id: str,
+            question: str,
+            telegram_message_id: int | None,
+        ) -> TaskDetails | None:
+            return await db_reminders.record_overdue_ask(
+                db,
+                owner_telegram_id=owner_telegram_id,
+                task_id=task_id,
+                question=question,
+                telegram_message_id=telegram_message_id,
+            )
+
         return cls(
             settings=settings,
             due=due,
@@ -400,12 +469,15 @@ class ReminderService:
             plan_sent=plan_sent,
             day_tasks=day_tasks,
             record_plan=record_plan,
+            overdue_task=overdue_task,
+            record_overdue=record_overdue,
         )
 
     async def tick(self, now: datetime | None = None) -> int:
         """Один заход: перекатывание (§13.4), утренний план (§20.2), созревшее
-        (§6.2), строки «Перенёс» (§11.4) и последним — вопрос о деле без срока
-        (§19.2), если до него ничего не ушло.
+        (§6.2), строки «Перенёс» (§11.4), затем вопрос о прошедшем деле
+        (§22.2) и последним — вопрос о деле без срока (§19.2): каждый из двух
+        вопросов — только если до него в этом тике ничего не ушло.
 
         Порядок нарочно такой: новый раз получает свои ступени до выборки, и
         созревшая уходит этим же тиком; план называет дела уже на сегодняшнем
@@ -428,7 +500,10 @@ class ReminderService:
             if await self._announce_one(task, moment):
                 sent += 1
         # В этом тике уже ушли план, напоминание или «Перенёс» — тишины нет
-        # (§19.2, §20.2).
+        # (§19.2, §20.2, §22.2). Пока идут вопросы о прошедших делах, вопрос о
+        # деле без срока ждёт: ушедший вопрос — тоже не тишина.
+        if sent == 0 and await self._ask_overdue(moment):
+            sent += 1
         if sent == 0 and await self._ask_undated(moment):
             sent += 1
         return sent
@@ -442,6 +517,10 @@ class ReminderService:
         снова. Не ушло — ничего не записано, следующий тик пришлёт снова.
         Ушло — процесс помнит день, и второго плана сегодня не будет, даже
         если запись не удалась. Возвращает, ушёл ли план.
+
+        Абзац плана — вопрос о прошедшем деле (§22.2): отбор с границами
+        плана, сбой отбора — план без абзаца. Записывается вопрос после плана
+        и без id сообщения.
         """
         if self._plan_sent is None or self._day_tasks is None or self._record_plan is None:
             return False
@@ -460,8 +539,12 @@ class ReminderService:
         except DatabaseError as error:
             logger.error("Утренний план не собран: %s", error)
             return False
+        asked = await self._pick_overdue(now, overdue.plan_bounds(now, timezone))
+        question = None if asked is None else self._overdue_question(asked, now)
         try:
-            message_id = await self._announce(text=morning.plan_text(tasks, timezone))
+            message_id = await self._announce(
+                text=morning.plan_text(tasks, timezone, question=question)
+            )
         except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
             logger.warning("Утренний план не ушёл: %s", error)
             return False
@@ -474,10 +557,122 @@ class ReminderService:
             )
         except DatabaseError as error:
             logger.error("Утренний план ушёл, но не записан: %s", error)
-            return True
-        if not recorded:
-            logger.warning("Утренний план ушёл, но не записан: план за этот день уже есть")
+        else:
+            if not recorded:
+                logger.warning("Утренний план ушёл, но не записан: план за этот день уже есть")
+        if asked is not None:
+            await self._record_overdue_question(asked, now, None)
         return True
+
+    async def _ask_overdue(self, now: datetime) -> bool:
+        """Вопрос о прошедшем деле отдельным сообщением (§22.2, §22.4).
+
+        Окно, «до 12:00 — только после плана» и память о делах дня решает
+        бот; живой вопрос, тишину и само дело — `overdue_to_ask` по границам
+        шага. Сбой отбора — строка в журнал, шаг кончился. Не ушло — ничего
+        не записано, следующий тик спросит снова. Ушло — записать с id
+        сообщения: свайп на вопрос называет задачу. Возвращает, ушёл ли
+        вопрос.
+        """
+        if self._overdue_task is None or self._record_overdue is None:
+            return False
+        timezone = self._settings.owner_timezone
+        if not overdue.in_window(now, timezone):
+            return False
+        today = asks.local_day(now, timezone)
+        # Первый вопрос дня звучит в плане, а не перед ним: пока план может
+        # прийти (до 12:00), шаг ждёт сегодняшнего плана; с 12:00 план не
+        # догоняется, и шаг идёт без него.
+        if morning.in_window(now, timezone) and self._planned_on != today:
+            return False
+        self._overdue_today(today)
+        if self._overdue_stuck:
+            return False
+        task = await self._pick_overdue(now, overdue.step_bounds(now, timezone))
+        if task is None:
+            return False
+        question = self._overdue_question(task, now)
+        try:
+            message_id = await self._notify(text=question, task_id=task.task_id)
+        except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
+            logger.warning("Вопрос о прошедшем деле %s не ушёл: %s", task.task_id, error)
+            return False
+        await self._record_overdue_question(task, now, message_id)
+        return True
+
+    def _overdue_today(self, today: date) -> set[str]:
+        """Дела, о которых процесс спрашивал сегодня; новый день — память пуста."""
+        if self._overdue_on != today:
+            self._overdue_on = today
+            self._overdue_asked = set()
+            self._overdue_stuck = False
+        return self._overdue_asked
+
+    async def _pick_overdue(
+        self, now: datetime, bounds: overdue.OverdueBounds
+    ) -> OverdueTask | None:
+        """Прошедшее дело для вопроса (§22.4) или `None`; сбой — строка в журнал.
+
+        Отбор вернул дело, о котором процесс сегодня уже спрашивал, — значит,
+        запись вопроса не легла: до завтра о прошедших делах больше не
+        спрашиваем, иначе вопрос уходил бы каждую минуту.
+        """
+        if self._overdue_task is None or self._record_overdue is None:
+            return None
+        owner = self._settings.owner_telegram_id
+        try:
+            task = await self._overdue_task(owner_telegram_id=owner, bounds=bounds)
+        except DatabaseError as error:
+            logger.error("Прошедшее дело для вопроса не выбрано: %s", error)
+            return None
+        if task is None:
+            return None
+        if task.task_id in self._overdue_today(asks.local_day(now, self._settings.owner_timezone)):
+            self._overdue_stuck = True
+            logger.warning(
+                "Вопрос о прошедшем деле %s сегодня уже был и не записан: до завтра не спрашиваю",
+                task.task_id,
+            )
+            return None
+        return task
+
+    def _overdue_question(self, task: OverdueTask, now: datetime) -> str:
+        """Слова вопроса; «Ещё» — если сегодня процесс уже спрашивал (§22.3)."""
+        timezone = self._settings.owner_timezone
+        more = bool(self._overdue_today(asks.local_day(now, timezone)))
+        return overdue.question_text(task, now, timezone, more=more)
+
+    async def _record_overdue_question(
+        self, task: OverdueTask, now: datetime, message_id: int | None
+    ) -> None:
+        """Ушедший вопрос — в память дня, в журнал и в базу (§22.4).
+
+        Открытым вопросом задачи пишется `OVERDUE_QUESTION`, а не текст
+        сообщения: по нему бот узнаёт свой вопрос в ответе (§22.5). Сбой
+        записи — строка в журнал: вопрос уже ушёл.
+        """
+        if self._record_overdue is None:
+            return
+        self._overdue_today(asks.local_day(now, self._settings.owner_timezone)).add(task.task_id)
+        # Суть дела в журнал не пишется: id, какой это вопрос и где (§22.4).
+        which = "повторный" if task.asked_at is not None else "первый"
+        where = "в плане" if message_id is None else "отдельно"
+        logger.info("Вопрос о прошедшем деле %s: %s, %s", task.task_id, which, where)
+        try:
+            recorded = await self._record_overdue(
+                owner_telegram_id=self._settings.owner_telegram_id,
+                task_id=task.task_id,
+                question=texts.OVERDUE_QUESTION,
+                telegram_message_id=message_id,
+            )
+        except DatabaseError as error:
+            logger.error("Вопрос о прошедшем деле %s ушёл, но не записан: %s", task.task_id, error)
+            return
+        if recorded is None:
+            logger.warning(
+                "Вопрос о прошедшем деле %s ушёл, но не записан: дело закрыли или перенесли",
+                task.task_id,
+            )
 
     async def _ask_undated(self, now: datetime) -> bool:
         """Вопрос о деле без срока (§19.4): отправить и только потом записать.

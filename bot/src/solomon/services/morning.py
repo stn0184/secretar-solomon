@@ -94,6 +94,10 @@ def plan_lines(tasks: Sequence[DayTask], timezone: tzinfo) -> list[str]:
     return lines
 
 
-def plan_text(tasks: Sequence[DayTask], timezone: tzinfo) -> str:
-    """Текст плана целиком; дел нет — «Доброе утро! На сегодня дел нет.»."""
-    return texts.morning_plan(plan_lines(tasks, timezone))
+def plan_text(tasks: Sequence[DayTask], timezone: tzinfo, question: str | None = None) -> str:
+    """Текст плана целиком; дел нет — «Доброе утро! На сегодня дел нет.».
+
+    `question` — вопрос о прошедшем деле (`techspec/22-overdue.md` §22.2):
+    абзац после строк, в предел строк не входит.
+    """
+    return texts.morning_plan(plan_lines(tasks, timezone), question)

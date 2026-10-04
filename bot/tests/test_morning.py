@@ -374,6 +374,49 @@ def test_more_than_twenty_lines_end_with_a_count() -> None:
     assert lines[20] == "И ещё 3 — в приложении."
 
 
+QUESTION = "Вчера осталось: позвонить в сервис. Получилось?"
+
+
+def test_plan_asks_about_the_overdue_after_an_empty_line() -> None:
+    """Вопрос о прошедшем деле — абзацем после строк дел (§22.3)."""
+    tasks = [
+        task("встреча с Ольгой", at(9, 0)),
+        task("купить хлеб", at(18, 0), "day"),
+    ]
+
+    assert morning.plan_text(tasks, TZ, question=QUESTION) == (
+        "Доброе утро! На сегодня:\n"
+        "09:00 — встреча с Ольгой\n"
+        "В течение дня — купить хлеб\n"
+        "\n"
+        "Вчера осталось: позвонить в сервис. Получилось?"
+    )
+
+
+def test_empty_day_keeps_the_overdue_question() -> None:
+    """Дел нет — «дел нет» и тот же абзац (§22.3)."""
+    assert morning.plan_text([], TZ, question=QUESTION) == (
+        "Доброе утро! На сегодня дел нет.\n\nВчера осталось: позвонить в сервис. Получилось?"
+    )
+
+
+def test_overdue_question_goes_after_the_count_and_out_of_the_limit() -> None:
+    """Абзац в предел 20 строк не входит и стоит после «И ещё N» (§22.3)."""
+    tasks = [task(f"дело {n}", at(9, n)) for n in range(23)]
+
+    text = morning.plan_text(tasks, TZ, question=QUESTION)
+
+    head, question = text.split("\n\n")
+    assert question == QUESTION
+    lines = head.split("\n")
+    assert len(lines) == 22
+    assert lines[-1] == "И ещё 3 — в приложении."
+
+
+def test_plan_without_a_question_has_no_paragraph() -> None:
+    assert "\n\n" not in morning.plan_text([task("дело", at(9, 0))], TZ, question=None)
+
+
 def test_texts_of_the_plan() -> None:
     """Слова плана живут в `texts.py` (§20.3)."""
     assert texts.MORNING_HEAD == "Доброе утро! На сегодня:"

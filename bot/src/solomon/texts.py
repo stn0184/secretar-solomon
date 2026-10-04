@@ -744,11 +744,14 @@ def morning_more(count: int) -> str:
     return f"И ещё {count} — в приложении."
 
 
-def morning_plan(lines: list[str]) -> str:
-    """План целиком: шапка и строки; строк нет — «дел нет», без пустой шапки."""
-    if not lines:
-        return MORNING_EMPTY
-    return "\n".join([MORNING_HEAD, *lines])
+def morning_plan(lines: list[str], question: str | None = None) -> str:
+    """План целиком: шапка и строки; строк нет — «дел нет», без пустой шапки.
+
+    `question` — вопрос о прошедшем деле (`techspec/22-overdue.md` §22.3):
+    абзацем через пустую строку после строк дел, и при пустом дне тоже.
+    """
+    plan = "\n".join([MORNING_HEAD, *lines]) if lines else MORNING_EMPTY
+    return plan if question is None else f"{plan}\n\n{question}"
 
 
 def done_message(text: str, mark: str = DONE_MARK) -> str:
