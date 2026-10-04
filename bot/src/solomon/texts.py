@@ -519,6 +519,15 @@ CLOSED = "Закрыл: {title}."
 CANCELLED = "Убрал из списка: {title}."
 UNCLEAR_EDIT = "Не понял, как поправить: {title}. {question}"
 NOTHING_TO_CHANGE = "Не понял, что поменять в задаче «{title}» — ничего не менял."
+# Правка что-то назвала, а меняться нечему (§12.8): тем же видом, что «Поправил».
+SAME_AS_RECORDED = "Так и записано: {title}"
+# Перенос на сегодня, а прежний час или часть уже прошли (§12.8): вопрос в
+# конце «Перенёс». Вечер кончается в полночь и прошедшим не бывает.
+PASSED_HOUR = "{hour} уже прошло — во сколько?"
+PASSED_PARTS = {
+    "morning": "Утро уже прошло — во сколько?",
+    "afternoon": "Уже вечер — во сколько?",
+}
 NOT_FOUND_RECORDED = "Не нашёл открытой задачи — записал новую: {title}"
 NOT_FOUND = "Не нашёл открытой задачи «{title}» — ничего не менял."
 
@@ -566,6 +575,16 @@ NOT_REOPENED = "Не смог вернуть задачу: база не отв�
 NOBODY = "никого"
 
 
+def passed_question(lost_at: datetime, precision: str) -> str:
+    """«09:00 уже прошло — во сколько?», «Утро уже прошло — во сколько?» (§12.8).
+
+    `lost_at` ждётся в поясе владельца: час называется по его часам.
+    """
+    if precision in PASSED_PARTS:
+        return PASSED_PARTS[precision]
+    return PASSED_HOUR.format(hour=format_time(lost_at))
+
+
 def edited_reply(
     head: str,
     due: str | None,
@@ -573,6 +592,7 @@ def edited_reply(
     priority: str | None = None,
     people: Sequence[str] | None = None,
     repeat: str | None = None,
+    question: str | None = None,
 ) -> str:
     """Ответ на правку словом: «Перенёс: …», «Поправил: …», «Вернул в работу: …».
 
@@ -580,7 +600,8 @@ def edited_reply(
     звучит словом и тогда, когда она вернулась к обычной, люди — списком
     целиком (§12.5). «Напомню» — только о напоминании, которое вправду
     впереди (§6.4). `repeat` — правило повторяющейся задачи словами: строка
-    «Повтор» перед «Срок:» (`techspec/13-repeat.md` §13.7).
+    «Повтор» перед «Срок:» (`techspec/13-repeat.md` §13.7). `question` —
+    вопрос о прошедшем часе (§12.8), им ответ и кончается.
     """
     parts = [head]
     if repeat:
@@ -593,6 +614,8 @@ def edited_reply(
         parts.append(f"Приоритет: {PRIORITY_NAMES.get(priority, priority)}")
     if people is not None:
         parts.append(f"Люди: {', '.join(people) if people else NOBODY}")
+    if question:
+        parts.append(question)
     return ". ".join(parts)
 
 

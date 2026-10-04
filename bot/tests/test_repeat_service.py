@@ -580,6 +580,44 @@ async def test_moving_the_time_keeps_the_rule() -> None:
     )
 
 
+async def test_moving_a_time_to_a_day_keeps_its_hour() -> None:
+    """«Планёрку перенеси на среду»: этот раз — в среду в 09:00; правило и
+    следующий раз не меняются (`techspec/12-chat-edit.md` §12.8, §13.5)."""
+    nine = datetime(2026, 10, 5, 9, 0, tzinfo=TZ)
+    standup = make_details(
+        id=CALL_ID,
+        title="планёрка",
+        due_at=nine,
+        due_precision="time",
+        repeat={**MONDAYS, "time": "09:00"},
+        occurrence_at=nine,
+    )
+    wednesday = datetime(2026, 10, 7, 0, 0, tzinfo=TZ)
+    rig = build(edited(1, due_at=wednesday, due_precision="day"), FakeEdits([standup]))
+
+    outcome = await say(rig, "планёрку перенеси на среду")
+
+    assert saved_edit(rig.understandings)["changes"] == {"due_at": "2026-10-07T09:00:00+05:00"}
+    assert rig.planner.calls[0]["due_at"] == datetime(2026, 10, 7, 9, 0, tzinfo=TZ)
+    assert rig.planner.calls[0]["due_precision"] == "time"
+    assert rig.following.calls == []
+    assert outcome.message.startswith("Перенёс: планёрка. Повтор: каждый понедельник")
+    assert "Срок: среда, 7 октября, 09:00" in outcome.message
+
+
+async def test_same_time_of_a_repeating_task_is_as_recorded_with_its_rule() -> None:
+    rig = build(edited(1, due_at=PAST_MONDAY, due_precision="day"))
+
+    outcome = await say(rig, "отчёт на понедельник")
+
+    assert saved_edit(rig.understandings)["changes"] == {}
+    assert rig.planner.calls == []
+    assert outcome.message == (
+        "Так и записано: отправить отчёт. Повтор: каждый понедельник. "
+        "Срок: понедельник, 28 сентября"
+    )
+
+
 async def test_new_rule_goes_with_its_first_time() -> None:
     """«Теперь по вторникам»: правило и срок ближайшего вторника — одной правкой."""
     tuesday_plan = [Planned(stage="before", fire_at=datetime(2026, 10, 5, 18, 0, tzinfo=TZ))]

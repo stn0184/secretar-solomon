@@ -133,8 +133,9 @@ def build(
     messages: FakeMessages | None = None,
     questions: FakeQuestions | None = None,
     wired: bool = True,
+    now: datetime = NOW,
 ) -> tuple[TaskService, FakeAnalyst, FakeUnderstandings, FakePlanner, FakeEdits]:
-    """Сервис на подменённых базе, модели и расписании; «сейчас» — `NOW`."""
+    """Сервис на подменённых базе, модели и расписании; «сейчас» — `now`."""
     analyst = FakeAnalyst(verdict)
     edits = store if store is not None else FakeEdits(OPEN)
     recorder = understandings or FakeUnderstandings()
@@ -146,7 +147,7 @@ def build(
         analyst=analyst,
         transcriber=FakeTranscriber(),
         planner=plan,
-        clock=lambda: NOW,
+        clock=lambda: now,
         open_question=questions,
         edit_store=edits if wired else None,
     )
@@ -649,7 +650,8 @@ async def test_change_without_values_says_nothing_to_change() -> None:
     )
 
 
-async def test_same_values_are_nothing_to_change() -> None:
+async def test_same_values_are_as_recorded() -> None:
+    """Правка назвала то, что уже записано, — «Так и записано» без «Напомню» (§12.8)."""
     service, _, understandings, planner, _ = build(
         edited(1, due_at="2026-10-02T17:00:00+05:00", due_precision="time", priority="high")
     )
@@ -658,7 +660,9 @@ async def test_same_values_are_nothing_to_change() -> None:
 
     assert planner.calls == []
     assert saved_edit(understandings)["changes"] == {}
-    assert outcome.message.startswith("Не понял, что поменять")
+    assert outcome.message == (
+        "Так и записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. Приоритет: высокий"
+    )
 
 
 async def test_task_closed_meanwhile_is_refused_by_the_base() -> None:
@@ -1418,3 +1422,316 @@ async def test_forwarded_answer_hears_no_closing_edit() -> None:
 
     assert saved_edit(understandings) is None
     assert saved(understandings, "amend")["task_id"] == LAMP_ID
+
+
+# ------------------------------------------- прежний час при переносе (§12.8)
+
+# Воскресенье, 4 октября, 10:00 у владельца.
+SUNDAY_10 = datetime(2026, 10, 4, 10, 0, tzinfo=TZ)
+SUNDAY = "2026-10-04T00:00:00+05:00"
+
+
+def meeting(due_at: datetime, precision: str = "time") -> Any:
+    """Встреча с Ренатой — одна в списке, со сроком из теста."""
+    return replace(MEETING, due_at=due_at, due_precision=precision)
+
+
+async def test_move_to_a_day_keeps_the_hour() -> None:
+    """«Перенеси встречу с Ренатой на понедельник» у встречи в 17:00 — понедельник, 17:00."""
+    service, _, understandings, planner, _ = build(
+        edited(1, due_at=MONDAY, due_precision="day"), planner=FakePlanner(MONDAY_PLAN)
+    )
+
+    outcome = await say(service, "перенеси встречу с Ренатой на понедельник")
+
+    assert saved_edit(understandings)["changes"] == {"due_at": "2026-10-05T17:00:00+05:00"}
+    assert planner.calls[0]["due_at"] == datetime(2026, 10, 5, 17, 0, tzinfo=TZ)
+    assert planner.calls[0]["due_precision"] == "time"
+    assert outcome.message == (
+        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00. "
+        "Напомню: 5 октября в 16:00"
+    )
+
+
+async def test_move_of_a_part_task_to_a_day_keeps_the_part() -> None:
+    """«В среду утром» → «на пятницу»: пятница, утром, напоминание в 08:00."""
+    task = meeting(datetime(2026, 10, 7, 8, 0, tzinfo=TZ), "morning")
+    plan = [Planned(stage="due", fire_at=datetime(2026, 10, 9, 8, 0, tzinfo=TZ))]
+    service, _, understandings, planner, _ = build(
+        edited(1, due_at="2026-10-09T00:00:00+05:00", due_precision="day"),
+        FakeEdits([task]),
+        planner=FakePlanner(plan),
+    )
+
+    outcome = await say(service, "встречу перенеси на пятницу")
+
+    assert saved_edit(understandings)["changes"] == {
+        "due_at": "2026-10-09T08:00:00+05:00",
+        "due_precision": "morning",
+    }
+    assert planner.calls[0]["due_precision"] == "morning"
+    assert outcome.message == (
+        "Перенёс: встреча с Ренатой. Срок: пятница, 9 октября, утром. Напомню: 9 октября в 08:00"
+    )
+
+
+@pytest.mark.parametrize(
+    ("hour", "changes", "due"),
+    [
+        (19, {"due_at": "2026-10-05T19:00:00+05:00"}, "понедельник, 5 октября, 19:00"),
+        (
+            17,
+            {"due_at": "2026-10-05T18:00:00+05:00", "due_precision": "evening"},
+            "понедельник, 5 октября, вечером",
+        ),
+    ],
+)
+async def test_move_to_an_evening_keeps_only_an_evening_hour(
+    hour: int, changes: dict[str, Any], due: str
+) -> None:
+    task = meeting(datetime(2026, 10, 2, hour, 0, tzinfo=TZ))
+    service, _, understandings, _, _ = build(
+        edited(1, due_at="2026-10-05T18:00:00+05:00", due_precision="evening"),
+        FakeEdits([task]),
+    )
+
+    outcome = await say(service, "встречу на понедельник вечером")
+
+    assert saved_edit(understandings)["changes"] == changes
+    assert outcome.message == f"Перенёс: встреча с Ренатой. Срок: {due}"
+
+
+async def test_time_unknown_makes_the_new_day_a_day() -> None:
+    """«…на понедельник, время пока не знаю» — понедельник на день."""
+    plan = [
+        Planned(stage="morning", fire_at=datetime(2026, 10, 5, 9, 0, tzinfo=TZ)),
+        Planned(stage="due", fire_at=datetime(2026, 10, 5, 18, 0, tzinfo=TZ)),
+    ]
+    service, _, understandings, planner, _ = build(
+        edited(1, due_at=MONDAY, due_precision="day", time_removed=True),
+        planner=FakePlanner(plan),
+    )
+
+    outcome = await say(service, "встречу с Ренатой перенеси на понедельник, время пока не знаю")
+
+    assert saved_edit(understandings)["changes"] == {"due_date": "2026-10-05"}
+    assert planner.calls[0]["due_at"] == datetime(2026, 10, 5, 18, 0, tzinfo=TZ)
+    assert planner.calls[0]["due_precision"] == "day"
+    assert outcome.message == (
+        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября. Напомню: 5 октября в 09:00"
+    )
+
+
+async def test_time_unknown_without_a_day_keeps_the_day() -> None:
+    service, _, understandings, _, _ = build(edited(1, time_removed=True))
+
+    outcome = await say(service, "время встречи пока не знаю")
+
+    assert saved_edit(understandings)["changes"] == {"due_date": "2026-10-02"}
+    assert outcome.message == "Перенёс: встреча с Ренатой. Срок: пятница, 2 октября"
+
+
+async def test_named_hour_wins_over_time_unknown() -> None:
+    service, _, understandings, _, _ = build(
+        edited(1, due_at="2026-10-05T11:00:00+05:00", due_precision="time", time_removed=True)
+    )
+
+    await say(service, "встречу на понедельник в 11, а дальше время не знаю")
+
+    assert saved_edit(understandings)["changes"] == {"due_at": "2026-10-05T11:00:00+05:00"}
+
+
+async def test_today_with_a_passed_hour_asks_what_time() -> None:
+    """Воскресенье, 10:00, встреча в 09:00 → «на сегодня»: день и вопрос в конце."""
+    plan = [Planned(stage="due", fire_at=datetime(2026, 10, 4, 18, 0, tzinfo=TZ))]
+    questions = FakeQuestions()
+    service, _, understandings, planner, _ = build(
+        edited(1, due_at=SUNDAY, due_precision="day"),
+        FakeEdits([meeting(datetime(2026, 10, 5, 9, 0, tzinfo=TZ))]),
+        planner=FakePlanner(plan),
+        understandings=FakeUnderstandings(questions=questions),
+        questions=questions,
+        now=SUNDAY_10,
+    )
+
+    outcome = await say(service, "встречу с Ренатой перенеси на сегодня")
+
+    row = saved_edit(understandings)
+    assert row["changes"] == {"due_date": "2026-10-04"}
+    assert row["question"] is None
+    assert questions.asked is None
+    assert saved(understandings, "task") is None
+    assert planner.calls[0]["due_precision"] == "day"
+    assert outcome.message == (
+        "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября. "
+        "Напомню: сегодня в 18:00. 09:00 уже прошло — во сколько?"
+    )
+
+
+async def test_hour_after_the_question_moves_the_same_task() -> None:
+    """«В 16» после вопроса: обычная правка последней задачи — сегодня, 16:00."""
+    plan = [
+        Planned(stage="before", fire_at=datetime(2026, 10, 4, 15, 0, tzinfo=TZ)),
+        Planned(stage="due", fire_at=datetime(2026, 10, 4, 16, 0, tzinfo=TZ)),
+    ]
+    store = FakeEdits(
+        [meeting(datetime(2026, 10, 4, 18, 0, tzinfo=TZ), "day"), REPORT],
+        message_event=TaskEvent(task_id=MEETING_ID, at=SUNDAY_10 - timedelta(minutes=2)),
+    )
+    service, analyst, understandings, _, _ = build(
+        edited(2, due_at="2026-10-04T16:00:00+05:00", due_precision="time"),
+        store,
+        planner=FakePlanner(plan),
+        now=SUNDAY_10,
+    )
+
+    outcome = await say(service, "в 16")
+
+    # Отчёт раньше по сроку — встреча в списке вторая.
+    assert analyst.last_tasks == [2]
+    assert saved_edit(understandings)["task_id"] == MEETING_ID
+    assert saved_edit(understandings)["changes"] == {"due_at": "2026-10-04T16:00:00+05:00"}
+    assert outcome.message == (
+        "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября, 16:00. Напомню: сегодня в 15:00"
+    )
+
+
+async def test_today_with_the_hour_ahead_keeps_it_without_a_question() -> None:
+    service, _, understandings, _, _ = build(
+        edited(1, due_at=SUNDAY, due_precision="day"),
+        FakeEdits([meeting(datetime(2026, 10, 5, 15, 0, tzinfo=TZ))]),
+        now=SUNDAY_10,
+    )
+
+    outcome = await say(service, "встречу на сегодня")
+
+    assert saved_edit(understandings)["changes"] == {"due_at": "2026-10-04T15:00:00+05:00"}
+    assert outcome.message == "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября, 15:00"
+
+
+@pytest.mark.parametrize(
+    ("part", "start", "now", "question"),
+    [
+        ("morning", 8, datetime(2026, 10, 4, 12, 30, tzinfo=TZ), "Утро уже прошло — во сколько?"),
+        ("afternoon", 12, datetime(2026, 10, 4, 18, 5, tzinfo=TZ), "Уже вечер — во сколько?"),
+    ],
+)
+async def test_today_after_the_part_ended_asks_what_time(
+    part: str, start: int, now: datetime, question: str
+) -> None:
+    service, _, understandings, _, _ = build(
+        edited(1, due_at=SUNDAY, due_precision="day"),
+        FakeEdits([meeting(datetime(2026, 10, 5, start, 0, tzinfo=TZ), part)]),
+        now=now,
+    )
+
+    outcome = await say(service, "встречу на сегодня")
+
+    assert saved_edit(understandings)["changes"] == {"due_date": "2026-10-04"}
+    assert outcome.message == (
+        f"Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября. {question}"
+    )
+
+
+async def test_today_evening_with_a_passed_hour_is_the_evening_and_a_question() -> None:
+    service, _, understandings, _, _ = build(
+        edited(1, due_at="2026-10-04T18:00:00+05:00", due_precision="evening"),
+        FakeEdits([meeting(datetime(2026, 10, 5, 19, 0, tzinfo=TZ))]),
+        now=datetime(2026, 10, 4, 19, 30, tzinfo=TZ),
+    )
+
+    outcome = await say(service, "встречу на сегодня вечером")
+
+    assert saved_edit(understandings)["changes"] == {
+        "due_at": "2026-10-04T18:00:00+05:00",
+        "due_precision": "evening",
+    }
+    assert outcome.message == (
+        "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября, вечером. "
+        "19:00 уже прошло — во сколько?"
+    )
+
+
+async def test_same_due_is_as_recorded_and_leaves_the_reminders() -> None:
+    """Встреча уже в понедельник, 17:00, и «на понедельник» — «Так и записано»."""
+    service, _, understandings, planner, _ = build(
+        edited(1, due_at=MONDAY, due_precision="day"),
+        FakeEdits([meeting(datetime(2026, 10, 5, 17, 0, tzinfo=TZ))]),
+    )
+
+    outcome = await say(service, "перенеси встречу с Ренатой на понедельник")
+
+    assert planner.calls == []
+    assert saved_edit(understandings) == {
+        "task_id": MEETING_ID,
+        "action": "change",
+        "changes": {},
+        "schedule": [],
+        "question": None,
+    }
+    assert outcome.message == (
+        "Так и записано: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00"
+    )
+
+
+async def test_as_recorded_names_the_priority_and_people_it_was_told() -> None:
+    service, _, _, _, _ = build(edited(1, priority="high", people=["Рената"]))
+
+    outcome = await say(service, "встреча с Ренатой срочная")
+
+    assert outcome.message == (
+        "Так и записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. "
+        "Приоритет: высокий. Люди: Рената"
+    )
+
+
+async def test_pick_keeps_the_hour_and_counts_passed_from_the_press() -> None:
+    """Кнопка кандидата: «уже прошло» — на момент нажатия, а не вопроса (§12.6)."""
+    verdict = edited(None, candidates=[1, 2], due_at=SUNDAY, due_precision="day")
+    store = FakeEdits(
+        [meeting(datetime(2026, 10, 5, 9, 0, tzinfo=TZ)), REPORT],
+        messages={MESSAGE_ID: candidate_message(verdict)},
+    )
+    service, _, _, _, _ = build(make_understanding(), store, now=SUNDAY_10)
+
+    outcome = await service.pick(
+        chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=MEETING_ID
+    )
+
+    assert store.picks[0][1]["changes"] == {"due_date": "2026-10-04"}
+    assert outcome == PressOutcome(
+        message=(
+            "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября. "
+            "09:00 уже прошло — во сколько?"
+        ),
+        replace=True,
+    )
+
+
+async def test_pick_from_an_analysis_before_time_removed_still_moves() -> None:
+    """Разбор, записанный до этапа 021, — без `time_removed`: час не снимали."""
+    analysis = MOVE_CANDIDATES.model_dump(mode="json")
+    del analysis["edit"]["time_removed"]
+    stored = replace(candidate_message(MOVE_CANDIDATES), analysis=analysis)
+    store = FakeEdits(OPEN, messages={MESSAGE_ID: stored})
+    service, _, _, _, _ = build(make_understanding(), store)
+
+    await service.pick(chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=MEETING_ID)
+
+    assert store.picks[0][1]["changes"] == {"due_at": "2026-10-05T17:00:00+05:00"}
+
+
+async def test_unfound_move_to_a_day_takes_no_hour() -> None:
+    """Задачи нет в списке (§12.3): новая — со сроком, как назван, без чужого часа."""
+    service, _, understandings, _, _ = build(
+        edited(None, due_at=MONDAY, due_precision="day", top_title="встреча с Кириллом")
+    )
+
+    outcome = await say(service, "встречу с Кириллом перенеси на понедельник")
+
+    task = saved(understandings, "task")
+    assert task["due_precision"] == "day"
+    assert task["due_at"] == "2026-10-05T18:00:00+05:00"
+    assert outcome.message == (
+        "Не нашёл открытой задачи — записал новую: встреча с Кириллом. Срок: понедельник, 5 октября"
+    )

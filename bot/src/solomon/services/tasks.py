@@ -2018,8 +2018,9 @@ class TaskService:
     ) -> Edited:
         """Правка узнанной задачи (§12.3, §12.5): что записать и что ответить.
 
-        Её же строит нажатие кнопки кандидата — с разбором из базы и планом на
-        момент нажатия (§12.6). Непонятное значение — вопрос верхнего уровня:
+        Её же строит нажатие кнопки кандидата — с разбором из базы, прежним
+        часом выбранной задачи и планом на момент нажатия (§12.6, §12.8):
+        «уже прошло» считается по `now`. Непонятное значение — вопрос верхнего уровня:
         ничего не меняется, даже понятное, задача получает пометку и вопрос.
         План берётся у базы, только если срок сменился и не снят: иначе
         напоминания задачи остаются как есть или снимаются целиком. Тогда же
@@ -2056,11 +2057,20 @@ class TaskService:
             )
         if not change.changes:
             # Задача всё равно пишется в `edit`: база проверит, что она
-            # активна, и сообщение станет «о ней» (решение 6 плана).
-            return Edited(
-                edit=edit_row(task, "change"),
-                reply=texts.NOTHING_TO_CHANGE.format(title=task.title),
-            )
+            # активна, и сообщение станет «о ней» (решение 6 плана). Правка
+            # что-то назвала — «Так и записано» тем же видом, что «Поправил»,
+            # без «Напомню»: напоминания не трогались (§12.8).
+            if not change.named:
+                reply = texts.NOTHING_TO_CHANGE.format(title=task.title)
+            else:
+                reply = texts.edited_reply(
+                    texts.SAME_AS_RECORDED.format(title=task.title),
+                    self._due_words(change.due_at, change.due_precision),
+                    priority=change.priority if edit.priority is not None else None,
+                    people=change.people if edit.people is not None else None,
+                    repeat=rule_words(change.repeat),
+                )
+            return Edited(edit=edit_row(task, "change"), reply=reply)
         priority = change.priority if "priority" in change.changes else None
         people = change.people if "people" in change.changes else None
         planned: list[Planned] = []
@@ -2085,6 +2095,12 @@ class TaskService:
                 head = texts.MOVED_BY_WORD
             else:
                 head = texts.FIXED
+            asked = None
+            if change.lost_at is not None and change.lost_precision is not None:
+                timezone = self._settings.owner_timezone
+                asked = texts.passed_question(
+                    change.lost_at.astimezone(timezone), change.lost_precision
+                )
             reply = paragraphs(
                 texts.edited_reply(
                     head.format(title=change.title),
@@ -2093,6 +2109,7 @@ class TaskService:
                     priority,
                     people,
                     repeat=rule_words(change.repeat),
+                    question=asked,
                 ),
                 clash,
             )
@@ -2228,11 +2245,14 @@ class TaskService:
         Разбор снимка узнаётся по `photo_text`, переписки — по `more_tasks` без
         него; оба читаются своей моделью: они нужны ответу «Записать
         отдельно» (§15.4, §18.4). В разборе, записанном до этапа 013, нет
-        `same_as` — он читается как «не дубль».
+        `same_as` — он читается как «не дубль»; в правке до этапа 021 нет
+        `time_removed` — она читается как «час не снимали» (§12.8).
         """
         if stored.analysis is None:
             return None
         analysis = {"same_as": None, **stored.analysis}
+        if isinstance(analysis.get("edit"), dict):
+            analysis["edit"] = {"time_removed": False, **analysis["edit"]}
         model: type[Understanding] = Understanding
         if "photo_text" in analysis:
             model = PhotoUnderstanding
