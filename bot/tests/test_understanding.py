@@ -14,7 +14,7 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -1819,7 +1819,7 @@ async def test_conversation_part_of_day_gets_the_start_of_the_part() -> None:
 # Прогон ходит в модель по-настоящему, поэтому в воротах не участвует —
 # `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 70
+FIXTURE_COUNT = 76
 EDIT_COUNT = 21
 DUPLICATE_COUNT = 4
 REPEAT_COUNT = 9
@@ -1849,6 +1849,9 @@ DIALOG_EXPECTATIONS = ("asks", "answers", "new")
 # Ответ на вопрос о деле без срока (`techspec/19-undated.md` §19.5): сроком,
 # «уже купил», «уже не нужно», «пока не знаю».
 UNDATED_EXPECTATIONS = ("due", "done", "cancel", "later")
+# Ответ на вопрос о прошедшем деле (`techspec/22-overdue.md` §22.5): «да»,
+# «уже не нужно», новый день на оба вопроса, «не успел» и «пока не знаю».
+OVERDUE_EXPECTATIONS = ("done", "cancel", "move", "move", "answer", "answer")
 
 
 def load_fixtures() -> list[dict[str, Any]]:
@@ -2044,6 +2047,42 @@ def undated_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInf
     return None
 
 
+def overdue_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) -> str | None:
+    """Чем ответ на вопрос о прошедшем деле разошёлся с ожиданием (§22.5).
+
+    Проверки мягкие: ответ или правка, вид правки, срок есть или нет.
+    `done`, `cancel` и `move` — правка задачи из вопроса (`move` — `change`
+    на день `due_date`); признак ответа рядом с ней не мешает, правка его
+    побеждает. `answer` — ответ без срока и без правки этой задачи: любая
+    её правка победила бы ответ.
+    """
+    expected = case["overdue"]
+    text = case["text"]
+    edit = got.edit
+    number = asked_number(case)
+    if expected == "answer":
+        if not got.answers_question:
+            return f"{text}: ждали ответ на вопрос, answers_question = false"
+        if edit is not None and edit.task == number:
+            return f"{text}: ждали ответ, а правка {edit.action} победила бы его"
+        if got.due_at is not None:
+            return f"{text}: срока не называли, получили {got.due_at.isoformat()}"
+        return None
+    action = "change" if expected == "move" else expected
+    if edit is None:
+        return f"{text}: ждали правку {action}, edit = null"
+    if edit.action != action:
+        return f"{text}: ждали {action}, получили {edit.action}"
+    if edit.task != number:
+        return f"{text}: ждали задачу {number}, получили {edit.task}"
+    if expected != "move":
+        return None
+    due = edit.due_at.astimezone(timezone).date().isoformat() if edit.due_at else None
+    if due != case["due_date"]:
+        return f"{text}: ждали срок {case['due_date']}, получили {due}"
+    return None
+
+
 def edit_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) -> str | None:
     """Чем пример правки разошёлся с ожиданием; `None` — сошёлся.
 
@@ -2196,9 +2235,11 @@ def test_fixtures_have_the_expected_count_and_fields() -> None:
     for case in dialog:
         asked = asked_for(case)
         assert (asked is None) == (case["dialog"] == "asks"), case["text"]
-    # Открытый вопрос — только у диалога и у ответа на вопрос о деле без срока.
+    # Открытый вопрос — только у диалога и у ответа на вопрос бота о деле.
     assert not any(
-        "open_question" in case for case in fixtures if not {"dialog", "undated"} & set(case)
+        "open_question" in case
+        for case in fixtures
+        if not {"dialog", "undated", "overdue"} & set(case)
     )
 
 
@@ -2214,11 +2255,11 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
     assert len(edits) == EDIT_COUNT
     assert all(case.get("open_tasks") for case in edits)
     # Открытые задачи без правки — только у переписки, где правки быть не может,
-    # и у ответа на вопрос о деле без срока: там правку сверяет своя функция.
+    # и у ответа на вопрос бота о деле: там правку сверяет своя функция.
     assert not any(
         "open_tasks" in case
         for case in fixtures
-        if not {"edit", "conversation", "undated"} & set(case)
+        if not {"edit", "conversation", "undated", "overdue"} & set(case)
     )
     assert not any({"facts", "dialog", "repeat"} & set(case) for case in edits)
     expected = [case["edit"] for case in edits if case["edit"] is not None]
@@ -2267,6 +2308,32 @@ def test_undated_fixtures_cover_the_answers_of_the_stage() -> None:
         assert not {"facts", "dialog", "repeat", "edit", "talk", "forwarded_from"} & set(case)
     assert all(case["due_date"] for case in undated if case["undated"] == "due")
     assert all(case["due_date"] is None for case in undated if case["undated"] != "due")
+
+
+def test_overdue_fixtures_cover_the_answers_of_the_stage() -> None:
+    """Вопрос о прошедшем деле (`techspec/22-overdue.md` §22.5): на «Получилось?»
+    «да», «уже не нужно», новый день и «не успел», на «На когда перенести?»
+    день и «пока не знаю». Задача из вопроса — со вчерашним сроком и первая
+    в списке открытых задач."""
+    fixtures = load_fixtures()
+    overdue = [case for case in fixtures if "overdue" in case]
+
+    assert sorted(case["overdue"] for case in overdue) == sorted(OVERDUE_EXPECTATIONS)
+    questions = {texts.OVERDUE_QUESTION: 0, texts.OVERDUE_MOVE_QUESTION: 0}
+    yesterday = datetime(*LIVE_MOMENT, tzinfo=TZ).date() - timedelta(days=1)
+    for case in overdue:
+        asked = asked_for(case)
+        assert asked is not None, case["text"]
+        questions[asked.question] += 1
+        assert asked.due_at is not None, case["text"]
+        assert asked.due_at.astimezone(TZ).date() == yesterday, case["text"]
+        assert asked_number(case) == 1, case["text"]
+        assert all(task.status == "active" for task in tasks_for(case)), case["text"]
+        assert not {"facts", "dialog", "repeat", "edit", "talk", "forwarded_from"} & set(case)
+        assert not {"undated", "last_task", "swipe"} & set(case)
+    assert questions == {texts.OVERDUE_QUESTION: 4, texts.OVERDUE_MOVE_QUESTION: 2}
+    assert all(case["due_date"] for case in overdue if case["overdue"] == "move")
+    assert all(case["due_date"] is None for case in overdue if case["overdue"] != "move")
 
 
 def test_talk_fixtures_cover_the_cases_of_the_stage() -> None:
@@ -2532,6 +2599,52 @@ def test_undated_mismatch_checks_answer_or_edit_and_the_due() -> None:
     )
 
 
+def test_overdue_mismatch_checks_answer_or_edit_and_the_due() -> None:
+    """Ответ на вопрос о прошедшем деле (§22.5): «да» и «уже не нужно» — правка
+    done и cancel, новый день — правка change на этот день, «не успел» и «пока
+    не знаю» — ответ без срока и без правки задачи из вопроса."""
+    base = {
+        "open_question": {"question": texts.OVERDUE_QUESTION, "title": "позвонить в сервис"},
+        "open_tasks": [{"title": "позвонить в сервис"}, {"title": "встреча с Ренатой"}],
+    }
+    done = {**base, "text": "да", "due_date": None, "overdue": "done"}
+    cancel = {**base, "text": "уже не нужно", "due_date": None, "overdue": "cancel"}
+    move = {**base, "text": "на понедельник", "due_date": "2026-09-21", "overdue": "move"}
+    later = {**base, "text": "не успел", "due_date": None, "overdue": "answer"}
+    monday = "2026-09-21T00:00:00+05:00"
+    tuesday = "2026-09-22T00:00:00+05:00"
+    monday_at = datetime(2026, 9, 21, 18, 0, tzinfo=TZ)
+
+    def answer(**fields: Any) -> Understanding:
+        return make_understanding(answers_question=True, **fields)
+
+    def edited(action: str, task: int = 1, **fields: Any) -> Understanding:
+        return make_understanding(edit=model_edit(action=action, task=task, **fields))
+
+    assert overdue_mismatch(done, edited("done"), TZ) is None
+    assert overdue_mismatch(done, answer(edit=model_edit(action="done", task=1)), TZ) is None
+    assert overdue_mismatch(done, answer(), TZ) is not None
+    assert overdue_mismatch(done, edited("cancel"), TZ) is not None
+    assert overdue_mismatch(done, edited("done", task=2), TZ) is not None
+    assert overdue_mismatch(cancel, edited("cancel"), TZ) is None
+
+    moved = edited("change", due_at=monday, due_precision="day")
+    assert overdue_mismatch(move, moved, TZ) is None
+    late = edited("change", due_at=tuesday, due_precision="day")
+    assert overdue_mismatch(move, late, TZ) is not None
+    assert overdue_mismatch(move, edited("change"), TZ) is not None
+    # Новый день полями ответа потерял бы прежний час (§12.8).
+    assert overdue_mismatch(move, answer(due_at=monday_at, due_precision="day"), TZ) is not None
+
+    assert overdue_mismatch(later, answer(), TZ) is None
+    assert overdue_mismatch(later, make_understanding(), TZ) is not None
+    assert overdue_mismatch(later, answer(due_at=monday_at, due_precision="day"), TZ) is not None
+    # Любая правка задачи из вопроса победила бы ответ; правка другой — нет.
+    change = model_edit(action="change", task=1)
+    assert overdue_mismatch(later, answer(edit=change), TZ) is not None
+    assert overdue_mismatch(later, answer(edit=model_edit(action="done", task=2)), TZ) is None
+
+
 def test_duplicate_mismatch_checks_the_number() -> None:
     """Номер дубля сходится строго; пример без `same_as` его не проверяет."""
     case = {"text": "созвон с Ренатой в пятницу", "same_as": 1}
@@ -2700,13 +2813,13 @@ def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -
 async def test_live_model_understands_the_fixtures() -> None:
     """Вживую: kind сходится хотя бы у восьми обычных примеров, даты — у всех,
     примеры памяти — строго по виду и статусу записей, диалога — по вопросу
-    и признаку ответа, ответа на вопрос о деле без срока — ответ это или
-    правка, её вид и есть ли срок, повтора — по виду, правилу, пометке и вопросу, правки —
-    по действию, задаче, сроку и правилу, дубля — по номеру задачи,
-    разговора — по виду и ответу, как его отправил бы бот. Переписка — своим
-    прогоном, ниже. Блок
-    открытых задач — как у бота: пустой список, если пример своего не дал, и
-    короткий у пересланного; правки там, где её не ждали, быть не должно."""
+    и признаку ответа, ответа на вопрос о деле без срока и о прошедшем деле —
+    ответ это или правка, её вид и есть ли срок, повтора — по виду, правилу,
+    пометке и вопросу, правки — по действию, задаче, сроку и правилу, дубля —
+    по номеру задачи, разговора — по виду и ответу, как его отправил бы бот.
+    Переписка — своим прогоном, ниже. Блок открытых задач — как у бота:
+    пустой список, если пример своего не дал, и короткий у пересланного;
+    правки там, где её не ждали, быть не должно."""
     settings = live_settings()
     now = datetime(*LIVE_MOMENT, tzinfo=settings.owner_timezone)
     client = create_anthropic_client(settings)
@@ -2740,6 +2853,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     duplicates: list[str] = []
     talks: list[str] = []
     undated: list[str] = []
+    overdue: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
@@ -2748,6 +2862,11 @@ async def test_live_model_understands_the_fixtures() -> None:
             mismatch = undated_mismatch(case, got, settings.owner_timezone)
             if mismatch:
                 undated.append(mismatch)
+            continue
+        if "overdue" in case:
+            mismatch = overdue_mismatch(case, got, settings.owner_timezone)
+            if mismatch:
+                overdue.append(mismatch)
             continue
         mismatch = edit_mismatch({"edit": None, **case}, got, settings.owner_timezone)
         if mismatch:
@@ -2790,6 +2909,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not memory, "Память разошлась:\n" + "\n".join(memory)
     assert not dialog, "Диалог разошёлся:\n" + "\n".join(dialog)
     assert not undated, "Вопрос о деле без срока разошёлся:\n" + "\n".join(undated)
+    assert not overdue, "Вопрос о прошедшем деле разошёлся:\n" + "\n".join(overdue)
     assert not repeats, "Повтор разошёлся:\n" + "\n".join(repeats)
     assert not edits, "Правка разошлась:\n" + "\n".join(edits)
     assert not duplicates, "Дубль разошёлся:\n" + "\n".join(duplicates)

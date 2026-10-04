@@ -150,11 +150,11 @@
 - [x] Бот, тексты (`texts.py`): вопросы §22.3, `OVERDUE_QUESTION`
   («Получилось?»), `OVERDUE_MOVE_QUESTION` («На когда перенести?»),
   строка в `HELP`.
-- [ ] Тесты без сети — по пунктам «Приёмки», кроме живых:
+- [x] Тесты без сети — по пунктам «Приёмки», кроме живых:
   `test_overdue.py`, `test_reminders.py`, `test_morning.py`,
   `test_tasks_service.py`, `test_chat_edit_service.py`,
   `test_understanding.py` (правила в промпте).
-- [ ] Живые примеры (`fixtures/understanding.jsonl`,
+- [x] Живые примеры (`fixtures/understanding.jsonl`,
   `test_understanding.py`, маркер `live`) — по пунктам «Приёмки» с
   пометкой «живой»: открытый вопрос «Получилось?» по задаче со
   вчерашним сроком и ответы «да», «уже не нужно», «нет, перенеси на
