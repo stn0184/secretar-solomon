@@ -22,6 +22,11 @@
 спросить — `undated_to_ask`, ушедший вопрос — `record_ask`. Память о
 вопросе — строка `reminders` со ступенью `ask`; планом напоминаний она не
 бывает, поэтому в `Stage` её нет.
+
+Вопрос о прошедшем деле (`techspec/22-overdue.md` §22.4): о каком деле
+спросить — `overdue_to_ask`, ушедший вопрос — `record_overdue_ask`. Память —
+строка `reminders` со ступенью `overdue`, тоже всегда ушедшая и тоже не
+из `Stage`.
 """
 
 from __future__ import annotations
@@ -49,6 +54,8 @@ RETURN_OCCURRENCE_FUNCTION = "return_occurrence"
 ROLL_REPEATS_FUNCTION = "roll_repeats"
 UNDATED_TO_ASK_FUNCTION = "undated_to_ask"
 RECORD_ASK_FUNCTION = "record_ask"
+OVERDUE_TO_ASK_FUNCTION = "overdue_to_ask"
+RECORD_OVERDUE_ASK_FUNCTION = "record_overdue_ask"
 
 Stage = Literal["before", "due"]
 
@@ -473,3 +480,97 @@ async def record_ask(
         "telegram_message_id": telegram_message_id,
     }
     return _task_or_none(await ask(lambda: db.rpc(RECORD_ASK_FUNCTION, params).execute().data))
+
+
+@dataclass(frozen=True, slots=True)
+class OverdueTask:
+    """Задача, срок которой прошёл, а о ней пора спросить (§22.1).
+
+    `due_at` и `due_precision` — прошедший срок: вопрос называет «вчера» или
+    дату. `asked_at` — когда бот спрашивал о нынешнем сроке в последний раз;
+    `None` — не спрашивал или спрашивал до переноса, и вопрос будет первым.
+    """
+
+    task_id: str
+    title: str
+    due_at: datetime
+    due_precision: str | None
+    asked_at: datetime | None
+
+
+def _overdue_from_row(row: Any) -> OverdueTask:
+    """Разобрать строку. Неполная — отказ, а не вопрос без сути или срока."""
+    if not isinstance(row, Mapping):
+        raise DatabaseError("База вернула не строку прошедшего дела.")
+    try:
+        precision = row["due_precision"]
+        return OverdueTask(
+            task_id=str(row["task_id"]),
+            title=str(row["title"]),
+            due_at=moment(row["due_at"], "due_at"),
+            due_precision=None if precision is None else str(precision),
+            asked_at=optional_moment(row["asked_at"], "asked_at"),
+        )
+    except KeyError as error:
+        raise DatabaseError(f"В ответе базы нет поля прошедшего дела: {error}.") from error
+
+
+async def overdue_to_ask(
+    db: Client,
+    *,
+    owner_telegram_id: int,
+    day_start: datetime,
+    asked_before: datetime,
+    question_since: datetime,
+    quiet_since: datetime | None,
+) -> OverdueTask | None:
+    """О каком прошедшем деле спросить сейчас (§22.1, §22.4).
+
+    Границы считает бот (`services/overdue.py`), база по ним отбирает: живой
+    открытый вопрос или нет 15 минут тишины — `None`; иначе первое по
+    порядку §22.1 дело. `quiet_since = None` — тишина не проверяется: так
+    спрашивает утренний план. Больше одной строки — отказ: вопрос один.
+    """
+    params = {
+        "owner_telegram_id": owner_telegram_id,
+        "day_start": day_start.isoformat(),
+        "asked_before": asked_before.isoformat(),
+        "question_since": question_since.isoformat(),
+        "quiet_since": None if quiet_since is None else quiet_since.isoformat(),
+    }
+    rows = await ask(lambda: db.rpc(OVERDUE_TO_ASK_FUNCTION, params).execute().data)
+    if rows is None:
+        return None
+    if not isinstance(rows, list):
+        raise DatabaseError("База вернула не список прошедших дел.")
+    if len(rows) > 1:
+        raise DatabaseError(f"База вернула {len(rows)} прошедших дел вместо одного.")
+    return _overdue_from_row(rows[0]) if rows else None
+
+
+async def record_overdue_ask(
+    db: Client,
+    *,
+    owner_telegram_id: int,
+    task_id: str,
+    question: str,
+    telegram_message_id: int | None,
+) -> TaskDetails | None:
+    """Записать ушедший вопрос о прошедшем деле (§22.4) — одной транзакцией.
+
+    Зовётся, когда Telegram сообщение принял. Открытый вопрос задачи —
+    `question`, у остальных задач владельца снят; строка `overdue` помнит
+    время и сообщение — у вопроса в плане сообщения нет (`None`): свайп на
+    план остаётся обычным сообщением. `None` — задача чужая, закрыта,
+    убрана, повторяется, срок её впереди или это не задача: ничего не
+    записано.
+    """
+    params = {
+        "owner_telegram_id": owner_telegram_id,
+        "task_id": task_id,
+        "question": question,
+        "telegram_message_id": telegram_message_id,
+    }
+    return _task_or_none(
+        await ask(lambda: db.rpc(RECORD_OVERDUE_ASK_FUNCTION, params).execute().data)
+    )

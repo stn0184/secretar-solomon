@@ -1724,6 +1724,142 @@ async def test_record_ask_of_a_gone_task_is_none() -> None:
     assert task is None
 
 
+OVERDUE_ROW = {
+    "task_id": TASK_ID,
+    "title": "позвонить в сервис",
+    "due_at": "2026-10-02T13:00:00+00:00",
+    "due_precision": "time",
+    "asked_at": None,
+}
+
+
+def _overdue_bounds(quiet: bool = True) -> dict[str, Any]:
+    day_start = datetime(2026, 10, 3, 0, 0, tzinfo=TZ)
+    now = datetime(2026, 10, 3, 13, 0, tzinfo=TZ)
+    return {
+        "day_start": day_start,
+        "asked_before": day_start - timedelta(days=6),
+        "question_since": now - timedelta(days=1),
+        "quiet_since": now - timedelta(minutes=15) if quiet else None,
+    }
+
+
+async def test_overdue_to_ask_sends_the_owner_and_the_bounds() -> None:
+    """Прошедшее дело (§22.4): владелец и четыре границы уходят явно (инвариант 2)."""
+    fake = FakeClient(data=[OVERDUE_ROW])
+    bounds = _overdue_bounds()
+
+    found = await db_reminders.overdue_to_ask(as_client(fake), owner_telegram_id=OWNER_ID, **bounds)
+
+    expected = {key: value.isoformat() for key, value in bounds.items() if value is not None}
+    assert fake.calls[0] == ("rpc", "overdue_to_ask", {"owner_telegram_id": OWNER_ID, **expected})
+    assert found == db_reminders.OverdueTask(
+        task_id=TASK_ID,
+        title="позвонить в сервис",
+        due_at=datetime(2026, 10, 2, 18, 0, tzinfo=TZ),
+        due_precision="time",
+        asked_at=None,
+    )
+
+
+async def test_overdue_to_ask_for_the_plan_skips_the_quiet() -> None:
+    """У плана `quiet_since` нет — в базу уходит `null`, тишина не проверяется."""
+    fake = FakeClient(data=[{**OVERDUE_ROW, "due_precision": None}])
+
+    found = await db_reminders.overdue_to_ask(
+        as_client(fake), owner_telegram_id=OWNER_ID, **_overdue_bounds(quiet=False)
+    )
+
+    assert fake.calls[0][2]["quiet_since"] is None
+    assert found is not None
+    assert found.due_precision is None
+
+
+async def test_overdue_to_ask_reads_when_it_asked_last() -> None:
+    fake = FakeClient(data=[{**OVERDUE_ROW, "asked_at": "2026-09-26T05:00:00+00:00"}])
+
+    found = await db_reminders.overdue_to_ask(
+        as_client(fake), owner_telegram_id=OWNER_ID, **_overdue_bounds()
+    )
+
+    assert found is not None
+    assert found.asked_at == datetime(2026, 9, 26, 10, 0, tzinfo=TZ)
+
+
+@pytest.mark.parametrize("data", [None, []])
+async def test_overdue_to_ask_without_rows_is_none(data: Any) -> None:
+    fake = FakeClient(data=data)
+
+    found = await db_reminders.overdue_to_ask(
+        as_client(fake), owner_telegram_id=OWNER_ID, **_overdue_bounds()
+    )
+
+    assert found is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [OVERDUE_ROW, OVERDUE_ROW],
+        [{key: value for key, value in OVERDUE_ROW.items() if key != "due_at"}],
+        [{**OVERDUE_ROW, "due_at": None}],
+        {"task_id": TASK_ID},
+    ],
+)
+async def test_overdue_to_ask_odd_answer_is_a_failure(data: Any) -> None:
+    """Две строки, строка без срока или не список — отказ: вопрос один."""
+    fake = FakeClient(data=data)
+
+    with pytest.raises(DatabaseError):
+        await db_reminders.overdue_to_ask(
+            as_client(fake), owner_telegram_id=OWNER_ID, **_overdue_bounds()
+        )
+
+
+@pytest.mark.parametrize("message_id", [4242, None])
+async def test_record_overdue_ask_sends_the_owner_question_and_message(
+    message_id: int | None,
+) -> None:
+    """Ушедший вопрос (§22.4): владелец, задача, текст и id сообщения; у плана id нет."""
+    fake = FakeClient(data=DETAIL_ROW)
+
+    task = await db_reminders.record_overdue_ask(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        task_id=TASK_ID,
+        question="Получилось?",
+        telegram_message_id=message_id,
+    )
+
+    assert fake.calls[0] == (
+        "rpc",
+        "record_overdue_ask",
+        {
+            "owner_telegram_id": OWNER_ID,
+            "task_id": TASK_ID,
+            "question": "Получилось?",
+            "telegram_message_id": message_id,
+        },
+    )
+    assert task is not None
+    assert task.id == TASK_ID
+
+
+async def test_record_overdue_ask_of_a_gone_task_is_none() -> None:
+    """База не записала: задачу закрыли, перенесли вперёд или она чужая."""
+    fake = FakeClient(data={"id": None, "title": None})
+
+    task = await db_reminders.record_overdue_ask(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        task_id=TASK_ID,
+        question="Получилось?",
+        telegram_message_id=None,
+    )
+
+    assert task is None
+
+
 def test_owner_is_required_by_every_query() -> None:
     """Инвариант 2 держится сигнатурой: владельца не забыть и не подставить."""
     for query in (
@@ -1751,6 +1887,8 @@ def test_owner_is_required_by_every_query() -> None:
         db_reminders.clear_due_moved,
         db_reminders.undated_to_ask,
         db_reminders.record_ask,
+        db_reminders.overdue_to_ask,
+        db_reminders.record_overdue_ask,
         db_facts.list_facts,
         db_facts.list_fact_texts,
     ):

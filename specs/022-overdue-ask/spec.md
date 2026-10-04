@@ -119,7 +119,7 @@
   не стирает. В `supabase/tests/record_understanding.test.ts` —
   `amend.question`: вопрос записан с временем, `needs_review` — из
   `fields`; пустая строка — вопроса нет.
-- [ ] Бот, база (`db/reminders.py`): `overdue_to_ask` и
+- [x] Бот, база (`db/reminders.py`): `overdue_to_ask` и
   `record_overdue_ask` — вызовы функций с фильтром по владельцу
   (инвариант 2), строка дела для вопроса.
 - [ ] Бот, чистые функции (`services/overdue.py`, `test_overdue.py`):
