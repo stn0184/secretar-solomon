@@ -263,7 +263,8 @@ class FakeUnderstandings:
     поправки — тоже; любая другая запись вопрос снимает, а задача с
     `open_question` ставит новый — со временем от `clock`. Правка (`edit`)
     вопрос тоже снимает; вопрос по правке фейк не ставит — ответ на него
-    тест начинает с готового вопроса.
+    тест начинает с готового вопроса. Поправка с ключом `question` (§22.4)
+    ставит новый вопрос той же задаче — тем же текстом, со временем от `clock`.
     """
 
     def __init__(
@@ -341,8 +342,15 @@ class FakeUnderstandings:
         """Снять и поставить открытый вопрос — по тем же правилам, что база."""
         if analysis is None and task is None and amend is None:
             return
+        previous = questions.asked
         questions.asked = None
-        if task is None or amend is not None:
+        if amend is not None:
+            question = str(amend.get("question") or "").strip()
+            if question and previous is not None:
+                # Ответ открыл новый вопрос той же задачи: «На когда перенести?».
+                questions.asked = replace(previous, question=question, asked_at=self._clock())
+            return
+        if task is None:
             return
         question = str(task.get("open_question") or "").strip()
         if not question:

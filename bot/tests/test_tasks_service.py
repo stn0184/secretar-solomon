@@ -1355,6 +1355,97 @@ async def test_answer_without_due_to_another_question_still_says_understood() ->
     assert outcome.message == "Понял: отправить расчёт клиенту"
 
 
+# Вопросы о прошедшем деле (§22.5): бот задал их сам, тексты — константы.
+ASKED_OVERDUE = replace(
+    ASKED,
+    question=texts.OVERDUE_QUESTION,
+    due_at=FRIDAY_DUE - timedelta(days=7),
+    due_precision="day",
+    priority="normal",
+    promise=None,
+    people=(),
+)
+ASKED_MOVE = replace(ASKED_OVERDUE, question=texts.OVERDUE_MOVE_QUESTION)
+
+
+async def test_answer_without_due_to_the_overdue_question_asks_when() -> None:
+    """«Не успел» на «Получилось?» — «На когда перенести?» новым вопросом (§22.5)."""
+    analyst = FakeAnalyst(answer())
+    service, questions, understandings = build_dialog_service(analyst, FakeQuestions(ASKED_OVERDUE))
+
+    outcome = await say(service, "не успел")
+
+    assert outcome.ok
+    assert outcome.message == "На когда перенести?"
+    saved = understandings.calls[0]
+    assert saved["task"] is None
+    assert saved["reply"] == outcome.message
+    assert saved["amend"] == {
+        "task_id": ASKED.task_id,
+        "fields": {"needs_review": False},
+        "reminders": [],
+        "question": "На когда перенести?",
+    }
+    # Вопрос той же задачи, срок прежний: следующее сообщение — ответ на него.
+    assert questions.asked is not None
+    assert questions.asked.task_id == ASKED.task_id
+    assert questions.asked.question == texts.OVERDUE_MOVE_QUESTION
+    assert questions.asked.due_at == ASKED_OVERDUE.due_at
+
+
+async def test_answer_without_due_to_the_move_question_says_ask_later() -> None:
+    """«Пока не знаю» на «На когда перенести?» — через неделю, срок прежний (§22.5)."""
+    analyst = FakeAnalyst(answer())
+    service, questions, understandings = build_dialog_service(analyst, FakeQuestions(ASKED_MOVE))
+
+    outcome = await say(service, "пока не знаю")
+
+    assert outcome.message == "Хорошо, спрошу через неделю."
+    assert understandings.calls[0]["amend"] == {
+        "task_id": ASKED.task_id,
+        "fields": {"needs_review": False},
+        "reminders": [],
+    }
+    assert questions.asked is None
+
+
+async def test_not_yet_and_then_unknown_ends_with_ask_later() -> None:
+    """«Не успел», затем «пока не знаю» — два ответа подряд по одной задаче."""
+    analyst = FakeAnalyst(answer())
+    service, _, understandings = build_dialog_service(analyst, FakeQuestions(ASKED_OVERDUE))
+
+    first = await say(service, "не успел")
+    second = await service.record_from_message(chat_id=42, telegram_message_id=9, text="не знаю")
+
+    assert [first.message, second.message] == [texts.OVERDUE_MOVE_QUESTION, texts.ASK_LATER]
+    amends = [call["amend"] for call in understandings.calls]
+    assert len(amends) == 2
+    assert all(isinstance(amend, dict) and amend["task_id"] == ASKED.task_id for amend in amends)
+
+
+@pytest.mark.parametrize("asked", [ASKED_OVERDUE, ASKED_MOVE], ids=["overdue", "move"])
+async def test_due_in_the_answer_fields_to_an_overdue_question_says_understood(
+    asked: OpenQuestion,
+) -> None:
+    """Новый срок полями ответа ложится, как в §10.2: «Понял», вопроса нет."""
+    analyst = FakeAnalyst(answer(due_at=FRIDAY_DUE, due_precision="day"))
+    planner = FakePlanner([Planned(stage="before", fire_at=FRIDAY_DUE.replace(hour=9))])
+    service, questions, understandings = build_dialog_service(
+        analyst, FakeQuestions(asked), planner=planner
+    )
+
+    outcome = await say(service, "в пятницу")
+
+    assert outcome.message == (
+        "Понял: отправить расчёт клиенту. Срок: пятница, 18 сентября. Напомню: 18 сентября в 09:00"
+    )
+    amend = understandings.calls[0]["amend"]
+    assert isinstance(amend, dict)
+    assert amend["fields"]["due_at"] == FRIDAY_DUE.isoformat()
+    assert "question" not in amend
+    assert questions.asked is None
+
+
 async def test_new_errand_while_asked_is_an_ordinary_task() -> None:
     """`answers_question = false` — обычная запись; вопрос снимет база (§3.4)."""
     analyst = FakeAnalyst(make_understanding(title="купить лампочку"))

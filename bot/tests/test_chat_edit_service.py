@@ -32,6 +32,7 @@ from solomon.services.tasks import (
     PressOutcome,
     Swipe,
     TaskService,
+    edit_beats_answer,
     edit_closes_asked,
 )
 from solomon.services.understanding import NotUnderstood, TaskEdit, Understanding
@@ -1430,6 +1431,88 @@ async def test_forwarded_answer_hears_no_closing_edit() -> None:
     service, _, understandings, _, _ = build(verdict, questions=FakeQuestions(asked_about(LAMP)))
 
     await say(service, "уже купил", forwarded_from="Сергей")
+
+    assert saved_edit(understandings) is None
+    assert saved(understandings, "amend")["task_id"] == LAMP_ID
+
+
+# Вопросы о прошедшем деле (§22.5): любая правка задачи из вопроса — правка.
+OVERDUE_QUESTIONS = [texts.OVERDUE_QUESTION, texts.OVERDUE_MOVE_QUESTION]
+
+
+@pytest.mark.parametrize("question", OVERDUE_QUESTIONS)
+@pytest.mark.parametrize("action", ["change", "done", "cancel", "skip"])
+def test_any_edit_of_the_asked_task_beats_an_overdue_answer(question: str, action: str) -> None:
+    assert edit_beats_answer(task_edit(3, action), asked_about(LAMP, question), NUMBERED) is True
+
+
+@pytest.mark.parametrize(
+    ("action", "beats"), [("done", True), ("cancel", True), ("change", False), ("skip", False)]
+)
+def test_other_questions_keep_only_closing_edits(action: str, beats: bool) -> None:
+    """При остальных вопросах — по-прежнему только `done` и `cancel` (§19.5)."""
+    assert edit_beats_answer(task_edit(3, action), asked_about(LAMP), NUMBERED) is beats
+
+
+@pytest.mark.parametrize("question", OVERDUE_QUESTIONS)
+def test_edit_of_another_task_yields_to_an_overdue_answer(question: str) -> None:
+    assert edit_beats_answer(task_edit(1, "change"), asked_about(LAMP, question), NUMBERED) is False
+
+
+def test_nothing_beats_an_overdue_answer_without_a_question_an_edit_or_a_list() -> None:
+    asked = asked_about(LAMP, texts.OVERDUE_QUESTION)
+    assert edit_beats_answer(None, asked, NUMBERED) is False
+    assert edit_beats_answer(task_edit(3, "change"), None, NUMBERED) is False
+    assert edit_beats_answer(task_edit(3, "change"), asked, None) is False
+    assert edit_beats_answer(task_edit(9, "change"), asked, NUMBERED) is False
+    assert edit_beats_answer(task_edit(None, "change"), asked, NUMBERED) is False
+
+
+@pytest.mark.parametrize("question", OVERDUE_QUESTIONS)
+async def test_answer_and_move_of_the_overdue_task_make_a_move(question: str) -> None:
+    """«Нет, перенеси на понедельник» — перенос по §12.8: прежний час остаётся."""
+    verdict = edited(1, due_at=MONDAY, due_precision="day", top_answers_question=True)
+    service, _, understandings, _, _ = build(
+        verdict,
+        questions=FakeQuestions(asked_about(MEETING, question)),
+        planner=FakePlanner(MONDAY_PLAN),
+    )
+
+    outcome = await say(service, "нет, перенеси на понедельник")
+
+    assert saved(understandings, "amend") is None
+    assert saved_edit(understandings)["task_id"] == MEETING_ID
+    assert saved_edit(understandings)["changes"] == {"due_at": "2026-10-05T17:00:00+05:00"}
+    assert outcome.message == (
+        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00. "
+        "Напомню: 5 октября в 16:00"
+    )
+
+
+@pytest.mark.parametrize(
+    ("action", "reply"),
+    [("done", "Закрыл: встреча с Ренатой."), ("cancel", "Убрал из списка: встреча с Ренатой.")],
+)
+async def test_answer_and_closing_of_the_overdue_task_make_an_edit(action: str, reply: str) -> None:
+    """«Да», «уже не нужно» на «Получилось?» — закрыть или убрать, с «Вернуть»."""
+    verdict = edited(1, action=action, top_answers_question=True)
+    asked = asked_about(MEETING, texts.OVERDUE_QUESTION)
+    service, _, understandings, _, _ = build(verdict, questions=FakeQuestions(asked))
+
+    outcome = await say(service, "да")
+
+    assert saved(understandings, "amend") is None
+    assert saved_edit(understandings)["action"] == action
+    assert outcome.message == reply
+    assert outcome.buttons == (Button(text="Вернуть", data=f"reopen:{MEETING_ID}"),)
+
+
+async def test_answer_and_move_on_another_question_stay_an_answer() -> None:
+    """При «Когда займётесь?» перенос задачи из вопроса уступает ответу, как раньше."""
+    verdict = edited(3, due_at=MONDAY, due_precision="day", top_answers_question=True)
+    service, _, understandings, _, _ = build(verdict, questions=FakeQuestions(asked_about(LAMP)))
+
+    await say(service, "в понедельник")
 
     assert saved_edit(understandings) is None
     assert saved(understandings, "amend")["task_id"] == LAMP_ID

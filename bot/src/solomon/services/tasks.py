@@ -679,6 +679,28 @@ def edit_closes_asked(
     return task is not None and task.id == asked.task_id
 
 
+# Вопросы о прошедшем деле (§22.5): бот узнаёт свой вопрос по тексту.
+OVERDUE_QUESTIONS = (texts.OVERDUE_QUESTION, texts.OVERDUE_MOVE_QUESTION)
+
+
+def edit_beats_answer(
+    edit: TaskEdit | None, asked: OpenQuestion | None, tasks: Sequence[TaskDetails] | None
+) -> bool:
+    """Правка той задачи, о которой вопрос, главнее ответа на него.
+
+    При вопросах о прошедшем деле (§22.5) побеждает любая правка этой
+    задачи: «да» — `done`, «перенеси на понедельник» — `change` по §12.8,
+    с прежним часом. При остальных вопросах — только `done` и `cancel`
+    (`edit_closes_asked`, §19.5).
+    """
+    if asked is None or asked.question not in OVERDUE_QUESTIONS:
+        return edit_closes_asked(edit, asked, tasks)
+    if edit is None or tasks is None:
+        return False
+    task = edits.task_by_number(tasks, edit.task)
+    return task is not None and task.id == asked.task_id
+
+
 @dataclass(frozen=True, slots=True)
 class Decision:
     """Что записать вторым шагом и что ответить человеку."""
@@ -1644,11 +1666,15 @@ class TaskService:
         отдать не могла, а если отдала, бот её не слушает; у пересланного и
         снимка список есть, но правки нет всё равно (§15.2). Ответ на
         открытый вопрос главнее правки (§12.1), кроме `done` и `cancel` той
-        задачи, о которой вопрос (§19.5); оба главнее дубля (§15.3).
+        задачи, о которой вопрос (§19.5), а при вопросах о прошедшем деле —
+        кроме любой её правки (§22.5); оба главнее дубля (§15.3).
 
         Ответ без срока на свой вопрос о деле без срока (§19.5) — «Хорошо,
         спрошу через неделю.»: срока нет, а изменённые поля ложатся, как в
-        §10.2. Свой вопрос узнаётся по тексту — константе из `texts.py`.
+        §10.2. Ответ без нового срока на «Получилось?» — «На когда
+        перенести?» и новый вопрос той же задачи (`amend.question`, §22.4),
+        на «На когда перенести?» — «Хорошо, спрошу через неделю.». Свой
+        вопрос узнаётся по тексту — константам из `texts.py`.
 
         План берётся у базы, только когда есть что планировать — задача или
         поправка; у разговора и сведения о себе задачи нет, и звать базу
@@ -1657,8 +1683,8 @@ class TaskService:
         `talk` — своё сообщение: разговор отвечает текстом модели (§17.2).
         У пересланного и снимка ответ разговора прежний.
         """
-        closes = context.edits and edit_closes_asked(understanding.edit, asked, context.tasks)
-        if asked is not None and understanding.answers_question and not closes:
+        beats = context.edits and edit_beats_answer(understanding.edit, asked, context.tasks)
+        if asked is not None and understanding.answers_question and not beats:
             changed = amendment(asked, understanding)
             planned = await self._planner(
                 due_at=changed.due_at,
@@ -1691,6 +1717,13 @@ class TaskService:
             if asked.question == texts.UNDATED_QUESTION and changed.due_at is None:
                 # «Пока не знаю»: срока нет — спросит через неделю (§19.1).
                 reply = texts.ASK_LATER
+            elif asked.question in OVERDUE_QUESTIONS and "due_at" not in changed.fields:
+                # «Не успел» — спросить, на когда; «пока не знаю» — через неделю (§22.5).
+                if asked.question == texts.OVERDUE_QUESTION:
+                    reply = texts.OVERDUE_MOVE_QUESTION
+                    amend["question"] = texts.OVERDUE_MOVE_QUESTION
+                else:
+                    reply = texts.ASK_LATER
             return Decision(reply=reply, task=None, reminders=[], amend=amend)
 
         if understanding.edit is not None and context.tasks is not None and context.edits:
