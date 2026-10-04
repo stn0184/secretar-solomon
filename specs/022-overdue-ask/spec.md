@@ -103,7 +103,7 @@
 
 ## Задачи
 
-- [ ] База (миграция `supabase/migrations/<время>_overdue_ask.sql`,
+- [x] База (миграция `supabase/migrations/<время>_overdue_ask.sql`,
   время позже `20261004100000`, образец —
   `20261003100000_undated_ask.sql`): ступень `overdue` в проверке
   `reminders.stage`; `overdue_to_ask` и `record_overdue_ask` по §22.4,

@@ -529,6 +529,68 @@ test("ответ по убранной задаче — отказ: её бол�
     assert.deepEqual(await remindersOf(db, cancelled.id!), []);
   }));
 
+// --- Новый вопрос в ответе (§22.5) ----------------------------------------------
+
+const MOVE_QUESTION = "На когда перенести?";
+
+test("amend.question открывает новый вопрос той же задачи со временем, needs_review — из fields", () =>
+  withDatabase(async (db) => {
+    const asked = await askedTask(db);
+    const other = await askedTask(db);
+    const answer = await message(db);
+
+    const row = await understand(db, {
+      messageId: answer,
+      amend: {
+        task_id: other.id,
+        fields: { needs_review: false },
+        reminders: [],
+        question: `  ${MOVE_QUESTION}  `,
+      },
+    });
+
+    assert.ok(row);
+    assert.equal(row.open_question, MOVE_QUESTION);
+    const saved = await taskById(db, other.id!);
+    assert.equal(saved.open_question, MOVE_QUESTION);
+    assert.ok(saved.question_asked_at, "у нового вопроса нет времени");
+    assert.ok(saved.question_asked_at.getTime() > Date.now() - 60_000);
+    assert.equal(saved.needs_review, false);
+    // Срок не менялся: в fields его нет.
+    assert.equal(saved.due_at, null);
+    // Вопрос у владельца один: остальные сняты.
+    assertQuestionClosed(await taskById(db, asked.id!));
+  }));
+
+test("amend.question без needs_review в fields пометку не трогает", () =>
+  withDatabase(async (db) => {
+    const asked = await askedTask(db);
+    const answer = await message(db);
+
+    await understand(db, {
+      messageId: answer,
+      amend: { task_id: asked.id, fields: {}, reminders: [], question: MOVE_QUESTION },
+    });
+
+    const saved = await taskById(db, asked.id!);
+    assert.equal(saved.open_question, MOVE_QUESTION);
+    assert.equal(saved.needs_review, true, "как было у поручения");
+  }));
+
+test("пустой amend.question — вопроса нет, как раньше", () =>
+  withDatabase(async (db) => {
+    const asked = await askedTask(db);
+
+    for (const question of ["", "   ", null]) {
+      const answer = await message(db);
+      await understand(db, {
+        messageId: answer,
+        amend: { task_id: asked.id, fields: { needs_review: false }, reminders: [], question },
+      });
+      assertQuestionClosed(await taskById(db, asked.id!));
+    }
+  }));
+
 // --- Часть дня (§21.2) ----------------------------------------------------------
 
 /** Пятница, 2 октября 2026 года, 08:00 у владельца — начало утра. */
