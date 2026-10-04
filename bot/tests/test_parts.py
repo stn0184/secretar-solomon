@@ -4,7 +4,9 @@
 срока, который назвала модель: у части в `due_at` ложится начало этой части
 того же дня, часть вместе с повтором становится сроком со временем (§21.2).
 И как часть называется словами — в ответе, на кнопке, в вопросе о переносе,
-в напоминании и в плане (§21.4). Сети и базы здесь нет.
+в напоминании и в плане (§21.4). Для переноса с прежним часом
+(`techspec/12-chat-edit.md` §12.8) — в какой части лежит час и когда часть
+кончается. Сети и базы здесь нет.
 """
 
 from __future__ import annotations
@@ -207,3 +209,49 @@ def test_plan_label_of_a_part_starts_with_a_capital(precision: str, label: str) 
     assert texts.morning_line(texts.part_label(precision), "встреча с Ренатой") == (
         f"{label} — встреча с Ренатой"
     )
+
+
+# ------------------------------------------- прежний час при переносе (§12.8)
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "part"),
+    [
+        # Для этого правила утро начинается в полночь: 06:30 — утро.
+        (0, 0, "morning"),
+        (6, 30, "morning"),
+        (8, 0, "morning"),
+        (11, 59, "morning"),
+        (12, 0, "afternoon"),
+        (17, 0, "afternoon"),
+        (17, 59, "afternoon"),
+        (18, 0, "evening"),
+        (19, 0, "evening"),
+        (23, 59, "evening"),
+    ],
+)
+def test_hour_lies_in_a_part_of_the_whole_day(hour: int, minute: int, part: str) -> None:
+    """Части по часу делят сутки целиком: утро — до 12:00, день — до 18:00, вечер — до полуночи."""
+    assert parts.part_of(time(hour, minute)) == part
+
+
+@pytest.mark.parametrize(
+    ("part", "end"),
+    [
+        ("morning", at(12)),
+        ("afternoon", at(18)),
+        # Вечер кончается в полночь — началом следующего дня.
+        ("evening", at(0, day=date(2026, 10, 10))),
+    ],
+)
+def test_part_ends_in_the_owner_zone(part: str, end: datetime) -> None:
+    assert parts.part_end(FRIDAY, part, TZ) == end
+
+
+def test_part_ends_by_the_local_clock_when_clocks_change() -> None:
+    """В день перевода часов утро кончается всё равно в 12:00 по местным часам."""
+    berlin = ZoneInfo("Europe/Berlin")
+
+    end = parts.part_end(date(2026, 10, 25), "morning", berlin)
+
+    assert end.isoformat() == "2026-10-25T12:00:00+01:00"
