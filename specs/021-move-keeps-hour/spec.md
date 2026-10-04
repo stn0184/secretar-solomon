@@ -93,7 +93,7 @@
 
 ## Задачи
 
-- [ ] Бот, модель (`services/understanding.py`): поле `time_removed`
+- [x] Бот, модель (`services/understanding.py`): поле `time_removed`
   (bool, обязательное, как `due_removed`) в `TaskEdit`; `EDIT_RULES` по
   §12.8 — «на вторник», «на понедельник на то же время» — только день
   (`due_precision = day`), час и часть бот возьмёт у задачи сам, из

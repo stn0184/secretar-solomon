@@ -540,6 +540,7 @@ def test_understanding_requires_the_edit_and_all_its_fields() -> None:
         "due_at",
         "due_precision",
         "due_removed",
+        "time_removed",
         "repeat",
         "repeat_removed",
         "priority",
@@ -875,7 +876,24 @@ def test_time_rules_name_the_part_of_day_instead_of_an_hour() -> None:
     # Прежнее правило «утром — 09:00» для разовой задачи ушло.
     assert "утром — 09:00, днём — 14:00, вечером — 19:00, due_precision = time" not in rules
     edit = flat(EDIT_RULES)
-    assert "«перенеси на завтра утром» — часть дня, «на вторник» — день, «на 11» — час" in edit
+    assert "«перенеси на завтра утром» — часть дня, «на 11» — час" in edit
+
+
+def test_edit_rules_name_only_the_day_and_leave_the_hour_to_the_bot() -> None:
+    """§12.8: «на вторник» и «на то же время» — только день, час и часть — у бота;
+    «время пока не знаю» — `time_removed`; час без дня — в день срока задачи."""
+    edit = flat(EDIT_RULES)
+
+    for phrase in (
+        "Назван только день — «на вторник», «давай на завтра», «на понедельник на то же время»",
+        "due_precision = day, даже если у задачи в списке есть час или часть дня",
+        "их бот возьмёт у задачи сам, из списка не переписывайте",
+        "Час без дня («в 16», «на 11») — в тот же день, что срок задачи",
+        "«Время пока не знаю», «без времени», «час уточню» — time_removed = true",
+        "назван и час — он главнее, time_removed = false",
+        "due_removed и time_removed = false",
+    ):
+        assert phrase in edit, phrase
 
 
 def test_no_recent_talk_means_no_block() -> None:
@@ -981,14 +999,14 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 
 # ------------------------------------------------------------ снимок (§14.3)
 
-# Эталоны пересчитаны после этапа 020: в блоке 1 правила времени называют
-# часть дня — «утром», «днём», «вечером» без часа (§21.5), правка — перенос
-# на часть; в схеме `due_precision` — пять значений у поручения и у правки.
+# Эталоны пересчитаны после этапа 021: правила правки в блоке 5 говорят, что
+# перенос на день — только день, час и часть берёт бот (§12.8), а в схеме у
+# правки появилось `time_removed`. Блок 1 и промпт без задач не менялись.
 # Дальше промпт и схема ответа текста и голоса сдвигаются только правкой,
 # которая их меняет, — снимок и прочие ветки их не трогают.
-PROMPT_WITH_EMPTY_TASKS_SHA256 = "77aee73ee3e853af79707655b75e619b67f25cc43f7787d8db613e17cc2ef36f"
+PROMPT_WITH_EMPTY_TASKS_SHA256 = "00029e10da8e60e24a902dfde6697ee15a7b8e63282bf3703751a9c7abe468c4"
 PROMPT_BARE_SHA256 = "c6678f50b4e54b2ae1576264a0c9964e29efe4895947f9cc0e642b81d6dac97d"
-SCHEMA_SHA256 = "8d4da00e45bc920202e0b39525a38ad985f1ac2229c02ed4fab6518cab5e4d68"
+SCHEMA_SHA256 = "3a046fe34af88e9081ff795713cd9c90f45a58781cfa20cbe88478acc0caae24"
 
 # Не настоящая картинка: модели здесь нет, важно только, что байты дошли.
 IMAGE = b"\xff\xd8\xff\xe0 not a real jpeg"
@@ -1869,6 +1887,7 @@ def model_edit(**fields: Any) -> dict[str, Any]:
         "due_at": None,
         "due_precision": None,
         "due_removed": False,
+        "time_removed": False,
         "repeat": None,
         "repeat_removed": False,
         "priority": None,
