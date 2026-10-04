@@ -118,7 +118,7 @@
   `test_edits.py`, `test_chat_edit_service.py` (ответы, кнопка
   кандидата), `test_repeat_service.py` (перенос раза повторяющейся
   задачи).
-- [ ] Живые примеры (`fixtures/understanding.jsonl`; `edit_mismatch`
+- [x] Живые примеры (`fixtures/understanding.jsonl`; `edit_mismatch`
   сверяет `due_precision` и `time_removed`, когда они названы в
   ожидании): «перенеси встречу с Ренатой на понедельник» у дела со
   временем — день; «… на понедельник на то же время» — день; «… на

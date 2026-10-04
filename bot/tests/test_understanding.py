@@ -1765,16 +1765,16 @@ async def test_conversation_part_of_day_gets_the_start_of_the_part() -> None:
 
 # Десять русских сообщений с ожидаемым разбором, три примера памяти, три
 # примера диалога, четыре ответа на вопрос о деле без срока (§19), девять
-# примеров повтора, семнадцать примеров со списком открытых задач —
-# тринадцать о правке словом (пять — по повторяющейся задаче) и четыре о
-# дубле (§15), — одиннадцать примеров разговора (§17) и девять примеров
-# пересланной переписки (§18).
+# примеров повтора, двадцать один пример со списком открытых задач —
+# семнадцать о правке словом (пять — по повторяющейся задаче, четыре — о
+# переносе без потери часа, §12.8) и четыре о дубле (§15), — одиннадцать
+# примеров разговора (§17) и девять примеров пересланной переписки (§18).
 # Этим владелец смотрит, как помощник понимает.
 # Прогон ходит в модель по-настоящему, поэтому в воротах не участвует —
 # `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 66
-EDIT_COUNT = 17
+FIXTURE_COUNT = 70
+EDIT_COUNT = 21
 DUPLICATE_COUNT = 4
 REPEAT_COUNT = 9
 TALK_COUNT = 11
@@ -2006,6 +2006,9 @@ def edit_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) 
     `due_date` — день нового срока в поясе владельца; `question` — вопрос
     задан, а новый срок не угадан. Правило (`repeat`) сверяется целиком, а
     снятие — флагом `repeat_removed`: не названы — модель их не трогает.
+    Точность срока (`due_precision`), его час «ЧЧ:ММ» по поясу владельца
+    (`due_time`) и снятие часа (`time_removed`, §12.8) — только когда
+    названы в ожидании.
     """
     expected = case["edit"]
     text = case["text"]
@@ -2026,6 +2029,17 @@ def edit_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) 
         actual = edit.due_at.astimezone(timezone).date().isoformat() if edit.due_at else None
         if actual != due_date:
             return f"{text}: ждали срок {due_date}, получили {actual}"
+    precision = expected.get("due_precision")
+    if precision is not None and edit.due_precision != precision:
+        return f"{text}: ждали точность {precision}, получили {edit.due_precision}"
+    due_time = expected.get("due_time")
+    if due_time is not None:
+        actual = edit.due_at.astimezone(timezone).strftime("%H:%M") if edit.due_at else None
+        if actual != due_time:
+            return f"{text}: ждали час {due_time}, получили {actual}"
+    unknown = expected.get("time_removed")
+    if unknown is not None and edit.time_removed != unknown:
+        return f"{text}: ждали time_removed = {unknown}, получили {edit.time_removed}"
     rule = rule_of(edit.repeat)
     if rule != expected.get("repeat"):
         return f"{text}: ждали правило {expected.get('repeat')}, получили {rule}"
@@ -2144,7 +2158,9 @@ def test_fixtures_have_the_expected_count_and_fields() -> None:
 
 def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
     """Правка (`techspec/12-chat-edit.md`): перенос, «сделал», «отменилась»,
-    свайп, несколько похожих, задачи нет, непонятное время, пересланное."""
+    свайп, несколько похожих, задачи нет, непонятное время, пересланное.
+    Перенос без потери часа (§12.8): только день, «на то же время», «время
+    пока не знаю» и «в 16» в ответ на вопрос о прошедшем часе."""
     fixtures = load_fixtures()
     # У разговора со списком задач `edit` тоже есть, но он считается отдельно.
     edits = [case for case in fixtures if "edit" in case and "talk" not in case]
@@ -2169,6 +2185,18 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
     assert any("last_task" in case for case in edits)
     forwarded = [case for case in edits if "forwarded_from" in case]
     assert [case["edit"] for case in forwarded] == [None, None]
+    assert sum(edit.get("due_precision") == "day" for edit in expected) == 3
+    assert [edit["time_removed"] for edit in expected if "time_removed" in edit] == [
+        False,
+        False,
+        True,
+        False,
+    ]
+    hours = [case for case in edits if "recent" in case]
+    assert [case["edit"].get("due_time") for case in hours] == ["16:00"]
+    for case in hours:
+        block = recent_for(case, TZ)
+        assert block is not None and "уже прошло — во сколько?" in block, case["text"]
     for case in edits:
         tasks = tasks_for(case)
         assert tasks, case["text"]
@@ -2204,8 +2232,9 @@ def test_talk_fixtures_cover_the_cases_of_the_stage() -> None:
 
     assert len(talks) == TALK_COUNT
     assert not any(TALK_EXCLUDED & set(case) for case in talks)
+    # Недавний разговор — ещё у правки: «в 16» в ответ на «во сколько?» (§12.8).
     assert not any(
-        "recent" in case for case in fixtures if not {"talk", "conversation"} & set(case)
+        "recent" in case for case in fixtures if not {"talk", "conversation", "edit"} & set(case)
     )
     for case in talks:
         expected = case["talk"]
@@ -2327,6 +2356,54 @@ def test_edit_mismatch_checks_action_task_and_due() -> None:
         question="На какое время?", edit=model_edit(task=1, due_at=tomorrow)
     )
     assert edit_mismatch(unclear, guessed, TZ) is not None
+
+
+def test_edit_mismatch_checks_precision_hour_and_time_removal() -> None:
+    """Перенос без потери часа (§12.8): названы в ожидании — сходятся точность
+    срока, час по поясу владельца и `time_removed`; не названы — не сверяются."""
+    monday = datetime(2026, 9, 21, 18, 0, tzinfo=TZ)
+    day: dict[str, Any] = {
+        "text": "перенеси встречу с Ренатой на понедельник",
+        "edit": {
+            "action": "change",
+            "task": 1,
+            "due_date": "2026-09-21",
+            "due_precision": "day",
+            "time_removed": False,
+        },
+    }
+    on_day = make_understanding(edit=model_edit(task=1, due_at=monday, due_precision="day"))
+    assert edit_mismatch(day, on_day, TZ) is None
+    with_hour = make_understanding(edit=model_edit(task=1, due_at=monday, due_precision="time"))
+    assert edit_mismatch(day, with_hour, TZ) is not None
+    removed = make_understanding(
+        edit=model_edit(task=1, due_at=monday, due_precision="day", time_removed=True)
+    )
+    assert edit_mismatch(day, removed, TZ) is not None
+    unknown = {**day, "edit": {**day["edit"], "time_removed": True}}
+    assert edit_mismatch(unknown, removed, TZ) is None
+    assert edit_mismatch(unknown, on_day, TZ) is not None
+
+    hour = {
+        "text": "в 16",
+        "edit": {
+            "action": "change",
+            "task": 1,
+            "due_date": "2026-09-16",
+            "due_precision": "time",
+            "due_time": "16:00",
+        },
+    }
+    four = datetime(2026, 9, 16, 11, 0, tzinfo=ZoneInfo("UTC"))
+    at_four = make_understanding(edit=model_edit(task=1, due_at=four, due_precision="time"))
+    assert edit_mismatch(hour, at_four, TZ) is None
+    five = datetime(2026, 9, 16, 17, 0, tzinfo=TZ)
+    at_five = make_understanding(edit=model_edit(task=1, due_at=five, due_precision="time"))
+    assert edit_mismatch(hour, at_five, TZ) is not None
+    # Не названные в ожидании поля не сверяются: старые примеры не ломаются.
+    plain = {"text": "перенеси на понедельник", "edit": {"action": "change", "task": 1}}
+    assert edit_mismatch(plain, removed, TZ) is None
+    assert edit_mismatch(plain, with_hour, TZ) is None
 
 
 def test_stray_edit_is_a_mismatch_of_a_plain_errand() -> None:
