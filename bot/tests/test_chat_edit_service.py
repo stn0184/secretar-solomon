@@ -1504,7 +1504,7 @@ async def test_move_to_an_evening_keeps_only_an_evening_hour(
 async def test_time_unknown_makes_the_new_day_a_day() -> None:
     """«…на понедельник, время пока не знаю» — понедельник на день."""
     plan = [
-        Planned(stage="morning", fire_at=datetime(2026, 10, 5, 9, 0, tzinfo=TZ)),
+        Planned(stage="before", fire_at=datetime(2026, 10, 5, 9, 0, tzinfo=TZ)),
         Planned(stage="due", fire_at=datetime(2026, 10, 5, 18, 0, tzinfo=TZ)),
     ]
     service, _, understandings, planner, _ = build(
