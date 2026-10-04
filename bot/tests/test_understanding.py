@@ -50,6 +50,7 @@ from solomon.services.understanding import (
     MODEL,
     MORE_TASKS_LIMIT,
     OUTPUT_CONFIG,
+    OVERDUE_ANSWER_RULES,
     PHOTO_MAX_TOKENS,
     PHOTO_RULES,
     PHOTO_TEXT_LIMIT,
@@ -460,6 +461,51 @@ def test_answer_rules_turn_done_into_an_edit_and_not_yet_into_an_answer() -> Non
     assert texts.UNDATED_QUESTION not in ANSWER_RULES
     block = format_open_question(Asked(), TZ)
     assert block.endswith(ANSWER_RULES)
+
+
+@pytest.mark.parametrize("question", [texts.OVERDUE_QUESTION, texts.OVERDUE_MOVE_QUESTION])
+def test_overdue_questions_get_their_own_rules_after_the_general_ones(question: str) -> None:
+    """Блок 4 (§22.5): при вопросах о прошедшем деле — абзац своих правил после общих."""
+    asked = Asked(
+        question=question,
+        title="позвонить в сервис",
+        due_at=datetime(2026, 10, 2, 18, 0, tzinfo=TZ),
+        due_precision="day",
+        priority="normal",
+    )
+
+    block = format_open_question(asked, TZ)
+
+    assert block.startswith(
+        f"Открытый вопрос: {question} — по задаче «позвонить в сервис» "
+        "(срок: пятница, 2 октября, приоритет: обычный)"
+    )
+    assert block.endswith(f"{ANSWER_RULES}\n{OVERDUE_ANSWER_RULES}")
+
+
+def test_other_questions_get_no_overdue_rules() -> None:
+    assert OVERDUE_ANSWER_RULES not in format_open_question(Asked(), TZ)
+    undated = Asked(question=texts.UNDATED_QUESTION, priority="normal")
+    assert format_open_question(undated, TZ).endswith(ANSWER_RULES)
+
+
+def test_overdue_rules_make_yes_and_a_new_day_edits_and_not_yet_an_answer() -> None:
+    """«Да» — done, «не нужно» — cancel, новый день — change по правилам правки,
+    «не успел» и «пока не знаю» — ответ без полей (§22.5)."""
+    text = flat(OVERDUE_ANSWER_RULES)
+
+    assert "«Получилось?»" in text
+    assert "«На когда перенести?»" in text
+    assert "«да», «получилось», «сделал»" in text
+    assert "edit с action = done и номером этой задачи" in text
+    assert "«уже не нужно», «отменилось»" in text
+    assert "action = cancel" in text
+    assert "«нет, перенеси на понедельник»" in text
+    assert "edit с action = change и номером этой задачи" in text
+    assert "по правилам срока правки из блока открытых задач, а не полями ответа" in text
+    assert "«Нет», «не успел», «ещё нет» без нового дня" in text
+    assert "«пока не знаю», «потом»" in text
+    assert "answers_question = true, due_at = null" in text
 
 
 def flat(text: str) -> str:

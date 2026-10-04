@@ -90,7 +90,7 @@ from solomon.db.tasks import (
     TaskDetails,
     TaskEvent,
 )
-from solomon.services import batches, conversation, edits
+from solomon.services import batches, conversation, edits, overdue
 from solomon.services.batches import Batches, Line
 from solomon.services.names import known_names
 from solomon.services.reminders import Planner, database_planner, next_fire_at
@@ -679,10 +679,6 @@ def edit_closes_asked(
     return task is not None and task.id == asked.task_id
 
 
-# Вопросы о прошедшем деле (§22.5): бот узнаёт свой вопрос по тексту.
-OVERDUE_QUESTIONS = (texts.OVERDUE_QUESTION, texts.OVERDUE_MOVE_QUESTION)
-
-
 def edit_beats_answer(
     edit: TaskEdit | None, asked: OpenQuestion | None, tasks: Sequence[TaskDetails] | None
 ) -> bool:
@@ -693,7 +689,7 @@ def edit_beats_answer(
     с прежним часом. При остальных вопросах — только `done` и `cancel`
     (`edit_closes_asked`, §19.5).
     """
-    if asked is None or asked.question not in OVERDUE_QUESTIONS:
+    if asked is None or asked.question not in overdue.OVERDUE_QUESTIONS:
         return edit_closes_asked(edit, asked, tasks)
     if edit is None or tasks is None:
         return False
@@ -1717,7 +1713,7 @@ class TaskService:
             if asked.question == texts.UNDATED_QUESTION and changed.due_at is None:
                 # «Пока не знаю»: срока нет — спросит через неделю (§19.1).
                 reply = texts.ASK_LATER
-            elif asked.question in OVERDUE_QUESTIONS and "due_at" not in changed.fields:
+            elif asked.question in overdue.OVERDUE_QUESTIONS and "due_at" not in changed.fields:
                 # «Не успел» — спросить, на когда; «пока не знаю» — через неделю (§22.5).
                 if asked.question == texts.OVERDUE_QUESTION:
                     reply = texts.OVERDUE_MOVE_QUESTION

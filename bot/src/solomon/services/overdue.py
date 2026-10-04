@@ -23,6 +23,9 @@ from solomon.services import asks
 WINDOW_START = time(8, 0)
 WINDOW_END = time(20, 0)
 
+# Свои вопросы бот узнаёт по тексту (§22.5): ответ и промпт смотрят на них.
+OVERDUE_QUESTIONS = (texts.OVERDUE_QUESTION, texts.OVERDUE_MOVE_QUESTION)
+
 
 @dataclass(frozen=True, slots=True)
 class OverdueBounds:

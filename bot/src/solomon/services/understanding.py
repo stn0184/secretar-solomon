@@ -45,7 +45,7 @@ from solomon import texts
 from solomon.config import Settings
 from solomon.db import facts as db_facts
 from solomon.db.rpc import DatabaseError
-from solomon.services import parts
+from solomon.services import overdue, parts
 
 logger = logging.getLogger(__name__)
 
@@ -508,13 +508,33 @@ ANSWER_RULES = """Вы задали этот вопрос владельцу в 
   answers_question = false и обычный разбор этого сообщения как
   самостоятельного."""
 
+# Абзац после общих правил — только при вопросах о прошедшем деле (§22.5).
+# Здесь перенос задачи из вопроса — тоже правка, а не поля ответа: так бот
+# сохранит её прежний час или часть дня (§12.8).
+OVERDUE_ANSWER_RULES = f"""Этот вопрос — о деле, срок которого прошёл. Здесь правила такие, и они
+главнее общих:
+- На «{texts.OVERDUE_QUESTION}» «да», «получилось», «сделал» — правка:
+  answers_question = false и edit с action = done и номером этой задачи
+  из блока открытых задач; «уже не нужно», «отменилось» — так же, но
+  action = cancel.
+- Назван новый день или час («нет, перенеси на понедельник», «сделаю
+  завтра», а на «{texts.OVERDUE_MOVE_QUESTION}» — «на понедельник», «завтра
+  в 10») — тоже правка: answers_question = false и edit с action = change
+  и номером этой задачи; срок — по правилам срока правки из блока открытых
+  задач, а не полями ответа.
+- «Нет», «не успел», «ещё нет» без нового дня, а на «{texts.OVERDUE_MOVE_QUESTION}»
+  — «пока не знаю», «потом» — ответ без полей: answers_question = true,
+  due_at = null, edit = null, второй вопрос не задавайте.
+- Нет блока открытых задач — правки быть не может: ответ по общим правилам."""
+
 
 def format_open_question(asked: AskedQuestion | None, timezone: ZoneInfo) -> str:
     """Блок «Открытый вопрос» (§5.2 п. 4, §10.2). Вопроса нет — блока нет.
 
     Поля задачи называются словами, как человеку: модель решает, ответ ли
     это, по смыслу, а новый срок всё равно считает по правилам времени от
-    «сейчас».
+    «сейчас». При вопросах о прошедшем деле после общих правил идёт абзац
+    своих (§22.5).
     """
     if asked is None:
         return ""
@@ -527,9 +547,12 @@ def format_open_question(asked: AskedQuestion | None, timezone: ZoneInfo) -> str
     details = [f"срок: {due}", f"приоритет: {priority}"]
     if asked.people:
         details.append(f"люди: {', '.join(asked.people)}")
+    rules = ANSWER_RULES
+    if asked.question in overdue.OVERDUE_QUESTIONS:
+        rules = f"{ANSWER_RULES}\n{OVERDUE_ANSWER_RULES}"
     return (
         f"Открытый вопрос: {asked.question} — по задаче «{asked.title}» "
-        f"({', '.join(details)}).\n{ANSWER_RULES}"
+        f"({', '.join(details)}).\n{rules}"
     )
 
 
