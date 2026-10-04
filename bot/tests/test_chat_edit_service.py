@@ -595,9 +595,7 @@ async def test_unclear_value_asks_and_changes_nothing() -> None:
         "schedule": [],
         "question": "На какое время перенести?",
     }
-    assert (
-        outcome.message == "Не понял, как поправить: встреча с Ренатой. На какое время перенести?"
-    )
+    assert outcome.message == "Встреча с Ренатой — на какое время перенести?"
 
 
 async def test_answer_to_the_edit_question_goes_the_008_way() -> None:
@@ -907,8 +905,21 @@ async def test_pick_with_a_question_asks_about_the_chosen_task() -> None:
         chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=MEETING_ID
     )
 
-    assert outcome.message == "Не понял, как поправить: встреча с Ренатой. На какое время?"
+    assert outcome.message == "Встреча с Ренатой — на какое время?"
     assert store.picks[0][1]["question"] == "На какое время?"
+
+
+@pytest.mark.parametrize(
+    ("title", "question", "expected"),
+    [
+        ("купить лампочку", "На какой день?", "Купить лампочку — на какой день?"),
+        ("Поменять масло", "Во сколько?", "Поменять масло — во сколько?"),
+        ("написать врачу", "SMS или письмом?", "Написать врачу — SMS или письмом?"),
+    ],
+)
+def test_unclear_edit_asks_without_not_understood(title: str, question: str, expected: str) -> None:
+    """Вопрос к правке — без «Не понял»: суть с заглавной, вопрос со строчной (§12.5)."""
+    assert texts.unclear_edit(title, question) == expected
 
 
 async def test_second_press_writes_nothing_and_shows_the_saved_answer() -> None:

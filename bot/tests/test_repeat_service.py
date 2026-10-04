@@ -685,9 +685,7 @@ async def test_rule_for_a_task_without_a_due_asks_where_to_start() -> None:
 
     outcome = await say(rig, "лампочку каждый понедельник")
 
-    assert outcome.message == (
-        "Не понял, как поправить: купить лампочку. С какого дня начать повтор?"
-    )
+    assert outcome.message == "Купить лампочку — с какого дня начать повтор?"
     assert saved_edit(rig.understandings) == {
         "task_id": LAMP_ID,
         "action": "change",

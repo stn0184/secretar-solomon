@@ -2053,7 +2053,7 @@ class TaskService:
         if question:
             return Edited(
                 edit=edit_row(task, "change", question=question),
-                reply=texts.UNCLEAR_EDIT.format(title=task.title, question=question),
+                reply=texts.unclear_edit(task.title, question),
             )
         if not change.changes:
             # Задача всё равно пишется в `edit`: база проверит, что она

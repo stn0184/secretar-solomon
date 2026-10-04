@@ -98,6 +98,18 @@ def _listed(words: Sequence[str]) -> str:
     return f"{', '.join(words[:-1])} и {words[-1]}"
 
 
+def _upper_first(text: str) -> str:
+    """Первая буква — заглавная: суть задачи начинает ответ."""
+    return text[:1].upper() + text[1:]
+
+
+def _lower_first(text: str) -> str:
+    """Первая буква — строчная, кроме сокращения вроде «SMS»."""
+    if text[1:2].isupper():
+        return text
+    return text[:1].lower() + text[1:]
+
+
 def _every(unit: str, interval: int) -> str:
     """Шаг правила: «каждую неделю», «каждые 2 недели», «каждые 5 недель», «каждую 21 неделю»."""
     every, one, few, many = REPEAT_UNITS[unit]
@@ -517,7 +529,8 @@ FIXED = "Поправил: {title}"
 REOPENED = "Вернул в работу: {title}"
 CLOSED = "Закрыл: {title}."
 CANCELLED = "Убрал из списка: {title}."
-UNCLEAR_EDIT = "Не понял, как поправить: {title}. {question}"
+# Правке не хватает одного значения: правка понята, поэтому без «Не понял».
+UNCLEAR_EDIT = "{title} — {question}"
 NOTHING_TO_CHANGE = "Не понял, что поменять в задаче «{title}» — ничего не менял."
 # Правка что-то назвала, а меняться нечему (§12.8): тем же видом, что «Поправил».
 SAME_AS_RECORDED = "Так и записано: {title}"
@@ -583,6 +596,11 @@ def passed_question(lost_at: datetime, precision: str) -> str:
     if precision in PASSED_PARTS:
         return PASSED_PARTS[precision]
     return PASSED_HOUR.format(hour=format_time(lost_at))
+
+
+def unclear_edit(title: str, question: str) -> str:
+    """«Купить лампочку — на какой день следующей недели?» (§12.5)."""
+    return UNCLEAR_EDIT.format(title=_upper_first(title), question=_lower_first(question))
 
 
 def edited_reply(
