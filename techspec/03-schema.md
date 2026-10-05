@@ -62,7 +62,13 @@ polling может отдать обновление повторно, и вто
 
 `task_id` (этап 010) пишут `record_understanding` в ветках новой задачи,
 `amend`, `edit` и `same_task` (этап 013), `pick_task` и
-`record_separately` (§3.4) — задачей, которую вернула ветка.
+`record_separately` (§3.4) — задачей, которую вернула ветка. С этапа
+023 (§23.6) — одна задача, о которой сообщение: правки, ответа,
+выбора кнопкой; иначе дубль у сообщения об одном деле; иначе
+единственная новая задача с номером 1; иначе `null` — новые задачи
+сообщения о нескольких делах находятся по `source_message_id`.
+**Задачи сообщения** — `task_id` и задачи с его `source_message_id`:
+по ним работают последние задачи разговора, свайп и повтор.
 У сообщений до этапа — задача, заведённая из них (`source_message_id`).
 По этой ссылке бот находит последнюю задачу в разговоре и свайп на своё
 сообщение (§12.2). Удаление задачи ссылку обнуляет, а не запрещено:
@@ -103,6 +109,7 @@ null`.
 | `question_asked_at` | timestamptz, nullable | когда задан; старше суток — считается снятым (§10.3) |
 | `due_moved_at` | timestamptz, nullable | правка из приложения перенесла срок, бот ещё не написал об этом в чат (§11.4); момент правки |
 | `source_message_id` | uuid, `references messages(id)`, nullable | сообщение, из которого возникла; пусто у задач, заведённых из Mini App |
+| `source_item` | smallint, nullable | номер дела в сообщении (этап 023, §23.2), 1–10: есть ровно у задач с `source_message_id` (`tasks_source_item_check`), уникален в паре `(source_message_id, source_item)` (`tasks_source_item_key`); задачи из сообщений до этапа получили 1 |
 | `created_at` | timestamptz, `default now()` | |
 | `updated_at` | timestamptz, `default now()` | обновляется триггером при любой правке |
 
@@ -357,6 +364,53 @@ update`, как у `pick_task`: два нажатия подряд второй 
 возвращает сообщение. По `task_id` и `reply` бот видит, чья запись
 легла. Чужое или несуществующее сообщение — исключение. Права — только
 `service_role`.
+
+**Этап 023** (§23.6, миграция `20261006100000_several_tasks.sql`)
+меняет три подписи и добавляет одну функцию; прежние подписи удалены
+той же миграцией, права — только `service_role`:
+
+```sql
+record_understanding(message_id uuid, owner_telegram_id bigint,
+                     analysis jsonb, ai_model text,
+                     ai_input_tokens int, ai_output_tokens int,
+                     reply text, tasks jsonb, facts jsonb,
+                     transcript text default null, …,
+                     same_task uuid default null)
+  returns setof tasks
+record_separately(owner_telegram_id bigint, message_id uuid,
+                  task jsonb, reminders jsonb, reply text,
+                  item smallint)
+  returns messages
+insert_message_task(owner_telegram_id bigint, message_id uuid,
+                    task jsonb, reminders jsonb, item smallint)
+  returns tasks
+append_reply(owner_telegram_id bigint, message_id uuid,
+             paragraph text)
+  returns messages
+```
+
+- `record_understanding`: `task` и `reminders` заменены массивом
+  `tasks` — `{"item": N, "task": {…}, "reminders": […]}`; новые дела
+  пишутся после правки или ответа той же транзакцией, по возрастанию
+  номера, через `insert_message_task`. Возвращает задачу правки,
+  ответа или дубля и новые задачи по номерам. Повтор — у сообщения
+  уже есть `reply`, `task_id` или задачи: функция возвращает задачи
+  сообщения и ничего не пишет (так ловится и сообщение из одних
+  дублей). Исключения до записи: `tasks` не массив; `same_task`
+  вместе с непустым `tasks`, `amend` или `edit`; открытых вопросов
+  среди `amend.question`, `edit.question` и `tasks[].task.open_question`
+  больше одного. Повтор номера или номер вне 1–10 откатывает всё
+  сообщение. `messages.task_id` — по правилу §3.2.
+- `insert_message_task` пишет `item` в `source_item`; пуст или вне
+  1–10 — исключение.
+- `record_separately`: «уже записано» — задача с этим
+  `source_message_id` и этим `source_item`; номер 1 ставит
+  `task_id`, другой — не трогает. У сообщения о нескольких делах бот
+  передаёт `reply` — прежний ответ с дописанным итогом (§23.5).
+- `append_reply` — абзац к `reply` через пустую строку (у пустого
+  ответа — сам абзац); пуст или ответ им уже кончается — сообщение
+  как есть; чужое — исключение. Им «Вернуть» и откат переноса под
+  ответом о нескольких делах кладут итог в `reply` (§23.5).
 
 Задачу с напоминаниями `record_understanding` (ветка `task`) и
 `record_separately` вставляют одной внутренней функцией
