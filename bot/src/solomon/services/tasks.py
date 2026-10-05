@@ -126,9 +126,11 @@ from solomon.services.understanding import (
     PhotoVerdict,
     SpeechQuality,
     TaskEdit,
+    TaskItem,
     Understanding,
     UnderstandingService,
     Verdict,
+    also_of,
     fact_status,
 )
 
@@ -147,6 +149,9 @@ QUESTION_TTL = timedelta(hours=24)
 # (`transcription.KEYTERM_LIMIT`), — чтение берёт с запасом над ним.
 NAME_TASKS_LIMIT = 200
 NAME_FACTS_LIMIT = 200
+# Дел на одно сообщение (`techspec/23-several-tasks.md` §23.3): верх и девять
+# из `also`; остальные называются сутью, а не записываются.
+MAX_ITEMS = 10
 
 
 def summarize(text: str) -> str:
@@ -213,8 +218,11 @@ class MessageRecorder(Protocol):
 
 
 class UnderstandingRecorder(Protocol):
-    """Второй шаг: разбор, ответ бота и задача одной транзакцией.
+    """Второй шаг: разбор, ответ бота и задачи одной транзакцией.
 
+    `tasks` — новые дела сообщения `{item, task, reminders}`, номер дела от
+    1 до 10 (`techspec/23-several-tasks.md` §23.6); возвращаются задачи
+    сообщения: поправленная ответом или правкой, найденная дублем и новые.
     `transcript` — расшифровка голоса: тем же вызовом становится текстом
     сообщения (§9.3). `edit` — правка задачи словом (§12.4). `photo_text` —
     прочитанное со снимка (§14.2). `same_task` — задача, которую сообщение
@@ -233,8 +241,7 @@ class UnderstandingRecorder(Protocol):
         ai_input_tokens: int | None,
         ai_output_tokens: int | None,
         reply: str | None,
-        task: Mapping[str, Any] | None,
-        reminders: Sequence[Mapping[str, Any]],
+        tasks: Sequence[Mapping[str, Any]],
         facts: Sequence[Mapping[str, Any]],
         transcript: str | None = None,
         transcript_confidence: float | None = None,
@@ -242,7 +249,7 @@ class UnderstandingRecorder(Protocol):
         edit: Mapping[str, Any] | None = None,
         photo_text: str | None = None,
         same_task: str | None = None,
-    ) -> Task | None: ...
+    ) -> list[Task]: ...
 
 
 class NextOccurrence(Protocol):
@@ -569,6 +576,30 @@ def task_fields(understanding: Understanding, rule: RuleOutcome | None = None) -
     }
 
 
+def several_items(also: Sequence[TaskItem]) -> tuple[list[tuple[int, TaskItem]], list[str]]:
+    """Номера дел сообщения (`techspec/23-several-tasks.md` §23.3) и суть дел
+    сверх десяти.
+
+    Номер 1 — поля верхнего уровня, даже когда они ответ, правка или
+    болтовня; дело `also[i]` — номер `i + 2`, до десятого. Номер — позиция в
+    `also`: дело с пустой сутью пропускается, а номера остальных не
+    сдвигаются, и кнопка «Записать отдельно», перечитав разбор, найдёт то же
+    дело (решение 5 плана). Сверх десяти — непустые сути по порядку.
+    """
+    numbered: list[tuple[int, TaskItem]] = []
+    beyond: list[str] = []
+    for index, item in enumerate(also):
+        title = item.title.strip()
+        if not title:
+            continue
+        number = index + 2
+        if number <= MAX_ITEMS:
+            numbered.append((number, item))
+        else:
+            beyond.append(title)
+    return numbered, beyond
+
+
 def review_reason(understanding: Understanding, rule: RuleOutcome) -> str | None:
     """Причина «Перепроверьте» в ответе: своя у модели и «не разобрал повтор»."""
     own = understanding.review_reason if understanding.needs_review else None
@@ -702,8 +733,22 @@ def edit_beats_answer(
 
 
 @dataclass(frozen=True, slots=True)
+class NewTask:
+    """Новое дело сообщения о нескольких делах (`techspec/23-several-tasks.md`
+    §23.3): номер дела, поля задачи и её план."""
+
+    item: int
+    task: Mapping[str, Any]
+    reminders: list[Planned]
+
+
+@dataclass(frozen=True, slots=True)
 class Decision:
-    """Что записать вторым шагом и что ответить человеку."""
+    """Что записать вторым шагом и что ответить человеку.
+
+    `task` и `reminders` — дело номер 1; `more` — новые дела 2–10 сообщения
+    о нескольких делах (§23.3).
+    """
 
     reply: str
     task: Mapping[str, Any] | None
@@ -713,6 +758,28 @@ class Decision:
     buttons: tuple[Button, ...] = ()
     # Дубль (§15.3): задача, о которой сообщение, — новой нет.
     same_task: str | None = None
+    more: tuple[NewTask, ...] = ()
+
+    def task_rows(self) -> list[dict[str, Any]]:
+        """Аргумент `tasks` для `record_understanding` (§23.6): дела по номерам."""
+        rows = []
+        if self.task is not None:
+            rows.append(
+                {
+                    "item": 1,
+                    "task": dict(self.task),
+                    "reminders": [item.as_row() for item in self.reminders],
+                }
+            )
+        rows.extend(
+            {
+                "item": new.item,
+                "task": dict(new.task),
+                "reminders": [item.as_row() for item in new.reminders],
+            }
+            for new in self.more
+        )
+        return rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,11 +788,88 @@ class Edited:
 
     Форма `edit` — `techspec/03-schema.md` §3.4: `task_id`, `action`,
     `changes` (только отличия), `schedule` (готовый план) и `question`.
+
+    Ответ — по частям, чтобы ответ о нескольких делах разложил их по своим
+    абзацам (`techspec/23-several-tasks.md` §23.4): `head` — итог правки,
+    `clash` — суть задач в ту же минуту, что новый срок (§15.5), `title` —
+    суть правленой задачи для накладки с сутью. `unclear` — итог и есть
+    вопрос неясной правки; `asks` — итог кончается вопросом о прошедшем
+    часе (§12.8). `stays` — срок задачи после правки, если она остаётся в
+    работе: с ним сравниваются новые дела того же сообщения.
     """
 
     edit: dict[str, Any]
-    reply: str
+    head: str
     buttons: tuple[Button, ...] = ()
+    clash: tuple[str, ...] = ()
+    title: str = ""
+    unclear: bool = False
+    asks: bool = False
+    stays: tuple[datetime | None, str | None] | None = None
+
+    @property
+    def reply(self) -> str:
+        """Ответ об одном деле — как был: итог и абзац накладки (§12.5, §15.5)."""
+        return paragraphs(self.head, texts.same_time(self.clash) if self.clash else None)
+
+
+@dataclass(frozen=True, slots=True)
+class _Unfound:
+    """Перенос ненайденной задачи новой задачей (§12.3): поля, план, строка
+    ответа, суть задач на ту же минуту и сам срок для накладки."""
+
+    task: dict[str, Any]
+    planned: list[Planned]
+    line: str
+    clash: tuple[str, ...]
+    minute: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Top:
+    """Верхние поля разбора по частям ответа (`techspec/23-several-tasks.md`
+    §23.3–23.4).
+
+    `head` — итог ответа на вопрос или правки, `clash` — суть задач в ту же
+    минуту, что их новый срок, `title` — суть задачи ответа или правки.
+    `question` — вопрос, который ответ задаёт последним: правки, выбора или
+    «На когда перенести?»; `asks` — вопрос о прошедшем часе уже в `head`.
+    `buttons` — «Вернуть» под итогом, `picks` — кнопки выбора под вопросом.
+    `exclude` — задача ответа или правки: в накладку с базой она не входит,
+    а её срок после правки (`minute`) сравнивается с новыми делами.
+    `first` — верхние поля, когда они новое дело номер 1 (или дубль);
+    `unfound` — перенос ненайденной задачи, тоже дело номер 1.
+    """
+
+    head: str | None = None
+    title: str = ""
+    clash: tuple[str, ...] = ()
+    question: str | None = None
+    asks: bool = False
+    buttons: tuple[Button, ...] = ()
+    picks: tuple[Button, ...] = ()
+    amend: dict[str, Any] | None = None
+    edit: dict[str, Any] | None = None
+    exclude: str | None = None
+    minute: datetime | None = None
+    first: Understanding | None = None
+    unfound: _Unfound | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Line:
+    """Новое дело для строки ответа: разбор, правило, план, хвост и вопрос."""
+
+    item: Understanding
+    rule: RuleOutcome
+    planned: list[Planned]
+    tail: str | None
+    asks: bool
+
+
+def same_minute(first: datetime, second: datetime) -> bool:
+    """Одна минута — как сравнивает накладка базы (§15.5): секунды не в счёт."""
+    return first.replace(second=0, microsecond=0) == second.replace(second=0, microsecond=0)
 
 
 def edit_row(
@@ -871,8 +1015,7 @@ class TaskService:
             ai_input_tokens: int | None,
             ai_output_tokens: int | None,
             reply: str | None,
-            task: Mapping[str, Any] | None,
-            reminders: Sequence[Mapping[str, Any]],
+            tasks: Sequence[Mapping[str, Any]],
             facts: Sequence[Mapping[str, Any]],
             transcript: str | None = None,
             transcript_confidence: float | None = None,
@@ -880,7 +1023,7 @@ class TaskService:
             edit: Mapping[str, Any] | None = None,
             photo_text: str | None = None,
             same_task: str | None = None,
-        ) -> Task | None:
+        ) -> list[Task]:
             return await db_tasks.record_understanding(
                 db,
                 message_id=message_id,
@@ -890,8 +1033,7 @@ class TaskService:
                 ai_input_tokens=ai_input_tokens,
                 ai_output_tokens=ai_output_tokens,
                 reply=reply,
-                task=task,
-                reminders=reminders,
+                tasks=tasks,
                 facts=facts,
                 transcript=transcript,
                 transcript_confidence=transcript_confidence,
@@ -1383,8 +1525,7 @@ class TaskService:
                 ai_input_tokens=None,
                 ai_output_tokens=None,
                 reply=None,
-                task=None,
-                reminders=[],
+                tasks=[],
                 facts=[],
                 transcript=transcript.text,
                 transcript_confidence=transcript.confidence,
@@ -1479,8 +1620,7 @@ class TaskService:
                 ai_input_tokens=None,
                 ai_output_tokens=None,
                 reply=reply,
-                task=None,
-                reminders=[],
+                tasks=[],
                 facts=[],
             )
         except DatabaseError as error:
@@ -1608,8 +1748,7 @@ class TaskService:
                 ai_input_tokens=verdict.input_tokens if verdict is not None else None,
                 ai_output_tokens=verdict.output_tokens if verdict is not None else None,
                 reply=decision.reply,
-                task=decision.task,
-                reminders=[item.as_row() for item in decision.reminders],
+                tasks=decision.task_rows(),
                 facts=facts,
                 transcript=transcript.text if transcript is not None else None,
                 transcript_confidence=transcript.confidence if transcript is not None else None,
@@ -1628,18 +1767,22 @@ class TaskService:
         if facts:
             logger.info("Записано сведений о владельце: %s", len(facts))
 
+        # Задачи сообщения: поправленная ответом или правкой — первая (§23.6).
+        new = recorded[1:] if decision.amend is not None or decision.edit is not None else recorded
         if decision.edit is not None:
             logger.info(
                 "Правка словом: %s задачи %s", decision.edit["action"], decision.edit["task_id"]
             )
         elif decision.same_task is not None:
             logger.info("Дубль задачи %s: новой задачи нет", decision.same_task)
-        elif recorded is None:
+        elif decision.amend is not None and recorded:
+            logger.info("Ответ на вопрос дополнил задачу %s", recorded[0].id)
+        if decision.same_task is None and len(new) == 1:
+            logger.info("Записана задача %s", new[0].id)
+        elif decision.same_task is None and new:
+            logger.info("Записано задач из сообщения: %s", len(new))
+        elif not recorded:
             logger.info("Задачи нет: сообщение %s сохранено с разбором", saved.id)
-        elif decision.amend is not None:
-            logger.info("Ответ на вопрос дополнил задачу %s", recorded.id)
-        else:
-            logger.info("Записана задача %s", recorded.id)
         return RecordOutcome(ok=True, message=decision.reply, buttons=decision.buttons)
 
     async def _decide(
@@ -1682,53 +1825,28 @@ class TaskService:
 
         `talk` — своё сообщение: разговор отвечает текстом модели (§17.2).
         У пересланного и снимка ответ разговора прежний.
-        """
-        beats = context.edits and edit_beats_answer(understanding.edit, asked, context.tasks)
-        if asked is not None and understanding.answers_question and not beats:
-            changed = amendment(asked, understanding)
-            planned = await self._planner(
-                due_at=changed.due_at,
-                due_precision=changed.due_precision,
-                kind=changed.kind,
-                now=now,
-            )
-            clash = None
-            if "due_at" in changed.fields:
-                clash = await self._same_time(
-                    changed.due_at, changed.due_precision, exclude=asked.task_id
-                )
-            reply = paragraphs(
-                texts.understood_reply(
-                    title=changed.title,
-                    due=self._due_words(changed.due_at, changed.due_precision),
-                    review_reason=review_reason(understanding, changed.rule),
-                    # Срочность звучит, только если её изменил сам ответ.
-                    priority=changed.priority if "priority" in changed.fields else "normal",
-                    remind_at=self._remind_words(planned, now),
-                    repeat=rule_words(changed.repeat),
-                ),
-                clash,
-            )
-            amend = {
-                "task_id": asked.task_id,
-                "fields": changed.fields,
-                "reminders": [item.as_row() for item in planned],
-            }
-            if asked.question == texts.UNDATED_QUESTION and changed.due_at is None:
-                # «Пока не знаю»: срока нет — спросит через неделю (§19.1).
-                reply = texts.ASK_LATER
-            elif asked.question in overdue.OVERDUE_QUESTIONS and "due_at" not in changed.fields:
-                # «Не успел» — спросить, на когда; «пока не знаю» — через неделю (§22.5).
-                if asked.question == texts.OVERDUE_QUESTION:
-                    reply = texts.OVERDUE_MOVE_QUESTION
-                    amend["question"] = texts.OVERDUE_MOVE_QUESTION
-                else:
-                    reply = texts.ASK_LATER
-            return Decision(reply=reply, task=None, reminders=[], amend=amend)
 
-        if understanding.edit is not None and context.tasks is not None and context.edits:
-            return await self._decide_edit(
-                understanding, understanding.edit, context.tasks, now, telegram_message_id
+        Есть в разборе дела `also` (`techspec/23-several-tasks.md` §23.3) —
+        сообщение о нескольких делах, путь `_decide_several`; без них ответ
+        и запись прежние.
+        """
+        numbered, beyond = several_items(also_of(understanding))
+        if numbered or beyond:
+            return await self._decide_several(
+                understanding, asked, now, context, telegram_message_id, numbered, beyond
+            )
+        top = await self._top(understanding, asked, now, context, telegram_message_id)
+        if top.first is None:
+            unfound = top.unfound
+            return Decision(
+                reply=paragraphs(
+                    top.head, texts.same_time(top.clash) if top.clash else None, top.question
+                ),
+                task=unfound.task if unfound is not None else None,
+                reminders=unfound.planned if unfound is not None else [],
+                amend=top.amend,
+                edit=top.edit,
+                buttons=top.buttons + top.picks,
             )
 
         same = self._duplicate_of(understanding, context.tasks)
@@ -1744,6 +1862,321 @@ class TaskService:
             )
 
         return await self._new_task(understanding, now, talk=talk)
+
+    async def _top(
+        self,
+        understanding: Understanding,
+        asked: OpenQuestion | None,
+        now: datetime,
+        context: EditContext,
+        telegram_message_id: int,
+    ) -> _Top:
+        """Верхние поля разбора (§23.3): ответ на вопрос, правка — или дело номер 1.
+
+        Ответ на открытый вопрос главнее правки (§12.1), кроме тех правок той
+        же задачи, что его побеждают (§19.5, §22.5). Правка — только при
+        блоке 5 в промпте (§12.2). Остальное — новое дело номер 1 или дубль:
+        их решает вызывающий.
+        """
+        beats = context.edits and edit_beats_answer(understanding.edit, asked, context.tasks)
+        if asked is not None and understanding.answers_question and not beats:
+            return await self._answer(understanding, asked, now)
+        if understanding.edit is not None and context.tasks is not None and context.edits:
+            return await self._edit_top(
+                understanding, understanding.edit, context.tasks, now, telegram_message_id
+            )
+        return _Top(first=understanding)
+
+    async def _answer(
+        self, understanding: Understanding, asked: OpenQuestion, now: datetime
+    ) -> _Top:
+        """Ответ на открытый вопрос (§10.2): поправка задачи и итог по частям.
+
+        Напоминания планируются заново по сроку, какой у задачи станет, и
+        уходят в `amend`. Ответ, давший срок, получает накладку (§15.5).
+        «Пока не знаю» на свой вопрос о деле без срока (§19.5) — «Хорошо,
+        спрошу через неделю.»; ответ без нового срока на «Получилось?» —
+        вопрос «На когда перенести?» той же задаче (`amend.question`, §22.4),
+        на «На когда перенести?» — «Хорошо, спрошу через неделю.». Свой
+        вопрос узнаётся по тексту — константам из `texts.py`.
+        """
+        changed = amendment(asked, understanding)
+        planned = await self._planner(
+            due_at=changed.due_at,
+            due_precision=changed.due_precision,
+            kind=changed.kind,
+            now=now,
+        )
+        clash: list[str] = []
+        if "due_at" in changed.fields:
+            clash = await self._same_minute_titles(
+                changed.due_at, changed.due_precision, exclude=asked.task_id
+            )
+        head: str | None = texts.understood_reply(
+            title=changed.title,
+            due=self._due_words(changed.due_at, changed.due_precision),
+            review_reason=review_reason(understanding, changed.rule),
+            # Срочность звучит, только если её изменил сам ответ.
+            priority=changed.priority if "priority" in changed.fields else "normal",
+            remind_at=self._remind_words(planned, now),
+            repeat=rule_words(changed.repeat),
+        )
+        amend = {
+            "task_id": asked.task_id,
+            "fields": changed.fields,
+            "reminders": [item.as_row() for item in planned],
+        }
+        question = None
+        if asked.question == texts.UNDATED_QUESTION and changed.due_at is None:
+            # «Пока не знаю»: срока нет — спросит через неделю (§19.1).
+            head = texts.ASK_LATER
+        elif asked.question in overdue.OVERDUE_QUESTIONS and "due_at" not in changed.fields:
+            # «Не успел» — спросить, на когда; «пока не знаю» — через неделю (§22.5).
+            if asked.question == texts.OVERDUE_QUESTION:
+                head = None
+                question = texts.OVERDUE_MOVE_QUESTION
+                amend["question"] = texts.OVERDUE_MOVE_QUESTION
+            else:
+                head = texts.ASK_LATER
+        return _Top(
+            head=head,
+            title=changed.title,
+            clash=tuple(clash),
+            question=question,
+            amend=amend,
+            exclude=asked.task_id,
+            minute=self._minute(changed.due_at, changed.due_precision),
+        )
+
+    async def _edit_top(
+        self,
+        understanding: Understanding,
+        edit: TaskEdit,
+        tasks: Sequence[TaskDetails],
+        now: datetime,
+        telegram_message_id: int,
+    ) -> _Top:
+        """Правка словом (§12.3): задача узнана, кандидаты или не найдено.
+
+        Номер модели переводится в задачу по тому же списку, что ушёл в
+        промпт. Кандидаты — вопрос с кнопками, до выбора ничего не меняется.
+        Не найдено: перенос записывается новой задачей (инвариант 5) — это
+        дело номер 1 (§23.3), остальное — не записывается ничего.
+        """
+        task = edits.task_by_number(tasks, edit.task)
+        if task is not None:
+            edited = await self._edit_known(understanding, edit, task, now)
+            return _Top(
+                head=None if edited.unclear else edited.head,
+                title=edited.title,
+                clash=edited.clash,
+                question=edited.head if edited.unclear else None,
+                asks=edited.asks,
+                buttons=edited.buttons,
+                edit=edited.edit,
+                exclude=task.id,
+                minute=self._minute(*edited.stays) if edited.stays is not None else None,
+            )
+        candidates = edits.candidates_of(tasks, edit.candidates)
+        if candidates:
+            timezone = self._settings.owner_timezone
+            picks = tuple(
+                Button(
+                    text=edits.candidate_label(item, timezone),
+                    data=edits.pick_data(telegram_message_id, item.id),
+                )
+                for item in candidates
+            )
+            return _Top(question=edits.pick_question(edit, now, timezone), picks=picks)
+        if edit.action == "change" and edit.due_at is not None and understanding.kind in TASK_KINDS:
+            unfound = await self._unfound_task(understanding, edit.due_at, edit.due_precision, now)
+            return _Top(
+                head=unfound.line,
+                title=understanding.title,
+                clash=unfound.clash,
+                minute=unfound.minute,
+                unfound=unfound,
+            )
+        return _Top(head=texts.NOT_FOUND.format(title=understanding.title))
+
+    async def _decide_several(
+        self,
+        understanding: Understanding,
+        asked: OpenQuestion | None,
+        now: datetime,
+        context: EditContext,
+        telegram_message_id: int,
+        numbered: Sequence[tuple[int, TaskItem]],
+        beyond: Sequence[str],
+    ) -> Decision:
+        """Сообщение о нескольких делах (`techspec/23-several-tasks.md` §23.3).
+
+        Верх — как у одного дела: ответ на вопрос, правка или дело номер 1;
+        болтовня и сведение о себе абзаца не получают. Дальше — дела по
+        номерам: дубль не связывается, а получает абзац и кнопку «Записать
+        отдельно» со своим номером; остальные — новые задачи, каждая со
+        своим планом. Вопрос — один: правки или выбора, ответа, а нет их —
+        первого нового дела, у которого он есть; у остальных спрошенных —
+        пометка и хвост «перепроверьте». Накладка нового дела — с базой (без
+        задачи ответа или правки) и с делами выше по номеру, включая срок
+        задачи ответа или правки.
+
+        Абзацы — §23.4: итог правки или ответа, запись (одна строка или
+        список), дубли, накладки, дела сверх десяти, вопрос — последним. Вопрос
+        встаёт в строку записи, только когда весь ответ — одна эта строка.
+        """
+        top = await self._top(understanding, asked, now, context, telegram_message_id)
+        question = top.question
+        if question is not None and top.amend is not None:
+            # «На когда перенести?» рядом с другими делами называет задачу.
+            question = texts.unclear_edit(top.title, question)
+        asking = question is not None or top.asks
+        clashes = [texts.same_time(top.clash, title=top.title)] if top.clash else []
+        above: list[tuple[datetime, str]] = []
+        if top.minute is not None:
+            above.append((top.minute, top.title))
+
+        items: list[tuple[int, Understanding]] = []
+        if top.first is not None and top.first.kind in TASK_KINDS:
+            items.append((1, top.first))
+        items.extend((number, item.as_understanding()) for number, item in numbered)
+        dups: list[tuple[int, str, str]] = []
+        fresh: list[tuple[int, Understanding]] = []
+        for number, item in items:
+            same = self._duplicate_of(item, context.tasks)
+            if same is None:
+                fresh.append((number, item))
+                continue
+            said = texts.duplicate_reply(
+                title=same.title,
+                due=self._due_words(same.due_at, same.due_precision),
+                repeat=rule_words(same.repeat),
+            )
+            dups.append((number, item.title, said))
+
+        plans = await asyncio.gather(
+            *(self._plan_item(item, now, top.exclude) for _, item in fresh)
+        )
+        lines: list[_Line] = []
+        rows: list[NewTask] = []
+        for (number, item), (planned, titles) in zip(fresh, plans, strict=True):
+            rule = rule_of(item, item.due_at)
+            row = task_fields(item, rule)
+            tail = review_reason(item, rule)
+            own = question_of(item)
+            asks = own is not None and not asking
+            if own is not None and asks:
+                asking = True
+                question = own
+                row = {**row, "needs_review": True, "open_question": own}
+                tail = texts.REPEAT_DROPPED if rule.malformed else None
+            elif own is not None:
+                # Вопрос не задан — пометка и хвост «перепроверьте» (§23.3).
+                row = {**row, "needs_review": True}
+                reason = (item.review_reason or "").strip() or texts.REVIEW_DEFAULT
+                tail = malformed_reason(reason) if rule.malformed else reason
+            minute = self._minute(item.due_at, item.due_precision)
+            if minute is not None:
+                titles = [*titles, *(title for at, title in above if same_minute(at, minute))]
+                above.append((minute, item.title))
+            if titles:
+                clashes.append(texts.same_time(titles, title=item.title))
+            lines.append(_Line(item=item, rule=rule, planned=planned, tail=tail, asks=asks))
+            rows.append(NewTask(item=number, task=row, reminders=planned))
+
+        more = texts.more_in_message(beyond) if beyond else None
+        record = None
+        if len(lines) == 1:
+            line = lines[0]
+            alone = top.head is None and not dups and not clashes and more is None
+            if alone and line.asks and question is not None:
+                record = self._asked_line(line, question, now)
+                question = None
+            else:
+                record = self._record_line(line, now)
+        elif lines:
+            record = texts.listed_reply(
+                [self._record_line(line, now, listed=True) for line in lines]
+            )
+
+        several_dups = len(dups) > 1
+        apart = tuple(
+            Button(
+                text=edits.apart_label(title) if several_dups else texts.APART_BUTTON,
+                data=edits.apart_data(telegram_message_id, number),
+            )
+            for number, title, _ in dups
+        )
+        first: NewTask | None = next((row for row in rows if row.item == 1), None)
+        if top.unfound is not None:
+            first = NewTask(item=1, task=top.unfound.task, reminders=top.unfound.planned)
+        logger.info(
+            "Несколько дел: новых %s, дублей %s, сверх десяти %s",
+            len(rows) + (top.unfound is not None),
+            len(dups),
+            len(beyond),
+        )
+        return Decision(
+            reply=paragraphs(
+                top.head, record, *(said for _, _, said in dups), *clashes, more, question
+            ),
+            task=first.task if first is not None else None,
+            reminders=first.reminders if first is not None else [],
+            amend=top.amend,
+            edit=top.edit,
+            buttons=top.buttons + apart + top.picks,
+            more=tuple(row for row in rows if row.item != 1),
+        )
+
+    async def _plan_item(
+        self, item: Understanding, now: datetime, exclude: str | None
+    ) -> tuple[list[Planned], list[str]]:
+        """План напоминаний нового дела (§6.1) и суть задач базы на ту же минуту."""
+        planned, titles = await asyncio.gather(
+            self._planner(
+                due_at=item.due_at, due_precision=item.due_precision, kind=item.kind, now=now
+            ),
+            self._same_minute_titles(item.due_at, item.due_precision, exclude),
+        )
+        return planned, titles
+
+    def _record_line(self, line: _Line, now: datetime, *, listed: bool = False) -> str:
+        """Строка записи нового дела: «Записал: …» или строка списка (§23.4)."""
+        item = line.item
+        due = self._due_words(item.due_at, item.due_precision)
+        remind_at = self._remind_words(line.planned, now)
+        repeat = rule_words(line.rule.rule)
+        if listed:
+            return texts.listed_line(
+                kind=item.kind,
+                title=item.title,
+                due=due,
+                review_reason=line.tail,
+                priority=item.priority,
+                remind_at=remind_at,
+                repeat=repeat,
+            )
+        return texts.recorded_reply(
+            kind=item.kind,
+            title=item.title,
+            due=due,
+            review_reason=line.tail,
+            priority=item.priority,
+            remind_at=remind_at,
+            repeat=repeat,
+        )
+
+    def _asked_line(self, line: _Line, question: str, now: datetime) -> str:
+        """Запись с вопросом одной строкой (§10.1): ответ — только она."""
+        item = line.item
+        said = f"{texts.REPEAT_DROPPED}. {question}" if line.rule.malformed else question
+        return texts.asked_reply(
+            title=item.title,
+            question=said,
+            due=self._due_words(item.due_at, item.due_precision),
+            remind_at=self._remind_words(line.planned, now),
+            repeat=rule_words(line.rule.rule),
+        )
 
     async def _new_task(
         self, understanding: Understanding, now: datetime, *, talk: bool = False
@@ -1901,7 +2334,14 @@ class TaskService:
     async def _same_time(
         self, due_at: datetime | None, precision: str | None, exclude: str | None = None
     ) -> str | None:
-        """Абзац «В это же время у вас» (`techspec/15-duplicates.md` §15.5) или `None`.
+        """Абзац «В это же время у вас» (`techspec/15-duplicates.md` §15.5) или `None`."""
+        titles = await self._same_minute_titles(due_at, precision, exclude)
+        return texts.same_time(titles) if titles else None
+
+    async def _same_minute_titles(
+        self, due_at: datetime | None, precision: str | None, exclude: str | None = None
+    ) -> list[str]:
+        """Суть задач базы на ту же минуту (§15.5) — пусто, если накладки нет.
 
         Сравниваются только сроки со временем: у срока «на день» 18:00 —
         условность, базу о нём не спрашивают. `exclude` — сама задача, когда
@@ -1910,19 +2350,26 @@ class TaskService:
         журнал и ответ без абзаца: запись важнее предупреждения.
         """
         store = self._edits
-        if store is None or due_at is None or precision != db_tasks.TIME_PRECISION:
-            return None
-        if due_at.tzinfo is None:
-            due_at = due_at.replace(tzinfo=self._settings.owner_timezone)
+        minute = self._minute(due_at, precision)
+        if store is None or minute is None:
+            return []
         try:
-            titles = await store.same_minute(due_at, exclude)
+            titles = await store.same_minute(minute, exclude)
         except DatabaseError as error:
             logger.warning("Накладка не проверена, ответ без абзаца: %s", error)
+            return []
+        if titles:
+            logger.info("Накладка: в ту же минуту ещё задач %s", len(titles))
+        return titles
+
+    def _minute(self, due_at: datetime | None, precision: str | None) -> datetime | None:
+        """Срок со временем в поясе владельца — то, что сравнивает накладка; у
+        срока «на день» и у задачи без срока — `None`."""
+        if due_at is None or precision != db_tasks.TIME_PRECISION:
             return None
-        if not titles:
-            return None
-        logger.info("Накладка: в ту же минуту ещё задач %s", len(titles))
-        return texts.same_time(titles)
+        if due_at.tzinfo is None:
+            return due_at.replace(tzinfo=self._settings.owner_timezone)
+        return due_at
 
     async def _last_events(self, store: EditStore, since: datetime) -> list[TaskEvent | None]:
         """Два события разговора за час (§12.2). Любой отказ — ни одного.
@@ -1960,61 +2407,15 @@ class TaskService:
             text = stored.text
         return _Swiped(target="own", task_ids=stored.tasks if stored is not None else (), text=text)
 
-    async def _decide_edit(
-        self,
-        understanding: Understanding,
-        edit: TaskEdit,
-        tasks: Sequence[TaskDetails],
-        now: datetime,
-        telegram_message_id: int,
-    ) -> Decision:
-        """Правка словом (§12.3): задача узнана, кандидаты или не найдено.
-
-        Номер модели переводится в задачу по тому же списку, что ушёл в
-        промпт. Кандидаты — вопрос с кнопками, до выбора ничего не меняется.
-        Не найдено: перенос записывается новой задачей (инвариант 5),
-        остальное — не записывается ничего.
-        """
-        task = edits.task_by_number(tasks, edit.task)
-        if task is not None:
-            edited = await self._edit_known(understanding, edit, task, now)
-            return Decision(
-                reply=edited.reply,
-                task=None,
-                reminders=[],
-                edit=edited.edit,
-                buttons=edited.buttons,
-            )
-        candidates = edits.candidates_of(tasks, edit.candidates)
-        if candidates:
-            timezone = self._settings.owner_timezone
-            buttons = tuple(
-                Button(
-                    text=edits.candidate_label(item, timezone),
-                    data=edits.pick_data(telegram_message_id, item.id),
-                )
-                for item in candidates
-            )
-            return Decision(
-                reply=edits.pick_question(edit, now, timezone),
-                task=None,
-                reminders=[],
-                buttons=buttons,
-            )
-        if edit.action == "change" and edit.due_at is not None and understanding.kind in TASK_KINDS:
-            return await self._unfound_move(understanding, edit.due_at, edit.due_precision, now)
-        return Decision(
-            reply=texts.NOT_FOUND.format(title=understanding.title), task=None, reminders=[]
-        )
-
-    async def _unfound_move(
+    async def _unfound_task(
         self,
         understanding: Understanding,
         edit_due_at: datetime,
         edit_precision: str | None,
         now: datetime,
-    ) -> Decision:
-        """Перенос задачи, которой нет в списке, — новой задачей (§12.3).
+    ) -> _Unfound:
+        """Задача из переноса, которой нет в списке (§12.3): поля, план, строка
+        ответа и суть задач на ту же минуту.
 
         Поля — верхнего уровня; нет там срока — срок из правки. Вопрос
         верхнего уровня задачу не получает: он был о правке, а не о новом
@@ -2035,7 +2436,7 @@ class TaskService:
             "due_at": due_at.isoformat(),
             "due_precision": precision,
         }
-        reply = texts.not_found_reply(
+        line = texts.not_found_reply(
             title=understanding.title,
             due=self._due_words(due_at, precision),
             review_reason=review_reason(understanding, rule),
@@ -2043,8 +2444,14 @@ class TaskService:
             remind_at=self._remind_words(planned, now),
             repeat=rule_words(rule.rule),
         )
-        clash = await self._same_time(due_at, precision)
-        return Decision(reply=paragraphs(reply, clash), task=task, reminders=planned)
+        clash = await self._same_minute_titles(due_at, precision)
+        return _Unfound(
+            task=task,
+            planned=planned,
+            line=line,
+            clash=tuple(clash),
+            minute=self._minute(due_at, precision),
+        )
 
     async def _edit_known(
         self, understanding: Understanding, edit: TaskEdit, task: TaskDetails, now: datetime
@@ -2076,17 +2483,22 @@ class TaskService:
             back = Button(text=texts.REOPEN_BUTTON, data=edits.reopen_data(task.id))
             return Edited(
                 edit=edit_row(task, edit.action),
-                reply=head.format(title=task.title),
+                head=head.format(title=task.title),
                 buttons=(back,),
+                title=task.title,
             )
         question = (understanding.question or "").strip()
         change = edits.edit_changes(task, edit, self._settings.owner_timezone, now)
         if not question and change.needs_start:
             question = texts.REPEAT_START
+        stays = (change.due_at, change.due_precision)
         if question:
             return Edited(
                 edit=edit_row(task, "change", question=question),
-                reply=texts.unclear_edit(task.title, question),
+                head=texts.unclear_edit(task.title, question),
+                title=task.title,
+                unclear=True,
+                stays=(task.due_at, task.due_precision),
             )
         if not change.changes:
             # Задача всё равно пишется в `edit`: база проверит, что она
@@ -2103,16 +2515,18 @@ class TaskService:
                     people=change.people if edit.people is not None else None,
                     repeat=rule_words(change.repeat),
                 )
-            return Edited(edit=edit_row(task, "change"), reply=reply)
+            return Edited(edit=edit_row(task, "change"), head=reply, title=task.title, stays=stays)
         priority = change.priority if "priority" in change.changes else None
         people = change.people if "people" in change.changes else None
         planned: list[Planned] = []
+        clash: list[str] = []
+        asked = None
         if change.due_changed and change.due_at is None:
             # Срок снят — снято и правило: повторять нечего (§13.5).
             removed = texts.DUE_AND_REPEAT_REMOVED if task.repeat else texts.DUE_REMOVED
             reply = removed.format(title=change.title)
         else:
-            remind_at = clash = None
+            remind_at = None
             if change.due_changed:
                 planned = await self._planner(
                     due_at=change.due_at,
@@ -2121,33 +2535,36 @@ class TaskService:
                     now=now,
                 )
                 remind_at = self._remind_words(planned, now)
-                clash = await self._same_time(change.due_at, change.due_precision, exclude=task.id)
+                clash = await self._same_minute_titles(
+                    change.due_at, change.due_precision, exclude=task.id
+                )
             if change.repeat_removed:
                 head = texts.REPEAT_REMOVED
             elif change.due_changed and not change.repeat_changed:
                 head = texts.MOVED_BY_WORD
             else:
                 head = texts.FIXED
-            asked = None
             if change.lost_at is not None and change.lost_precision is not None:
                 timezone = self._settings.owner_timezone
                 asked = texts.passed_question(
                     change.lost_at.astimezone(timezone), change.lost_precision
                 )
-            reply = paragraphs(
-                texts.edited_reply(
-                    head.format(title=change.title),
-                    self._due_words(change.due_at, change.due_precision),
-                    remind_at,
-                    priority,
-                    people,
-                    repeat=rule_words(change.repeat),
-                    question=asked,
-                ),
-                clash,
+            reply = texts.edited_reply(
+                head.format(title=change.title),
+                self._due_words(change.due_at, change.due_precision),
+                remind_at,
+                priority,
+                people,
+                repeat=rule_words(change.repeat),
+                question=asked,
             )
         return Edited(
-            edit=edit_row(task, "change", changes=change.changes, schedule=planned), reply=reply
+            edit=edit_row(task, "change", changes=change.changes, schedule=planned),
+            head=reply,
+            clash=tuple(clash),
+            title=change.title,
+            asks=asked is not None,
+            stays=stays,
         )
 
     async def _advance(
@@ -2184,7 +2601,7 @@ class TaskService:
             text=texts.REOPEN_BUTTON,
             data=edits.back_data(task.id, moved_from, occurrence_seconds(next_at)),
         )
-        return Edited(edit=edit, reply=reply, buttons=(back,))
+        return Edited(edit=edit, head=reply, buttons=(back,), title=task.title)
 
     async def pick(self, *, chat_id: int, telegram_message_id: int, task_id: str) -> PressOutcome:
         """Кнопка кандидата (§12.6): та же правка для выбранной задачи.

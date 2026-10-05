@@ -417,8 +417,7 @@ async def record_understanding(
     ai_input_tokens: int | None,
     ai_output_tokens: int | None,
     reply: str | None,
-    task: Mapping[str, Any] | None,
-    reminders: Sequence[Mapping[str, Any]],
+    tasks: Sequence[Mapping[str, Any]],
     facts: Sequence[Mapping[str, Any]],
     transcript: str | None = None,
     transcript_confidence: float | None = None,
@@ -426,16 +425,20 @@ async def record_understanding(
     edit: Mapping[str, Any] | None = None,
     photo_text: str | None = None,
     same_task: str | None = None,
-) -> Task | None:
-    """Шаг второй: разбор, ответ бота, задача, напоминания и память — одной транзакцией.
+) -> list[Task]:
+    """Шаг второй: разбор, ответ бота, задачи, напоминания и память — одной транзакцией.
 
-    Возвращает заведённую задачу; `None` — когда задачи и не должно быть
+    Возвращает задачи сообщения: поправленную ответом или правкой, найденную
+    дублем и новые по номерам дел; пусто — когда задачи и не должно быть
     (разговор, сведение о себе). Владелец передаётся явно и сверяется с
     владельцем сообщения на стороне базы (`techspec/04-access.md` §4.3).
 
-    `reminders` — список `{stage, fire_at}` от `services/reminders.py` (§3.5):
-    напоминания рождаются вместе с задачей, иначе отказ между двумя вставками
-    оставил бы задачу, о которой некому напомнить. `facts` — список
+    `tasks` — новые дела сообщения (`techspec/23-several-tasks.md` §23.6):
+    `{item, task, reminders}`, номер дела от 1 до 10. `reminders` — список
+    `{stage, fire_at}` от `services/reminders.py` (§3.5): напоминания
+    рождаются вместе с задачей, иначе отказ между двумя вставками оставил бы
+    задачу, о которой некому напомнить. Отказ базы откатывает сообщение
+    целиком, со всеми делами (§23.3). `facts` — список
     `{category, text, status}` (§3.7): статус уже проставлен ботом, повтор
     по владельцу, категории и тексту база схлопывает сама. `transcript` —
     расшифровка голоса (§9.3): она становится текстом сообщения; у текста и
@@ -444,15 +447,16 @@ async def record_understanding(
     разбора, ответа и задачи: `reply` пуст.
 
     `amend` — ответ на открытый вопрос (`techspec/10-dialog.md` §10.2):
-    `{task_id, fields, reminders}`. Тогда `task` пуст, а база дополняет
-    прежнюю задачу и заменяет её неотправленные напоминания; возвращается
-    она же. Чужая или закрытая задача — отказ базы, а не тихий пропуск.
+    `{task_id, fields, reminders}`: база дополняет прежнюю задачу и заменяет
+    её неотправленные напоминания; она первая в ответе. Чужая или закрытая
+    задача — отказ базы, а не тихий пропуск.
 
     `edit` — правка задачи из списка словом (`techspec/12-chat-edit.md`
-    §12.4): `{task_id, action, changes, schedule, question}`. Тогда `task` и
-    `amend` пусты, а возвращается поправленная, закрытая или убранная
-    задача. Не активная, чужая или удалённая — отказ базы, и откатывается
-    всё, включая разбор и память.
+    §12.4): `{task_id, action, changes, schedule, question}`; `amend` при ней
+    пуст, а поправленная, закрытая или убранная задача — первая в ответе. Не
+    активная, чужая или удалённая — отказ базы, и откатывается всё, включая
+    разбор, новые дела и память. Новые дела идут и рядом с ответом или
+    правкой (§23.3).
 
     `photo_text` — что прочитано со снимка (`techspec/14-photo.md` §14.2):
     ложится в строку сообщения той же транзакцией. В запрос он уходит, только
@@ -460,10 +464,11 @@ async def record_understanding(
     миграции снимка.
 
     `same_task` — задача, которую сообщение дублирует
-    (`techspec/15-duplicates.md` §15.3): новой задачи нет, сообщение ведёт
-    на найденную, возвращается она же. Её закрыли или убрали, пока модель
-    думала, — отказ базы и откат всего. Уходит, только когда есть, как
-    `photo_text`.
+    (`techspec/15-duplicates.md` §15.3): новых дел нет, сообщение ведёт
+    на найденную, возвращается она же. Только у сообщения об одном деле:
+    рядом с делами, ответом или правкой — отказ базы. Её закрыли или убрали,
+    пока модель думала, — отказ базы и откат всего. Уходит, только когда
+    есть, как `photo_text`.
 
     Открытые вопросы владельца база снимает сама (§3.4) — любой записью,
     кроме «не расслышал»: без разбора, задачи и поправки вопрос остаётся.
@@ -476,8 +481,7 @@ async def record_understanding(
         "ai_input_tokens": ai_input_tokens,
         "ai_output_tokens": ai_output_tokens,
         "reply": reply,
-        "task": task,
-        "reminders": list(reminders),
+        "tasks": [dict(entry) for entry in tasks],
         "facts": list(facts),
         "transcript": transcript,
         "transcript_confidence": transcript_confidence,
@@ -488,14 +492,16 @@ async def record_understanding(
         params["photo_text"] = photo_text
     if same_task is not None:
         params["same_task"] = same_task
-    data = single_row(
-        await ask(lambda: db.rpc(RECORD_UNDERSTANDING_FUNCTION, params).execute().data)
-    )
-    # Функция возвращает пустую строку составного типа, когда задачи нет:
-    # у неё нет и `id`, и это не отказ базы, а «записывать было нечего».
-    if data is None or (isinstance(data, Mapping) and data.get("id") is None):
-        return None
-    return task_from_row(data)
+    data = await ask(lambda: db.rpc(RECORD_UNDERSTANDING_FUNCTION, params).execute().data)
+    # Функция отдаёт набор задач: PostgREST — списком, одну строку — бывает и
+    # объектом. Строка без `id` — пустая строка составного типа, «записывать
+    # было нечего», а не отказ базы.
+    rows = data if isinstance(data, list) else [] if data is None else [data]
+    return [
+        task_from_row(row)
+        for row in rows
+        if not (isinstance(row, Mapping) and row.get("id") is None)
+    ]
 
 
 async def same_minute_titles(

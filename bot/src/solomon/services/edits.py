@@ -427,9 +427,16 @@ def back_data(task_id: str, moved_from: int, moved_to: int) -> str:
     return f"{BACK_PREFIX}{task_id}:{moved_from}:{moved_to}"
 
 
-def apart_data(telegram_message_id: int) -> str:
-    """Callback «Записать отдельно»: сообщение владельца, признанное дублем (§15.4)."""
-    return f"{APART_PREFIX}{telegram_message_id}"
+def apart_data(telegram_message_id: int, item: int | None = None) -> str:
+    """Callback «Записать отдельно»: сообщение владельца, признанное дублем (§15.4).
+
+    `item` — номер дела в сообщении о нескольких делах
+    (`techspec/23-several-tasks.md` §23.5); без него — дело номер 1, как у
+    кнопок до этапа 023.
+    """
+    if item is None:
+        return f"{APART_PREFIX}{telegram_message_id}"
+    return f"{APART_PREFIX}{telegram_message_id}:{item}"
 
 
 def _task_id(value: str) -> str | None:
@@ -488,16 +495,27 @@ def parse_back(data: str) -> tuple[str, int, int] | None:
     return task_id, int(moved_from), int(moved_to)
 
 
+def _short_title(title: str) -> str:
+    """Суть на кнопке — до 40 знаков, дальше «…» (§12.6)."""
+    if len(title) > BUTTON_TITLE_LIMIT:
+        return title[:BUTTON_TITLE_LIMIT] + "…"
+    return title
+
+
 def candidate_label(task: TaskDetails, timezone: ZoneInfo) -> str:
     """Надпись кнопки кандидата: суть до 40 знаков и короткий срок (§12.6)."""
-    title = task.title
-    if len(title) > BUTTON_TITLE_LIMIT:
-        title = title[:BUTTON_TITLE_LIMIT] + "…"
+    title = _short_title(task.title)
     if task.due_at is None:
         return title
     return (
         f"{title} — {texts.format_short_due(task.due_at.astimezone(timezone), task.due_precision)}"
     )
+
+
+def apart_label(title: str) -> str:
+    """«Записать отдельно: <суть>» — когда дублей в ответе несколько
+    (`techspec/23-several-tasks.md` §23.5); суть обрезается, как у кандидата."""
+    return f"{texts.APART_BUTTON}: {_short_title(title)}"
 
 
 def pick_question(edit: TaskEdit, now: datetime, timezone: ZoneInfo) -> str:

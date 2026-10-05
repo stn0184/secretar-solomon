@@ -291,6 +291,8 @@ HELP = (
     "Разбираю срок, суть и срочность: «в пятницу отправить расчёт» станет "
     "задачей со сроком. Идею и желание отличаю от дела, разговор задачей не "
     "делаю. Не уверен — записываю и говорю, чего не понял.\n\n"
+    "Можно надиктовать несколько дел одним сообщением — запишу каждое со "
+    "своим сроком.\n\n"
     "Можно и спросить: «что у меня в четверг?» — отвечу по записанному, а "
     "чего не записано, о том так и скажу. Последний час разговора помню, "
     "поэтому можно коротко: «да, можно в четверг». Интернета у меня нет: "
@@ -344,6 +346,20 @@ RECORDED_BY_KIND = {
     "idea": "Записал идею: {title}",
     "wish": "Записал желание: {title}",
 }
+
+# Строка списка, когда новых задач из сообщения две и больше
+# (`techspec/23-several-tasks.md` §23.4): «Записал:» — один раз над списком,
+# а вид звучит только у идеи и желания.
+RECORDED_LIST = "Записал:"
+LISTED_BY_KIND = {
+    "task": "{title}",
+    "idea": "Идея: {title}",
+    "wish": "Желание: {title}",
+}
+
+# Хвост дела, чей вопрос не задан: вопрос в ответе один (§23.3), а своей
+# причины модель не дала.
+REVIEW_DEFAULT = "Не всё понял — перепроверьте"
 
 # Переписка, пересланная разом (`techspec/18-forwarded.md` §18.4): та же
 # таблица, но первые слова ответа говорят, что дело взято из переписки.
@@ -435,6 +451,28 @@ def recorded_reply(
     return _retold(head, due, remind_at, priority, review_reason, repeat)
 
 
+def listed_line(
+    kind: str,
+    title: str,
+    due: str | None = None,
+    review_reason: str | None = None,
+    priority: str = "normal",
+    remind_at: str | None = None,
+    repeat: str | None = None,
+) -> str:
+    """Строка списка (§23.4): пересказ §6.4 без слова «Записал», суть задачи —
+    с заглавной буквы, у идеи и желания — «Идея: …», «Желание: …»."""
+    head = LISTED_BY_KIND.get(kind, LISTED_BY_KIND["task"])
+    named = _upper_first(title) if kind not in ("idea", "wish") else title
+    return _retold(head.format(title=named), due, remind_at, priority, review_reason, repeat)
+
+
+def listed_reply(lines: Sequence[str]) -> str:
+    """«Записал:» и строки списка с номерами с единицы (§23.4)."""
+    numbered = "\n".join(f"{number}. {line}" for number, line in enumerate(lines, start=1))
+    return f"{RECORDED_LIST}\n{numbered}"
+
+
 def asked_reply(
     title: str,
     question: str,
@@ -482,16 +520,20 @@ MESSAGE_UNKNOWN = "Не нашёл это сообщение."
 SAME_TIME_NAMED = 3
 
 
-def same_time(titles: Sequence[str]) -> str:
+def same_time(titles: Sequence[str], title: str | None = None) -> str:
     """Абзац накладки: «В это же время у вас: «встреча с Ренатой».».
 
     Суть — дословно из базы, раньше записанные первыми; больше трёх —
-    «… и ещё N».
+    «… и ещё N». `title` — суть дела, о котором накладка, в ответе о
+    нескольких делах (`techspec/23-several-tasks.md` §23.4): «Купить цветы —
+    в это же время у вас: «позвонить Игорю».».
     """
-    named = ", ".join(f"«{title}»" for title in titles[:SAME_TIME_NAMED])
+    named = ", ".join(f"«{item}»" for item in titles[:SAME_TIME_NAMED])
     rest = len(titles) - SAME_TIME_NAMED
     tail = f" и ещё {rest}" if rest > 0 else ""
-    return f"В это же время у вас: {named}{tail}."
+    if title is None:
+        return f"В это же время у вас: {named}{tail}."
+    return f"{_upper_first(title)} — в это же время у вас: {named}{tail}."
 
 
 def duplicate_reply(title: str, due: str | None = None, repeat: str | None = None) -> str:
@@ -814,6 +856,13 @@ def more_on_photo(items: Sequence[str]) -> str:
     """
     listed = ", ".join(f"«{item}»" for item in items)
     return f"На снимке ещё: {listed}. Нужны — напишите или надиктуйте отдельно."
+
+
+def more_in_message(items: Sequence[str]) -> str:
+    """Абзац о делах сверх десяти (`techspec/23-several-tasks.md` §23.4): они
+    не записаны. Суть — дословно от модели, как у снимка (`more_on_photo`)."""
+    listed = ", ".join(f"«{item}»" for item in items)
+    return f"Ещё в сообщении: {listed}. Нужны — напишите или надиктуйте отдельно."
 
 
 # Переписка, пересланная разом (`techspec/18-forwarded.md` §18.4). Дел нет —

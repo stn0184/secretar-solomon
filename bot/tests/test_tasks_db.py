@@ -357,7 +357,7 @@ async def test_record_message_without_row_is_a_failure() -> None:
 async def test_record_understanding_sends_analysis_and_task() -> None:
     fake = FakeClient(data=ROW)
 
-    task = await db_tasks.record_understanding(
+    tasks = await db_tasks.record_understanding(
         as_client(fake),
         message_id="9a71",
         owner_telegram_id=OWNER_ID,
@@ -366,12 +366,11 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
         ai_input_tokens=120,
         ai_output_tokens=45,
         reply="Записал: купить лампочку",
-        task=TASK_FIELDS,
-        reminders=REMINDER_ROWS,
+        tasks=[{"item": 1, "task": TASK_FIELDS, "reminders": REMINDER_ROWS}],
         facts=FACT_ROWS,
     )
 
-    assert task == Task(id="0e2f", title="купить лампочку", status="active")
+    assert tasks == [Task(id="0e2f", title="купить лампочку", status="active")]
     assert fake.calls[0] == (
         "rpc",
         "record_understanding",
@@ -383,8 +382,7 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
             "ai_input_tokens": 120,
             "ai_output_tokens": 45,
             "reply": "Записал: купить лампочку",
-            "task": TASK_FIELDS,
-            "reminders": REMINDER_ROWS,
+            "tasks": [{"item": 1, "task": TASK_FIELDS, "reminders": REMINDER_ROWS}],
             "facts": FACT_ROWS,
             "transcript": None,
             "transcript_confidence": None,
@@ -394,11 +392,56 @@ async def test_record_understanding_sends_analysis_and_task() -> None:
     )
 
 
+async def test_record_understanding_sends_several_tasks_and_returns_them_all() -> None:
+    """Несколько дел (`techspec/23-several-tasks.md` §23.6): массив дел с номерами
+    — одним вызовом; база отдаёт записанные задачи списком."""
+    second = {**TASK_FIELDS, "title": "забрать костюм из химчистки"}
+    fake = FakeClient(data=[ROW, {**ROW, "id": "7c4d", "title": "забрать костюм из химчистки"}])
+    listed = [
+        {"item": 1, "task": TASK_FIELDS, "reminders": REMINDER_ROWS},
+        {"item": 3, "task": second, "reminders": []},
+    ]
+
+    tasks = await db_tasks.record_understanding(
+        as_client(fake),
+        message_id="9a71",
+        owner_telegram_id=OWNER_ID,
+        analysis=ANALYSIS,
+        ai_model="claude-opus-5",
+        ai_input_tokens=120,
+        ai_output_tokens=90,
+        reply="Записал:\n1. Купить лампочку\n2. Забрать костюм из химчистки",
+        tasks=listed,
+        facts=[],
+    )
+
+    assert fake.calls[0][2]["tasks"] == listed
+    assert [task.id for task in tasks] == ["0e2f", "7c4d"]
+
+
+async def test_record_understanding_broken_task_row_is_a_failure() -> None:
+    fake = FakeClient(data=[{"id": "0e2f"}])
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.record_understanding(
+            as_client(fake),
+            message_id="9a71",
+            owner_telegram_id=OWNER_ID,
+            analysis=ANALYSIS,
+            ai_model="claude-opus-5",
+            ai_input_tokens=120,
+            ai_output_tokens=45,
+            reply="Записал: купить лампочку",
+            tasks=[{"item": 1, "task": TASK_FIELDS, "reminders": []}],
+            facts=[],
+        )
+
+
 async def test_record_understanding_sends_the_edit_instead_of_a_task() -> None:
     """Правка словом (§12.4): ни новой задачи, ни поправки по вопросу."""
     fake = FakeClient(data=ROW)
 
-    task = await db_tasks.record_understanding(
+    tasks = await db_tasks.record_understanding(
         as_client(fake),
         message_id="9a72",
         owner_telegram_id=OWNER_ID,
@@ -407,15 +450,14 @@ async def test_record_understanding_sends_the_edit_instead_of_a_task() -> None:
         ai_input_tokens=120,
         ai_output_tokens=45,
         reply="Перенёс: встреча с Ренатой",
-        task=None,
-        reminders=[],
+        tasks=[],
         facts=[],
         edit=EDIT,
     )
 
-    assert task == Task(id="0e2f", title="купить лампочку", status="active")
+    assert tasks == [Task(id="0e2f", title="купить лампочку", status="active")]
     params = fake.calls[0][2]
-    assert params["task"] is None
+    assert params["tasks"] == []
     assert params["amend"] is None
     assert params["edit"] == EDIT
 
@@ -424,7 +466,7 @@ async def test_record_understanding_sends_the_amendment_instead_of_a_task() -> N
     """Ответ на вопрос дополняет прежнюю задачу (§10.2): новой в запросе нет."""
     fake = FakeClient(data=ROW)
 
-    task = await db_tasks.record_understanding(
+    tasks = await db_tasks.record_understanding(
         as_client(fake),
         message_id="9a72",
         owner_telegram_id=OWNER_ID,
@@ -433,15 +475,14 @@ async def test_record_understanding_sends_the_amendment_instead_of_a_task() -> N
         ai_input_tokens=120,
         ai_output_tokens=45,
         reply="Понял: купить лампочку",
-        task=None,
-        reminders=[],
+        tasks=[],
         facts=[],
         amend=AMEND,
     )
 
-    assert task == Task(id="0e2f", title="купить лампочку", status="active")
+    assert tasks == [Task(id="0e2f", title="купить лампочку", status="active")]
     params = fake.calls[0][2]
-    assert params["task"] is None
+    assert params["tasks"] == []
     assert params["amend"] == AMEND
 
 
@@ -458,8 +499,7 @@ async def test_record_understanding_sends_the_transcript_and_its_confidence() ->
         ai_input_tokens=120,
         ai_output_tokens=45,
         reply="Записал: купить лампочку",
-        task=TASK_FIELDS,
-        reminders=[],
+        tasks=[{"item": 1, "task": TASK_FIELDS, "reminders": []}],
         facts=[],
         transcript="купить лампочку",
         transcript_confidence=0.93,
@@ -504,8 +544,7 @@ async def test_record_understanding_sends_what_was_read_from_the_photo() -> None
         ai_input_tokens=1900,
         ai_output_tokens=310,
         reply="Записал: купить лампочку",
-        task=TASK_FIELDS,
-        reminders=[],
+        tasks=[{"item": 1, "task": TASK_FIELDS, "reminders": []}],
         facts=[],
         photo_text="Этикетка лампочки: цоколь E14, 7 Вт.",
     )
@@ -527,8 +566,7 @@ async def test_record_understanding_without_photo_text_calls_the_function_as_bef
         ai_input_tokens=120,
         ai_output_tokens=45,
         reply="Записал: купить лампочку",
-        task=TASK_FIELDS,
-        reminders=[],
+        tasks=[{"item": 1, "task": TASK_FIELDS, "reminders": []}],
         facts=[],
     )
 
@@ -539,7 +577,7 @@ async def test_record_understanding_sends_the_found_task_of_a_duplicate() -> Non
     """Дубль (§15.3): задачи нет, сообщение ведёт на найденную — тем же вызовом."""
     fake = FakeClient(data=ROW)
 
-    task = await db_tasks.record_understanding(
+    tasks = await db_tasks.record_understanding(
         as_client(fake),
         message_id="9a71",
         owner_telegram_id=OWNER_ID,
@@ -548,16 +586,15 @@ async def test_record_understanding_sends_the_found_task_of_a_duplicate() -> Non
         ai_input_tokens=120,
         ai_output_tokens=45,
         reply="Это уже записано: купить лампочку.",
-        task=None,
-        reminders=[],
+        tasks=[],
         facts=[],
         same_task=TASK_ID,
     )
 
     params = fake.calls[0][2]
     assert params["same_task"] == TASK_ID
-    assert params["task"] is None
-    assert task is not None
+    assert params["tasks"] == []
+    assert tasks == [Task(id="0e2f", title="купить лампочку", status="active")]
 
 
 async def test_record_understanding_without_a_duplicate_calls_the_function_as_before() -> None:
@@ -573,8 +610,7 @@ async def test_record_understanding_without_a_duplicate_calls_the_function_as_be
         ai_input_tokens=120,
         ai_output_tokens=45,
         reply="Записал: купить лампочку",
-        task=TASK_FIELDS,
-        reminders=[],
+        tasks=[{"item": 1, "task": TASK_FIELDS, "reminders": []}],
         facts=[],
     )
 
@@ -583,9 +619,9 @@ async def test_record_understanding_without_a_duplicate_calls_the_function_as_be
 
 async def test_record_understanding_without_task_returns_nothing() -> None:
     """Разговор: разбор записан, задачи нет — и это не отказ базы."""
-    fake = FakeClient(data=None)
+    fake = FakeClient(data=[])
 
-    task = await db_tasks.record_understanding(
+    tasks = await db_tasks.record_understanding(
         as_client(fake),
         message_id="9a71",
         owner_telegram_id=OWNER_ID,
@@ -594,19 +630,18 @@ async def test_record_understanding_without_task_returns_nothing() -> None:
         ai_input_tokens=120,
         ai_output_tokens=45,
         reply="Это не похоже на поручение",
-        task=None,
-        reminders=[],
+        tasks=[],
         facts=[],
     )
 
-    assert task is None
+    assert tasks == []
 
 
 async def test_record_understanding_ignores_empty_composite_row() -> None:
     """PostgREST может отдать пустую строку составного типа вместо null."""
     fake = FakeClient(data={"id": None, "title": None, "status": None})
 
-    task = await db_tasks.record_understanding(
+    tasks = await db_tasks.record_understanding(
         as_client(fake),
         message_id="9a71",
         owner_telegram_id=OWNER_ID,
@@ -615,12 +650,11 @@ async def test_record_understanding_ignores_empty_composite_row() -> None:
         ai_input_tokens=120,
         ai_output_tokens=45,
         reply="Это не похоже на поручение",
-        task=None,
-        reminders=[],
+        tasks=[],
         facts=[],
     )
 
-    assert task is None
+    assert tasks == []
 
 
 async def test_client_error_becomes_database_error() -> None:

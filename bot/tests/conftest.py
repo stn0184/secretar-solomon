@@ -257,7 +257,12 @@ class FakeMessages:
 
 
 class FakeUnderstandings:
-    """Второй шаг приёма: разбор, ответ бота и задача одной транзакцией.
+    """Второй шаг приёма: разбор, ответ бота и задачи одной транзакцией.
+
+    Новые дела (`tasks`, `techspec/23-several-tasks.md` §23.6) фейк хранит
+    целиком под ключом `tasks`, а дело номер 1 раскладывает в прежние `task`
+    и `reminders`: тесты сообщения об одном деле смотрят на них, как до
+    этапа 023. Возвращает `[task]`, когда записано хоть что-то.
 
     С `questions` фейк ведёт открытый вопрос так же, как `record_understanding`
     (`techspec/03-schema.md` §3.4): повтор по сообщению, у которого задача уже
@@ -294,8 +299,7 @@ class FakeUnderstandings:
         ai_input_tokens: int | None,
         ai_output_tokens: int | None,
         reply: str | None,
-        task: Mapping[str, Any] | None,
-        reminders: Sequence[Mapping[str, Any]],
+        tasks: Sequence[Mapping[str, Any]],
         facts: Sequence[Mapping[str, Any]],
         transcript: str | None = None,
         transcript_confidence: float | None = None,
@@ -303,9 +307,12 @@ class FakeUnderstandings:
         edit: Mapping[str, Any] | None = None,
         photo_text: str | None = None,
         same_task: str | None = None,
-    ) -> Task | None:
+    ) -> list[Task]:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
+        first = next((entry for entry in tasks if entry.get("item") == 1), None)
+        task: Mapping[str, Any] | None = first["task"] if first is not None else None
+        reminders: list[Any] = list(first["reminders"]) if first is not None else []
         self.calls.append(
             {
                 "message_id": message_id,
@@ -316,7 +323,8 @@ class FakeUnderstandings:
                 "ai_output_tokens": ai_output_tokens,
                 "reply": reply,
                 "task": task,
-                "reminders": list(reminders),
+                "reminders": reminders,
+                "tasks": [dict(entry) for entry in tasks],
                 "facts": list(facts),
                 "transcript": transcript,
                 "transcript_confidence": transcript_confidence,
@@ -326,23 +334,30 @@ class FakeUnderstandings:
                 "same_task": same_task,
             }
         )
+        recorded = [self.task] if self.task is not None else []
         if message_id in self._with_task:
-            return self.task
+            return recorded
+        new = [entry["task"] for entry in tasks]
         if self.questions is not None:
-            self._follow_question(self.questions, analysis, task, amend or edit)
-        if task is not None and amend is None:
+            self._follow_question(self.questions, analysis, new, amend or edit)
+        if new and amend is None:
             self._with_task.add(message_id)
-        return self.task
+        if not (new or amend or edit or same_task):
+            return []
+        return recorded
 
     def _follow_question(
         self,
         questions: FakeQuestions,
         analysis: Mapping[str, Any] | None,
-        task: Mapping[str, Any] | None,
+        tasks: Sequence[Mapping[str, Any]],
         amend: Mapping[str, Any] | None,
     ) -> None:
-        """Снять и поставить открытый вопрос — по тем же правилам, что база."""
-        if analysis is None and task is None and amend is None:
+        """Снять и поставить открытый вопрос — по тем же правилам, что база.
+
+        Вопрос новых дел — у того одного, что его несёт (§23.3).
+        """
+        if analysis is None and not tasks and amend is None:
             return
         previous = questions.asked
         questions.asked = None
@@ -351,7 +366,8 @@ class FakeUnderstandings:
             if question and previous is not None:
                 # Ответ открыл новый вопрос той же задачи: «На когда перенести?».
                 questions.asked = replace(previous, question=question, asked_at=self._clock())
-            return
+                return
+        task = next((entry for entry in tasks if entry.get("open_question")), None)
         if task is None:
             return
         question = str(task.get("open_question") or "").strip()
