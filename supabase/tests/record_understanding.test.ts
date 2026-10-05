@@ -105,7 +105,11 @@ async function understand(db: PGlite, call: Call): Promise<TaskRow | null> {
     `select * from public.record_understanding(
        message_id => $1, owner_telegram_id => $2, analysis => $3::jsonb,
        ai_model => $4, ai_input_tokens => $5, ai_output_tokens => $6,
-       reply => $7, task => $8::jsonb, reminders => $9::jsonb, facts => $10::jsonb,
+       reply => $7,
+       -- Дело сообщения — одно, номер 1 (§23.6).
+       tasks => case when $8::jsonb is null then null
+                  else jsonb_build_array(jsonb_build_object('item', 1, 'task', $8::jsonb, 'reminders', $9::jsonb)) end,
+       facts => $10::jsonb,
        transcript => null, transcript_confidence => null, amend => $11::jsonb
      )`,
     [
@@ -122,9 +126,8 @@ async function understand(db: PGlite, call: Call): Promise<TaskRow | null> {
       json(call.amend),
     ],
   );
-  // Задачи нет — функция отдаёт пустую строку составного типа, без `id`.
-  const row = only(rows);
-  return row.id === null ? null : row;
+  // Задачи нет — функция не отдаёт ни строки.
+  return rows.length === 0 ? null : only(rows);
 }
 
 /** Поручение с открытым вопросом — то, что оставляет первый проход (§10.1). */

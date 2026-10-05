@@ -109,7 +109,7 @@
 
 - [x] `plan.md` — первым коммитом, до кода (этап L): порядок файлов,
   точные тела функций базы, решения по неоднозначностям.
-- [ ] Миграция `<время>_several_tasks.sql` (§23.6): `tasks.source_item`
+- [x] Миграция `<время>_several_tasks.sql` (§23.6): `tasks.source_item`
   с проверкой и уникальностью, 1 у задач, уже заведённых из сообщений;
   `insert_message_task` и `record_separately` с номером дела;
   `record_understanding` с `tasks` и `setof tasks`, старая подпись

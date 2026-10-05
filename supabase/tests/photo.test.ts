@@ -98,13 +98,17 @@ async function understand(db: PGlite, call: Call): Promise<string | null> {
     `select id from public.record_understanding(
        message_id => $1, owner_telegram_id => $2, analysis => $3::jsonb,
        ai_model => $4, ai_input_tokens => $5, ai_output_tokens => $6,
-       reply => $7, task => $8::jsonb, reminders => $9::jsonb, facts => $10::jsonb,
+       reply => $7,
+       -- Дело сообщения — одно, номер 1 (§23.6).
+       tasks => case when $8::jsonb is null then null
+                  else jsonb_build_array(jsonb_build_object('item', 1, 'task', $8::jsonb, 'reminders', $9::jsonb)) end,
+       facts => $10::jsonb,
        transcript => null, transcript_confidence => null, amend => $11::jsonb${photoText}
      )`,
     params,
   );
-  assert.equal(rows.length, 1);
-  return rows[0]!.id;
+  assert.ok(rows.length <= 1, `ждали не больше одной строки, пришло ${rows.length}`);
+  return rows[0]?.id ?? null;
 }
 
 /** Задача с открытым вопросом «К какому сроку?» (§10.1). */

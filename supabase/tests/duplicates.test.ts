@@ -125,17 +125,20 @@ async function understand(db: PGlite, call: Call): Promise<TaskRow | null> {
     `select * from public.record_understanding(
        message_id => $1, owner_telegram_id => $2, analysis => $3::jsonb,
        ai_model => 'claude-opus-5', ai_input_tokens => 120, ai_output_tokens => 45,
-       reply => $4, task => $5::jsonb, reminders => $6::jsonb, facts => $7::jsonb,
+       reply => $4,
+       -- Дело сообщения — одно, номер 1 (§23.6).
+       tasks => case when $5::jsonb is null then null
+                  else jsonb_build_array(jsonb_build_object('item', 1, 'task', $5::jsonb, 'reminders', $6::jsonb)) end,
+       facts => $7::jsonb,
        transcript => null, transcript_confidence => null,
        amend => $8::jsonb, edit => $9::jsonb${same}
      )`,
     params,
   );
-  const row = only(rows);
-  return row.id === null ? null : row;
+  return rows.length === 0 ? null : only(rows);
 }
 
-/** Нажатие «Записать отдельно» — вызов, как его делает бот. */
+/** Нажатие «Записать отдельно» — вызов, как его делает бот: прежняя кнопка, дело номер 1. */
 async function separately(
   db: PGlite,
   messageId: string,
@@ -145,7 +148,7 @@ async function separately(
   owner = OWNER,
 ): Promise<SeparateRow> {
   const { rows } = await db.query<SeparateRow>(
-    "select id, task_id, reply from public.record_separately($1, $2::uuid, $3::jsonb, $4::jsonb, $5)",
+    "select id, task_id, reply from public.record_separately($1, $2::uuid, $3::jsonb, $4::jsonb, $5, 1::smallint)",
     [owner, messageId, JSON.stringify(task), JSON.stringify(reminders), reply],
   );
   return only(rows);
@@ -414,10 +417,10 @@ test("у каждой функции одна перегрузка, и зовё�
   withDatabase(async (db) => {
     const bot = { anon: false, authenticated: false, service_role: true };
     const expected: Record<string, Record<string, boolean>> = {
-      "public.record_separately(bigint, uuid, jsonb, jsonb, text)": bot,
+      "public.record_separately(bigint, uuid, jsonb, jsonb, text, smallint)": bot,
       // Вложенный вызов проверяет право вызывающего: без `service_role` ключ
       // бота не записал бы ни одной задачи.
-      "public.insert_message_task(bigint, uuid, jsonb, jsonb)": bot,
+      "public.insert_message_task(bigint, uuid, jsonb, jsonb, smallint)": bot,
     };
     for (const [signature, rights] of Object.entries(expected)) {
       const name = signature.slice("public.".length, signature.indexOf("("));
@@ -460,11 +463,11 @@ test("record_separately и внутренняя вставка под anon и au
     const messageId = await message(db);
     const calls: [string, unknown[]][] = [
       [
-        "select * from public.record_separately($1, $2::uuid, $3::jsonb, $4::jsonb, $5)",
+        "select * from public.record_separately($1, $2::uuid, $3::jsonb, $4::jsonb, $5, 1::smallint)",
         [OWNER, messageId, JSON.stringify(MEETING), "[]", "x"],
       ],
       [
-        "select * from public.insert_message_task($1, $2::uuid, $3::jsonb, $4::jsonb)",
+        "select * from public.insert_message_task($1, $2::uuid, $3::jsonb, $4::jsonb, 1::smallint)",
         [OWNER, messageId, JSON.stringify(MEETING), "[]"],
       ],
     ];

@@ -126,7 +126,11 @@ async function understand(db: PGlite, call: Call): Promise<TaskRow | null> {
     `select * from public.record_understanding(
        message_id => $1, owner_telegram_id => $2, analysis => $3::jsonb,
        ai_model => 'claude-opus-5', ai_input_tokens => 120, ai_output_tokens => 45,
-       reply => $4, task => $5::jsonb, reminders => $6::jsonb, facts => $7::jsonb,
+       reply => $4,
+       -- Дело сообщения — одно, номер 1 (§23.6).
+       tasks => case when $5::jsonb is null then null
+                  else jsonb_build_array(jsonb_build_object('item', 1, 'task', $5::jsonb, 'reminders', $6::jsonb)) end,
+       facts => $7::jsonb,
        transcript => null, transcript_confidence => null,
        amend => $8::jsonb, edit => $9::jsonb
      )`,
@@ -142,8 +146,7 @@ async function understand(db: PGlite, call: Call): Promise<TaskRow | null> {
       json(call.edit),
     ],
   );
-  const row = only(rows);
-  return row.id === null ? null : row;
+  return rows.length === 0 ? null : only(rows);
 }
 
 interface Seed {
