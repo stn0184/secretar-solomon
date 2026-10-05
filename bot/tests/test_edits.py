@@ -23,6 +23,7 @@ TZ = ZoneInfo(OWNER_TIMEZONE)
 # Вторник, 29 сентября 2026, полдень в поясе владельца (+05:00).
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=TZ)
 TASK_ID = "5b0c7a52-8f3e-4c1d-9a6b-2e4f1d3c8b90"
+OTHER_ID = "6c1d8b63-9f4e-4d2e-8b7c-3f5e2d4c9a01"
 
 
 def make_task(
@@ -970,19 +971,104 @@ def test_broken_reopen_callback_is_nothing(data: str) -> None:
 
 
 def test_apart_callback_fits_telegram_and_reads_back() -> None:
-    """«Записать отдельно» (§15.4): в callback — только сообщение владельца."""
+    """«Записать отдельно» (§15.4): в callback — только сообщение владельца;
+    без номера — дело номер 1 (`techspec/23-several-tasks.md` §23.5)."""
     data = edits.apart_data(9_999_999_999)
 
     assert data == "apart:9999999999"
     assert len(data.encode()) <= 64
-    assert edits.parse_apart(data) == 9_999_999_999
+    assert edits.parse_apart(data) == (9_999_999_999, 1)
+
+
+def test_apart_callback_with_the_task_number_reads_back() -> None:
+    """Под ответом о нескольких делах — номер дела в сообщении (§23.5)."""
+    data = edits.apart_data(9_999_999_999, 10)
+
+    assert data == "apart:9999999999:10"
+    assert len(data.encode()) <= 64
+    assert edits.parse_apart(data) == (9_999_999_999, 10)
+    assert edits.parse_apart("apart:41:2") == (41, 2)
 
 
 @pytest.mark.parametrize(
-    "data", ["apart:", "apart:x", "apart:-1", "apart:1:2", "apart:١٢", f"reopen:{TASK_ID}", ""]
+    "data",
+    [
+        "apart:",
+        "apart:x",
+        "apart:-1",
+        "apart:١٢",
+        "apart:1:",
+        "apart:1:0",
+        "apart:1:11",
+        "apart:1:x",
+        "apart:1:-2",
+        "apart:1:٢",
+        "apart:1:2:3",
+        f"reopen:{TASK_ID}",
+        "",
+    ],
 )
 def test_broken_apart_callback_is_nothing(data: str) -> None:
     assert edits.parse_apart(data) is None
+
+
+def test_apart_label_names_the_task_when_there_are_several() -> None:
+    assert edits.apart_label("созвон с Ренатой") == "Записать отдельно: созвон с Ренатой"
+    assert edits.apart_label("а" * 41) == "Записать отдельно: " + "а" * 40 + "…"
+
+
+def test_buttons_under_several_tasks_point_to_the_message() -> None:
+    """«Вернуть» под ответом о нескольких делах — номер сообщения владельца
+    вместо задачи (§23.5): итог дописывается к его ответу."""
+    assert edits.bound_to_message(edits.reopen_data(TASK_ID), 41) == "reopen:41"
+    back = edits.bound_to_message(edits.back_data(TASK_ID, 9_999_999_999, 9_999_999_999), 41)
+    assert back == "back:41:9999999999:9999999999"
+    assert edits.bound_to_message(edits.pick_data(41, TASK_ID), 41) == f"pick:41:{TASK_ID}"
+    assert edits.bound_to_message("apart:41:2", 41) == "apart:41:2"
+
+
+def test_message_reopen_and_back_callbacks_read_back() -> None:
+    reopen = edits.bound_to_message(edits.reopen_data(TASK_ID), 9_999_999_999)
+    back = edits.bound_to_message(edits.back_data(TASK_ID, 1, 2), 9_999_999_999)
+
+    assert edits.parse_reopen_message(reopen) == 9_999_999_999
+    assert edits.parse_back_message(back) == (9_999_999_999, 1, 2)
+    # Прежние кнопки с задачей — своим разбором, а не этим.
+    assert edits.parse_reopen(reopen) is None
+    assert edits.parse_back(back) is None
+
+
+@pytest.mark.parametrize(
+    "data", ["reopen:", "reopen:-1", "reopen:١", f"reopen:{TASK_ID}", "back:41:1:2", ""]
+)
+def test_broken_message_reopen_callback_is_nothing(data: str) -> None:
+    assert edits.parse_reopen_message(data) is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    ["back:41", "back:41:1", "back:41:x:2", "back:-1:1:2", f"back:{TASK_ID}:1:2", "reopen:41", ""],
+)
+def test_broken_message_back_callback_is_nothing(data: str) -> None:
+    assert edits.parse_back_message(data) is None
+
+
+def test_pressed_pick_takes_all_pick_buttons_along() -> None:
+    """Нажатый вопрос теряет свои кнопки (§23.5): выбор — все кнопки выбора."""
+    pressed = f"pick:41:{TASK_ID}"
+
+    assert not edits.keeps_button(pressed, pressed)
+    assert not edits.keeps_button(f"pick:41:{OTHER_ID}", pressed)
+    assert edits.keeps_button("apart:41:2", pressed)
+    assert edits.keeps_button("reopen:41", pressed)
+
+
+def test_pressed_apart_or_reopen_takes_only_itself() -> None:
+    assert not edits.keeps_button("apart:41:2", "apart:41:2")
+    assert edits.keeps_button("apart:41:3", "apart:41:2")
+    assert edits.keeps_button(f"pick:41:{TASK_ID}", "apart:41:2")
+    assert not edits.keeps_button("reopen:41", "reopen:41")
+    assert edits.keeps_button("apart:41:2", "reopen:41")
 
 
 def test_candidate_button_carries_the_title_and_a_short_due() -> None:

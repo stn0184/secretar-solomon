@@ -6,28 +6,47 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
+from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from solomon import texts
+from solomon.config import Settings
 from solomon.db.reminders import Planned
-from solomon.db.tasks import OpenQuestion, SavedMessage
-from solomon.services.tasks import MAX_ITEMS, Button, several_items
+from solomon.db.tasks import OpenQuestion, SavedMessage, StoredMessage
+from solomon.runner import build_dispatcher
+from solomon.services.tasks import (
+    MAX_ITEMS,
+    Button,
+    PressOutcome,
+    TaskService,
+    several_items,
+)
 from tests.conftest import (
+    OWNER_ID,
     FakeAnalyst,
+    FakeEdits,
     FakeMessages,
     FakePlanner,
     FakeQuestions,
     FakeTranscriber,
     FakeUnderstandings,
+    RecordingSession,
+    make_callback_update,
     make_item,
     make_message_understanding,
 )
+from tests.test_chat_edit_handlers import build_tasks, rows
 from tests.test_chat_edit_service import (
+    MEETING,
     MEETING_ID,
     MESSAGE_ID,
     MONDAY,
     NOW,
+    OPEN,
     REPORT,
     REPORT_ID,
     TODAY_FIVE,
@@ -591,3 +610,334 @@ async def test_database_failure_records_none_of_the_tasks() -> None:
 
     assert not outcome.ok
     assert outcome.message == texts.NOT_SAVED
+
+
+# ------------------------------------------- кнопки под ответом о делах (§23.5)
+
+
+def done_and_flowers() -> Any:
+    """«Встречу с Ренатой сделал, и купить цветы»."""
+    return make_message_understanding(
+        title="встреча с Ренатой",
+        edit=edit(task=1, action="done"),
+        also=[make_item(title="купить цветы")],
+    )
+
+
+def two_duplicates() -> Any:
+    return make_message_understanding(
+        title="позвонить Игорю",
+        also=[dup("созвон с Ренатой", 1), dup("отправить отчёт Петрову", 2)],
+    )
+
+
+TWO_DUPLICATES_REPLY = f"Записал: позвонить Игорю\n\n{MEETING_SAID}\n\n{REPORT_SAID}"
+
+
+def candidates_and_flowers() -> Any:
+    return make_message_understanding(
+        title="встреча",
+        edit=edit(task=None, candidates=[2, 1], due_at=MONDAY, due_precision="day"),
+        also=[make_item(title="купить цветы")],
+    )
+
+
+CANDIDATES_REPLY = "Записал: купить цветы\n\nКакую задачу перенести на понедельник, 5 октября?"
+
+
+def stored(verdict: Any, reply: str, task_id: str | None = None) -> StoredMessage:
+    """Сообщение о нескольких делах, как оно лежит в базе после записи."""
+    return StoredMessage(
+        id="9a71",
+        text="несколько дел",
+        task_id=task_id,
+        analysis=verdict.model_dump(mode="json"),
+        reply=reply,
+    )
+
+
+def store_with(message: StoredMessage, **fields: Any) -> FakeEdits:
+    tasks = [replace(MEETING, status="done") if task.id == MEETING_ID else task for task in OPEN]
+    return FakeEdits(tasks, messages={MESSAGE_ID: message}, **fields)
+
+
+def service_on(store: FakeEdits) -> TaskService:
+    service, _, _, _, _ = build(make_message_understanding(), store)
+    return service
+
+
+async def apart(service: TaskService, item: int) -> PressOutcome:
+    return await service.apart(chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, item=item)
+
+
+async def test_reopen_under_several_tasks_carries_the_message() -> None:
+    """«Вернуть» под ответом о нескольких делах несёт сообщение владельца."""
+    service, _, _, _, _ = build(done_and_flowers())
+
+    outcome = await say(service, "встречу сделал, и купить цветы")
+
+    assert paragraphs_of(outcome.message)[1] == "Записал: купить цветы"
+    assert outcome.buttons == (Button(text=texts.REOPEN_BUTTON, data=f"reopen:{MESSAGE_ID}"),)
+
+
+async def test_apart_under_several_tasks_records_only_its_task() -> None:
+    """Дело берётся по номеру; итог — новым сообщением, список не стёрт."""
+    store = store_with(stored(two_duplicates(), TWO_DUPLICATES_REPLY))
+    service = service_on(store)
+
+    outcome = await apart(service, 3)
+
+    assert outcome == PressOutcome(
+        message="Записал: отправить отчёт Петрову", replace=False, follow_up=True
+    )
+    [(message_id, task, _, written)] = store.separates
+    assert message_id == "9a71"
+    assert task["title"] == "отправить отчёт Петрову"
+    assert store.separate_items == [3]
+    assert written == f"{TWO_DUPLICATES_REPLY}\n\nЗаписал: отправить отчёт Петрову"
+    assert store.messages[MESSAGE_ID].task_id is None
+
+
+async def test_second_apart_under_several_tasks_writes_nothing() -> None:
+    store = store_with(stored(two_duplicates(), TWO_DUPLICATES_REPLY))
+    service = service_on(store)
+
+    await apart(service, 3)
+    second = await apart(service, 3)
+
+    assert second == PressOutcome(message=texts.PRESSED_BEFORE, replace=False)
+    assert len(store.separates) == 1
+
+
+async def test_two_duplicates_are_recorded_each_by_its_button() -> None:
+    store = store_with(stored(two_duplicates(), TWO_DUPLICATES_REPLY))
+    service = service_on(store)
+
+    first = await apart(service, 2)
+    second = await apart(service, 3)
+
+    assert (first.follow_up, second.follow_up) == (True, True)
+    assert [task["title"] for _, task, _, _ in store.separates] == [
+        "созвон с Ренатой",
+        "отправить отчёт Петрову",
+    ]
+    assert store.separate_items == [2, 3]
+    assert paragraphs_of(store.messages[MESSAGE_ID].reply or "")[-2:] == [
+        "Записал: созвон с Ренатой",
+        "Записал: отправить отчёт Петрову",
+    ]
+
+
+async def test_apart_of_a_missing_item_finds_nothing() -> None:
+    """Номера нет в разборе (сообщение об одном деле) — «Не нашёл»."""
+    single = make_message_understanding(title="созвон с Ренатой", same_as=1)
+    store = store_with(stored(single, MEETING_SAID))
+    service = service_on(store)
+
+    outcome = await apart(service, 2)
+
+    assert outcome == PressOutcome(message=texts.MESSAGE_UNKNOWN, replace=False)
+    assert store.separates == []
+
+
+async def test_pick_under_several_tasks_answers_with_a_new_message() -> None:
+    """Выбор задачи: итог новым сообщением и абзацем к ответу в базе."""
+    store = store_with(stored(candidates_and_flowers(), CANDIDATES_REPLY))
+    service = service_on(store)
+
+    outcome = await service.pick(
+        chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=REPORT_ID
+    )
+
+    assert outcome.follow_up
+    assert not outcome.replace
+    assert outcome.message.startswith("Перенёс: отправить отчёт")
+    [(_, _, written)] = store.picks
+    assert written == f"{CANDIDATES_REPLY}\n\n{outcome.message}"
+
+
+async def test_second_pick_under_several_tasks_writes_nothing() -> None:
+    store = store_with(stored(candidates_and_flowers(), CANDIDATES_REPLY))
+    service = service_on(store)
+
+    await service.pick(chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=REPORT_ID)
+    second = await service.pick(
+        chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=MEETING_ID
+    )
+
+    assert second == PressOutcome(message=texts.PRESSED_BEFORE, replace=False)
+    assert len(store.picks) == 1
+
+
+DONE_REPLY = "Закрыл: встреча с Ренатой\n\nЗаписал: купить цветы"
+
+
+async def test_reopen_in_message_returns_the_task_of_the_message() -> None:
+    """«Вернуть»: задача — `task_id` сообщения; итог дописан к ответу."""
+    store = store_with(stored(done_and_flowers(), DONE_REPLY, task_id=MEETING_ID))
+    service = service_on(store)
+
+    outcome = await service.reopen_in_message(chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID)
+
+    assert outcome.follow_up
+    assert outcome.message.startswith("Вернул в работу: встреча с Ренатой")
+    assert [task_id for task_id, _ in store.reopens] == [MEETING_ID]
+    assert store.appends == [("9a71", outcome.message)]
+    assert store.messages[MESSAGE_ID].reply == f"{DONE_REPLY}\n\n{outcome.message}"
+
+
+async def test_reopen_in_message_without_its_task_finds_nothing() -> None:
+    store = store_with(stored(done_and_flowers(), DONE_REPLY))
+    service = service_on(store)
+
+    outcome = await service.reopen_in_message(chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID)
+
+    assert outcome == PressOutcome(message=texts.DONE_UNKNOWN, replace=False)
+    assert store.reopens == []
+
+
+async def test_reopen_in_message_survives_a_failed_append() -> None:
+    """Задача вернулась, абзац не дописан — итог владелец всё равно видит."""
+    message = stored(done_and_flowers(), DONE_REPLY, task_id=MEETING_ID)
+    store = store_with(message, broken={"append_reply"})
+    service = service_on(store)
+
+    outcome = await service.reopen_in_message(chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID)
+
+    assert outcome.follow_up
+    assert outcome.message.startswith("Вернул в работу")
+
+
+async def test_back_in_message_of_a_one_off_task_changes_nothing() -> None:
+    store = store_with(stored(done_and_flowers(), DONE_REPLY, task_id=MEETING_ID))
+    service = service_on(store)
+
+    outcome = await service.back_in_message(
+        chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, back_to=1, moved_from=2
+    )
+
+    assert outcome == PressOutcome(message=texts.GONE_FURTHER, replace=False)
+    assert store.appends == []
+
+
+# ------------------------------------------------- нажатие в Telegram (§23.5)
+
+
+def markup(*buttons: tuple[str, str]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text, callback_data=data)] for text, data in buttons
+        ]
+    )
+
+
+APART_TWO = ("Записать отдельно: созвон с Ренатой", f"apart:{MESSAGE_ID}:2")
+APART_THREE = ("Записать отдельно: отправить отчёт Петрову", f"apart:{MESSAGE_ID}:3")
+
+
+async def test_press_under_several_tasks_keeps_the_text_and_the_other_buttons(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    """Текст ответа не меняется, нажатая кнопка снята, итог — новым сообщением."""
+    store = store_with(stored(two_duplicates(), TWO_DUPLICATES_REPLY))
+    service, _, _ = build_tasks(settings, store=store)
+    dispatcher = build_dispatcher(settings, tasks=service)
+    press = make_callback_update(
+        f"apart:{MESSAGE_ID}:3",
+        text=TWO_DUPLICATES_REPLY,
+        update_id=7,
+        reply_markup=markup(APART_TWO, APART_THREE),
+    )
+
+    await dispatcher.feed_update(bot, press)
+
+    assert session.texts == ["Записал: отправить отчёт Петрову"]
+    assert session.edits == []
+    [kept] = session.markups
+    assert kept.message_id == 7
+    assert rows(kept.reply_markup) == [[APART_TWO]]
+    assert session.answers == [None]
+
+
+async def test_pick_under_several_tasks_drops_every_pick_button(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    store = store_with(stored(candidates_and_flowers(), CANDIDATES_REPLY))
+    service, _, _ = build_tasks(settings, store=store)
+    dispatcher = build_dispatcher(settings, tasks=service)
+    press = make_callback_update(
+        f"pick:{MESSAGE_ID}:{REPORT_ID}",
+        text=CANDIDATES_REPLY,
+        update_id=7,
+        reply_markup=markup(
+            ("отправить отчёт", f"pick:{MESSAGE_ID}:{REPORT_ID}"),
+            ("встреча с Ренатой", f"pick:{MESSAGE_ID}:{MEETING_ID}"),
+        ),
+    )
+
+    await dispatcher.feed_update(bot, press)
+
+    [follow_up] = session.texts
+    assert follow_up.startswith("Перенёс: отправить отчёт")
+    assert session.edits == []
+    [dropped] = session.markups
+    assert dropped.reply_markup is None
+
+
+async def test_reopen_under_several_tasks_answers_with_a_new_message(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    store = store_with(stored(done_and_flowers(), DONE_REPLY, task_id=MEETING_ID))
+    service, _, _ = build_tasks(settings, store=store)
+    dispatcher = build_dispatcher(settings, tasks=service)
+    press = make_callback_update(
+        f"reopen:{MESSAGE_ID}",
+        text=DONE_REPLY,
+        update_id=7,
+        reply_markup=markup((texts.REOPEN_BUTTON, f"reopen:{MESSAGE_ID}"), APART_TWO),
+    )
+
+    await dispatcher.feed_update(bot, press)
+
+    [follow_up] = session.texts
+    assert follow_up.startswith("Вернул в работу: встреча с Ренатой")
+    assert session.edits == []
+    assert rows(session.markups[0].reply_markup) == [[APART_TWO]]
+    assert store.appends == [("9a71", follow_up)]
+
+
+async def test_back_under_several_tasks_reads_the_message_callback(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    """`back:<сообщение>:<раз>:<раз>` доходит до задачи сообщения."""
+    store = store_with(stored(done_and_flowers(), DONE_REPLY, task_id=MEETING_ID))
+    service, _, _ = build_tasks(settings, store=store)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    await dispatcher.feed_update(
+        bot, make_callback_update(f"back:{MESSAGE_ID}:1:2", text=DONE_REPLY, update_id=7)
+    )
+
+    assert ("task", MEETING_ID) in store.calls
+    assert session.answers == [texts.GONE_FURTHER]
+    assert session.texts == []
+
+
+async def test_second_press_under_several_tasks_only_pops_up(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    store = store_with(stored(two_duplicates(), TWO_DUPLICATES_REPLY))
+    service, _, _ = build_tasks(settings, store=store)
+    dispatcher = build_dispatcher(settings, tasks=service)
+
+    for update_id in (7, 8):
+        await dispatcher.feed_update(
+            bot,
+            make_callback_update(
+                f"apart:{MESSAGE_ID}:3", text=TWO_DUPLICATES_REPLY, update_id=update_id
+            ),
+        )
+
+    assert session.texts == ["Записал: отправить отчёт Петрову"]
+    assert session.answers == [None, texts.PRESSED_BEFORE]
+    assert len(store.separates) == 1

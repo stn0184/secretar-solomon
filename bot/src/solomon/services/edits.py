@@ -48,11 +48,16 @@ DAY_DUE_TIME = time(18, 0)
 # `reopen:<задача>`, `back:<задача>:<раз откуда>:<раз куда>` — «Вернуть»
 # повторяющейся задачи, разы в секундах Unix (`techspec/13-repeat.md` §13.3);
 # `apart:<сообщение владельца>` — «Записать отдельно» под дублем
-# (`techspec/15-duplicates.md` §15.4).
+# (`techspec/15-duplicates.md` §15.4). Под ответом о нескольких делах
+# (`techspec/23-several-tasks.md` §23.5) — `apart:<сообщение>:<номер дела>`,
+# а «Вернуть» несёт сообщение владельца вместо задачи: `reopen:<сообщение>`,
+# `back:<сообщение>:<раз откуда>:<раз куда>`.
 PICK_PREFIX = "pick:"
 REOPEN_PREFIX = "reopen:"
 BACK_PREFIX = "back:"
 APART_PREFIX = "apart:"
+# Дел на одно сообщение (§23.3): номер дела в callback — от 1 до этого.
+ITEM_LIMIT = 10
 
 # На что ответили свайпом (§12.2): напоминание, другое сообщение бота, своё.
 SwipeTarget = Literal["reminder", "bot", "own"]
@@ -467,15 +472,82 @@ def parse_reopen(data: str) -> str | None:
     return _task_id(data.removeprefix(REOPEN_PREFIX))
 
 
-def parse_apart(data: str) -> int | None:
-    """Разобрать callback «Записать отдельно». Кривой — `None`: номер
-    сообщения — только цифры ASCII без знака."""
+def _digits(value: str) -> int | None:
+    """Целое из цифр ASCII без знака — или `None`."""
+    if value.isascii() and value.isdigit():
+        return int(value)
+    return None
+
+
+def parse_apart(data: str) -> tuple[int, int] | None:
+    """Разобрать callback «Записать отдельно»: сообщение владельца и номер дела.
+
+    Номера нет — дело номер 1, как у кнопок до этапа 023
+    (`techspec/23-several-tasks.md` §23.5). Кривой — `None`: номера —
+    только цифры ASCII без знака, дело — от 1 до 10.
+    """
     if not data.startswith(APART_PREFIX):
         return None
-    message = data.removeprefix(APART_PREFIX)
-    if not (message.isascii() and message.isdigit()):
+    message, joined, item = data.removeprefix(APART_PREFIX).partition(":")
+    telegram_message_id = _digits(message)
+    if telegram_message_id is None:
         return None
-    return int(message)
+    if not joined:
+        return telegram_message_id, 1
+    number = _digits(item)
+    if number is None or not 1 <= number <= ITEM_LIMIT:
+        return None
+    return telegram_message_id, number
+
+
+def bound_to_message(data: str, telegram_message_id: int) -> str:
+    """Callback кнопки под ответом о нескольких делах (§23.5).
+
+    «Вернуть» несёт сообщение владельца вместо задачи: итог нажатия
+    дописывается к ответу этого сообщения, а задача — его `task_id`. Рядом
+    с uuid и двумя разами номер сообщения в 64 байта не влезает. Остальные
+    кнопки сообщение уже несут — как есть.
+    """
+    if parse_reopen(data) is not None:
+        return f"{REOPEN_PREFIX}{telegram_message_id}"
+    back = parse_back(data)
+    if back is not None:
+        _, moved_from, moved_to = back
+        return f"{BACK_PREFIX}{telegram_message_id}:{moved_from}:{moved_to}"
+    return data
+
+
+def parse_reopen_message(data: str) -> int | None:
+    """Разобрать «Вернуть» под ответом о нескольких делах: сообщение владельца."""
+    if not data.startswith(REOPEN_PREFIX):
+        return None
+    return _digits(data.removeprefix(REOPEN_PREFIX))
+
+
+def parse_back_message(data: str) -> tuple[int, int, int] | None:
+    """Разобрать «Вернуть» повторяющейся под ответом о нескольких делах:
+    сообщение владельца, раз откуда, раз куда."""
+    if not data.startswith(BACK_PREFIX):
+        return None
+    parts = data.removeprefix(BACK_PREFIX).split(":")
+    if len(parts) != 3:
+        return None
+    numbers = [_digits(part) for part in parts]
+    message, moved_from, moved_to = numbers
+    if message is None or moved_from is None or moved_to is None:
+        return None
+    return message, moved_from, moved_to
+
+
+def keeps_button(data: str, pressed: str) -> bool:
+    """Остаётся ли кнопка под ответом о нескольких делах после нажатия (§23.5).
+
+    Исчезают кнопки нажатого вопроса: выбор задачи — все кнопки выбора,
+    «Записать отдельно» и «Вернуть» — только сама нажатая.
+    """
+    if data == pressed:
+        return False
+    return not (pressed.startswith(PICK_PREFIX) and data.startswith(PICK_PREFIX))
 
 
 def parse_back(data: str) -> tuple[str, int, int] | None:

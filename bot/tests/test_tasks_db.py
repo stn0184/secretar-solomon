@@ -1668,8 +1668,53 @@ async def test_record_separately_sends_the_task_the_plan_and_the_reply() -> None
             "task": TASK_FIELDS,
             "reminders": plan,
             "reply": "Записал: встреча",
+            "item": 1,
         },
     )
+
+
+async def test_record_separately_sends_the_item_of_the_message() -> None:
+    """Дубль среди нескольких дел (`techspec/23-several-tasks.md` §23.5): номер дела."""
+    fake = FakeClient(data={"id": "9a71", "task_id": TASK_ID, "reply": "Записал: встреча"})
+
+    await db_tasks.record_separately(
+        as_client(fake),
+        owner_telegram_id=OWNER_ID,
+        message_id="9a71",
+        task=TASK_FIELDS,
+        reminders=[],
+        reply="Записал: встреча",
+        item=3,
+    )
+
+    assert fake.calls[0][2]["item"] == 3
+
+
+async def test_append_reply_sends_the_paragraph() -> None:
+    """Итог нажатия под ответом о нескольких делах дописывается к ответу (§23.5)."""
+    fake = FakeClient(
+        data={"id": "9a71", "task_id": TASK_ID, "reply": "Записал: 2 дела\n\nВернул."}
+    )
+
+    saved = await db_tasks.append_reply(
+        as_client(fake), owner_telegram_id=OWNER_ID, message_id="9a71", paragraph="Вернул."
+    )
+
+    assert saved == PickedMessage(id="9a71", task_id=TASK_ID, reply="Записал: 2 дела\n\nВернул.")
+    assert fake.calls[0] == (
+        "rpc",
+        "append_reply",
+        {"owner_telegram_id": OWNER_ID, "message_id": "9a71", "paragraph": "Вернул."},
+    )
+
+
+async def test_append_reply_without_a_row_is_a_failure() -> None:
+    fake = FakeClient(data=None)
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.append_reply(
+            as_client(fake), owner_telegram_id=OWNER_ID, message_id="9a71", paragraph="Вернул."
+        )
 
 
 async def test_record_separately_without_a_row_is_a_failure() -> None:
@@ -2036,6 +2081,7 @@ def test_owner_is_required_by_every_query() -> None:
         db_tasks.message_by_telegram_id,
         db_tasks.pick_task,
         db_tasks.record_separately,
+        db_tasks.append_reply,
         db_tasks.same_minute_titles,
         db_tasks.list_task_people,
         db_reminders.reopen_task,

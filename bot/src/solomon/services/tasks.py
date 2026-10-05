@@ -150,8 +150,9 @@ QUESTION_TTL = timedelta(hours=24)
 NAME_TASKS_LIMIT = 200
 NAME_FACTS_LIMIT = 200
 # Дел на одно сообщение (`techspec/23-several-tasks.md` §23.3): верх и девять
-# из `also`; остальные называются сутью, а не записываются.
-MAX_ITEMS = 10
+# из `also`; остальные называются сутью, а не записываются. Тот же предел
+# проверяет callback «Записать отдельно» с номером дела (§23.5).
+MAX_ITEMS = edits.ITEM_LIMIT
 
 
 def summarize(text: str) -> str:
@@ -189,11 +190,17 @@ class PressOutcome:
     `replace` — сообщение с кнопками заменяется текстом `message` и кнопками
     `buttons`; иначе `message` — всплывающий ответ, а сообщение и его кнопки
     остаются, чтобы нажать ещё раз (как «Сделано», когда база не ответила).
+
+    `follow_up` — нажатие под ответом о нескольких делах
+    (`techspec/23-several-tasks.md` §23.5): текст ответа не меняется, с него
+    снимаются кнопки нажатого вопроса, а `message` с кнопками `buttons`
+    приходит новым сообщением.
     """
 
     message: str
     replace: bool
     buttons: tuple[Button, ...] = ()
+    follow_up: bool = False
 
 
 class MessageRecorder(Protocol):
@@ -424,7 +431,10 @@ class EditStore(Protocol):
         task: Mapping[str, Any],
         reminders: Sequence[Planned],
         reply: str,
+        item: int = 1,
     ) -> PickedMessage: ...
+
+    async def append_reply(self, message_id: str, paragraph: str) -> PickedMessage: ...
 
     async def reopen(self, task_id: str, schedule: Sequence[Planned]) -> TaskDetails | None: ...
 
@@ -523,14 +533,21 @@ class DatabaseEditStore:
         task: Mapping[str, Any],
         reminders: Sequence[Planned],
         reply: str,
+        item: int = 1,
     ) -> PickedMessage:
         return await db_tasks.record_separately(
             self._db,
             owner_telegram_id=self._owner,
             message_id=message_id,
             task=task,
-            reminders=[item.as_row() for item in reminders],
+            reminders=[planned.as_row() for planned in reminders],
             reply=reply,
+            item=item,
+        )
+
+    async def append_reply(self, message_id: str, paragraph: str) -> PickedMessage:
+        return await db_tasks.append_reply(
+            self._db, owner_telegram_id=self._owner, message_id=message_id, paragraph=paragraph
         )
 
     async def reopen(self, task_id: str, schedule: Sequence[Planned]) -> TaskDetails | None:
@@ -598,6 +615,27 @@ def several_items(also: Sequence[TaskItem]) -> tuple[list[tuple[int, TaskItem]],
         else:
             beyond.append(title)
     return numbered, beyond
+
+
+def is_several(understanding: Understanding) -> bool:
+    """Сообщение о нескольких делах (`techspec/23-several-tasks.md` §23.5) —
+    то, чей разбор пошёл путём `_decide_several`: в `also` есть дело с сутью."""
+    numbered, beyond = several_items(also_of(understanding))
+    return bool(numbered or beyond)
+
+
+def item_of(understanding: Understanding, item: int) -> Understanding | None:
+    """Дело номер `item` из сохранённого разбора (§23.3) как разбор об одном
+    деле; номера в разборе нет — `None`.
+
+    Номер 1 — сам разбор: его поля верхнего уровня; `also` запись одного
+    дела не читает.
+    """
+    if item == 1:
+        return understanding
+    numbered, _ = several_items(also_of(understanding))
+    found = next((entry for number, entry in numbered if number == item), None)
+    return found.as_understanding() if found is not None else None
 
 
 def review_reason(understanding: Understanding, rule: RuleOutcome) -> str | None:
@@ -2124,7 +2162,14 @@ class TaskService:
             reminders=first.reminders if first is not None else [],
             amend=top.amend,
             edit=top.edit,
-            buttons=top.buttons + apart + top.picks,
+            buttons=tuple(
+                Button(
+                    text=button.text, data=edits.bound_to_message(button.data, telegram_message_id)
+                )
+                for button in top.buttons
+            )
+            + apart
+            + top.picks,
             more=tuple(row for row in rows if row.item != 1),
         )
 
@@ -2612,6 +2657,10 @@ class TaskService:
         легла: своя — ответ и кнопка «Вернуть», прежняя (второе нажатие,
         другая кнопка) — сохранённый текст без кнопок. Отказ базы — всплывающий
         ответ, вопрос с кнопками остаётся (решение 10 плана).
+
+        Под ответом о нескольких делах (`techspec/23-several-tasks.md` §23.5)
+        итог — новым сообщением, а в `messages.reply` он ложится абзацем к
+        прежнему ответу; второе нажатие — подсказка, что правка уже сделана.
         """
         store = self._edits
         if store is None:
@@ -2620,25 +2669,36 @@ class TaskService:
             stored = await store.message(chat_id, telegram_message_id)
             if stored is None:
                 return PressOutcome(message=texts.DONE_UNKNOWN, replace=False)
-            if stored.task_id is not None:
-                return self._picked_before(stored.reply)
             understanding = self._stored_understanding(stored)
+            several = understanding is not None and is_several(understanding)
+            if stored.task_id is not None:
+                return self._pressed_before() if several else self._picked_before(stored.reply)
             if understanding is None or understanding.edit is None:
                 return PressOutcome(message=texts.DONE_UNKNOWN, replace=False)
             task = await store.task(task_id)
             if task is None or task.status != db_tasks.ACTIVE_STATUS:
                 return PressOutcome(message=texts.PICKED_GONE, replace=False)
             edited = await self._edit_known(understanding, understanding.edit, task, self._clock())
-            picked = await store.pick(stored.id, edited.edit, edited.reply)
+            reply = paragraphs(stored.reply, edited.reply) if several else edited.reply
+            picked = await store.pick(stored.id, edited.edit, reply)
         except DatabaseError as error:
             logger.warning("Выбор задачи не записан: %s", error)
             return PressOutcome(message=texts.NOT_PICKED, replace=False)
         if picked.task_id is None:
             return PressOutcome(message=texts.PICKED_GONE, replace=False)
-        if picked.task_id == task.id and picked.reply == edited.reply:
+        if picked.task_id == task.id and picked.reply == reply:
             logger.info("Выбрана задача %s: %s", task.id, edited.edit["action"])
-            return PressOutcome(message=edited.reply, replace=True, buttons=edited.buttons)
-        return self._picked_before(picked.reply)
+            return PressOutcome(
+                message=edited.reply, replace=not several, buttons=edited.buttons, follow_up=several
+            )
+        return self._pressed_before() if several else self._picked_before(picked.reply)
+
+    @staticmethod
+    def _pressed_before() -> PressOutcome:
+        """Нажатие под ответом о нескольких делах уже записано (§23.5): ответ
+        не переписывается — подсказка."""
+        logger.info("Нажатие под ответом о нескольких делах уже записано: второй раз не пишем")
+        return PressOutcome(message=texts.PRESSED_BEFORE, replace=False)
 
     @staticmethod
     def _picked_before(reply: str | None) -> PressOutcome:
@@ -2648,7 +2708,7 @@ class TaskService:
             return PressOutcome(message=texts.DONE_UNKNOWN, replace=False)
         return PressOutcome(message=reply, replace=True)
 
-    async def apart(self, *, chat_id: int, telegram_message_id: int) -> PressOutcome:
+    async def apart(self, *, chat_id: int, telegram_message_id: int, item: int = 1) -> PressOutcome:
         """Кнопка «Записать отдельно» под дублем (`techspec/15-duplicates.md` §15.4).
 
         Разбор берётся из базы — из сообщения владельца, которое бот счёл
@@ -2657,6 +2717,11 @@ class TaskService:
         транзакцией и возвращает ответ той записи, что легла: этого нажатия
         или прежнего, — второе нажатие ничего не пишет. Отказ базы или плана —
         подсказка, кнопка остаётся.
+
+        `item` — номер дела в сообщении (`techspec/23-several-tasks.md` §23.5):
+        дело берётся из сохранённого разбора по номеру. Под ответом о
+        нескольких делах итог — новым сообщением, абзацем к прежнему ответу в
+        `messages.reply`; второе нажатие — подсказка, текст не переписывается.
         """
         store = self._edits
         if store is None:
@@ -2664,9 +2729,13 @@ class TaskService:
         try:
             stored = await store.message(chat_id, telegram_message_id)
             understanding = self._stored_understanding(stored) if stored is not None else None
-            if stored is None or understanding is None or understanding.kind not in TASK_KINDS:
+            chosen = item_of(understanding, item) if understanding is not None else None
+            if stored is None or understanding is None or chosen is None:
                 return PressOutcome(message=texts.MESSAGE_UNKNOWN, replace=False)
-            decision = await self._new_task(understanding, self._clock())
+            if chosen.kind not in TASK_KINDS:
+                return PressOutcome(message=texts.MESSAGE_UNKNOWN, replace=False)
+            several = is_several(understanding)
+            decision = await self._new_task(chosen, self._clock())
             if decision.task is None:
                 return PressOutcome(message=texts.MESSAGE_UNKNOWN, replace=False)
             reply = decision.reply
@@ -2674,12 +2743,18 @@ class TaskService:
                 reply = paragraphs(reply, texts.more_on_photo(understanding.more_tasks))
             if isinstance(understanding, ConversationUnderstanding) and understanding.more_tasks:
                 reply = paragraphs(reply, texts.more_in_conversation(understanding.more_tasks))
+            written = paragraphs(stored.reply, reply) if several else reply
             picked = await store.record_separately(
-                stored.id, decision.task, decision.reminders, reply
+                stored.id, decision.task, decision.reminders, written, item
             )
         except DatabaseError as error:
             logger.warning("Задача из дубля не записана: %s", error)
             return PressOutcome(message=texts.NOT_SAVED, replace=False)
+        if several:
+            if picked.reply != written:
+                return self._pressed_before()
+            logger.info("Записано отдельно: дело %s сообщения %s", item, stored.id)
+            return PressOutcome(message=reply, replace=False, follow_up=True)
         if not picked.reply:
             return PressOutcome(message=texts.MESSAGE_UNKNOWN, replace=False)
         if picked.reply == reply:
@@ -2750,6 +2825,68 @@ class TaskService:
             repeat=rule_words(reopened.repeat),
         )
         return PressOutcome(message=reply, replace=True)
+
+    async def reopen_in_message(self, *, chat_id: int, telegram_message_id: int) -> PressOutcome:
+        """«Вернуть» под ответом о нескольких делах (`techspec/23-several-tasks.md`
+        §23.5): задача — правки этого сообщения, `messages.task_id`.
+
+        Возврат — как у `reopen`; итог приходит новым сообщением и дописывается
+        абзацем к ответу сообщения, а список дел в ответе остаётся.
+        """
+        found = await self._message_with_task(chat_id, telegram_message_id)
+        if isinstance(found, PressOutcome):
+            return found
+        message_id, task_id = found
+        return await self._follow_up(message_id, await self.reopen(task_id=task_id))
+
+    async def back_in_message(
+        self, *, chat_id: int, telegram_message_id: int, back_to: int, moved_from: int
+    ) -> PressOutcome:
+        """«Вернуть» повторяющейся под ответом о нескольких делах (§23.5):
+        как `back`, итог — новым сообщением и абзацем к ответу."""
+        found = await self._message_with_task(chat_id, telegram_message_id)
+        if isinstance(found, PressOutcome):
+            return found
+        message_id, task_id = found
+        outcome = await self.back(task_id=task_id, back_to=back_to, moved_from=moved_from)
+        return await self._follow_up(message_id, outcome)
+
+    async def _message_with_task(
+        self, chat_id: int, telegram_message_id: int
+    ) -> tuple[str, str] | PressOutcome:
+        """Сообщение владельца под кнопкой и его задача (`messages.id`,
+        `messages.task_id`) — или ответ на нажатие."""
+        store = self._edits
+        if store is None:
+            return PressOutcome(message=texts.NOT_REOPENED, replace=False)
+        try:
+            stored = await store.message(chat_id, telegram_message_id)
+        except DatabaseError as error:
+            logger.warning("Сообщение под «Вернуть» не прочитано: %s", error)
+            return PressOutcome(message=texts.NOT_REOPENED, replace=False)
+        if stored is None or stored.task_id is None:
+            return PressOutcome(message=texts.DONE_UNKNOWN, replace=False)
+        return stored.id, stored.task_id
+
+    async def _follow_up(self, message_id: str, outcome: PressOutcome) -> PressOutcome:
+        """Итог нажатия под ответом о нескольких делах (§23.5): новым сообщением,
+        а в `messages.reply` — абзацем к прежнему ответу.
+
+        Задача уже вернулась, и дописать абзац не вышло — владельцу об этом
+        знать незачем: итог он видит, теряется только строка недавнего
+        разговора (§17.3).
+        """
+        if not outcome.replace:
+            return outcome
+        store = self._edits
+        if store is not None:
+            try:
+                await store.append_reply(message_id, outcome.message)
+            except DatabaseError as error:
+                logger.warning("Итог нажатия не дописан к ответу %s: %s", message_id, error)
+        return PressOutcome(
+            message=outcome.message, replace=False, buttons=outcome.buttons, follow_up=True
+        )
 
     async def back(self, *, task_id: str, back_to: int, moved_from: int) -> PressOutcome:
         """«Вернуть» под «Отметил» и «Пропускаю» (§13.3): задача — снова на разе `back_to`.

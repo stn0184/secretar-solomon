@@ -23,6 +23,7 @@ RECORD_MESSAGE_FUNCTION = "record_message"
 RECORD_UNDERSTANDING_FUNCTION = "record_understanding"
 PICK_TASK_FUNCTION = "pick_task"
 RECORD_SEPARATELY_FUNCTION = "record_separately"
+APPEND_REPLY_FUNCTION = "append_reply"
 TASKS_TABLE = "tasks"
 MESSAGES_TABLE = "messages"
 REMINDERS_TABLE = "reminders"
@@ -891,24 +892,54 @@ async def record_separately(
     task: Mapping[str, Any],
     reminders: Sequence[Mapping[str, Any]],
     reply: str,
+    item: int = 1,
 ) -> PickedMessage:
     """«Записать отдельно» (`techspec/15-duplicates.md` §15.4): задача из
     сообщения-дубля, её напоминания, `messages.task_id` и `reply` — одной
     транзакцией.
 
-    Форма `task` и `reminders` — та же, что у `record_understanding`. Задача
-    по этому сообщению уже заведена (второе нажатие) — база ничего не пишет
-    и возвращает сообщение как есть, с прежним ответом. Чужое или
-    несуществующее сообщение — отказ базы.
+    Форма `task` и `reminders` — та же, что у `record_understanding`. `item` —
+    номер дела в сообщении (`techspec/23-several-tasks.md` §23.5): `task_id`
+    сообщения база ставит только делу номер 1. Задача этого дела уже заведена
+    (второе нажатие) — база ничего не пишет и возвращает сообщение как есть,
+    с прежним ответом. Чужое или несуществующее сообщение — отказ базы.
     """
     params = {
         "owner_telegram_id": owner_telegram_id,
         "message_id": message_id,
         "task": dict(task),
-        "reminders": [dict(item) for item in reminders],
+        "reminders": [dict(entry) for entry in reminders],
         "reply": reply,
+        "item": item,
     }
     data = single_row(await ask(lambda: db.rpc(RECORD_SEPARATELY_FUNCTION, params).execute().data))
+    return _picked_message(data)
+
+
+async def append_reply(
+    db: Client,
+    *,
+    owner_telegram_id: int,
+    message_id: str,
+    paragraph: str,
+) -> PickedMessage:
+    """Дописать абзац к ответу сообщения (`techspec/23-several-tasks.md` §23.5).
+
+    Итог нажатия под ответом о нескольких делах приходит новым сообщением,
+    а в историю ложится абзацем к прежнему ответу: та же строка не
+    удваивается. Чужое или несуществующее сообщение — отказ базы.
+    """
+    params = {
+        "owner_telegram_id": owner_telegram_id,
+        "message_id": message_id,
+        "paragraph": paragraph,
+    }
+    data = single_row(await ask(lambda: db.rpc(APPEND_REPLY_FUNCTION, params).execute().data))
+    return _picked_message(data)
+
+
+def _picked_message(data: object) -> PickedMessage:
+    """Строка сообщения из ответа функции базы — или отказ."""
     if not isinstance(data, Mapping) or data.get("id") is None:
         raise DatabaseError("База не вернула сообщение.")
     return PickedMessage(

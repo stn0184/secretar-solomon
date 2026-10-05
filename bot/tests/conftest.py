@@ -19,6 +19,7 @@ from aiogram.client.session.base import BaseSession
 from aiogram.enums import MessageOriginType
 from aiogram.methods import (
     AnswerCallbackQuery,
+    EditMessageReplyMarkup,
     EditMessageText,
     GetFile,
     SendChatAction,
@@ -32,6 +33,7 @@ from aiogram.types import (
     Chat,
     Document,
     File,
+    InlineKeyboardMarkup,
     Message,
     MessageOriginUser,
     PhotoSize,
@@ -137,6 +139,8 @@ class RecordingSession(BaseSession):
                 text=method.text,
             )
             return cast(TelegramType, edited)
+        if isinstance(method, EditMessageReplyMarkup):
+            return cast(TelegramType, True)
         if isinstance(method, AnswerCallbackQuery):
             return cast(TelegramType, True)
         if isinstance(method, SendChatAction):
@@ -173,6 +177,11 @@ class RecordingSession(BaseSession):
     def texts(self) -> list[str]:
         """Тексты отправленных сообщений."""
         return [m.text for m in self.sent if isinstance(m, SendMessage)]
+
+    @property
+    def markups(self) -> list[EditMessageReplyMarkup]:
+        """Правки одних кнопок сообщения — без текста (§23.5)."""
+        return [m for m in self.sent if isinstance(m, EditMessageReplyMarkup)]
 
     @property
     def file_requests(self) -> list[str]:
@@ -666,8 +675,11 @@ class FakeEdits:
     пропуск переводят на `next_at`, только если она стоит на разе
     `occurrence` (§13.3); `return_occurrence` возвращает её на прежний раз
     так же, как функция базы. `record_separately` — как одноимённая функция
-    базы (`techspec/15-duplicates.md` §15.6): второй раз по тому же
-    сообщению не пишет и отдаёт его как есть. `same_minute` — как запрос
+    базы (`techspec/15-duplicates.md` §15.6, `techspec/23-several-tasks.md`
+    §23.6): второй раз то же дело того же сообщения не пишет и отдаёт
+    сообщение как есть, `task_id` ставит только делу номер 1.
+    `append_reply` дописывает абзац к ответу и не удваивает его; вызовы — в
+    `appends`. `same_minute` — как запрос
     накладки (§15.5): активные со сроком со временем в ту же минуту, раньше
     записанные первыми; его вызовы — в `minutes`, а не в `calls`, чтобы
     тесты правки не пересчитывали их. `recent_messages` — как чтение
@@ -700,8 +712,12 @@ class FakeEdits:
         self.picks: list[tuple[str, dict[str, Any], str]] = []
         self.reopens: list[tuple[str, list[Planned]]] = []
         self.returns: list[tuple[str, int, int, list[Planned]]] = []
-        # «Записать отдельно»: сообщение, задача, план и ответ.
+        # «Записать отдельно»: сообщение, задача, план и ответ; номер дела —
+        # в `separate_items` на том же месте.
         self.separates: list[tuple[str, dict[str, Any], list[Planned], str]] = []
+        self.separate_items: list[int] = []
+        # Абзацы, дописанные к ответу сообщения (§23.5): сообщение и абзац.
+        self.appends: list[tuple[str, str]] = []
         # Запросы накладки: минута и задача, которая в сравнение не входит.
         self.minutes: list[tuple[datetime, str | None]] = []
         # Чтения недавнего разговора: начало окна, граница и сколько взять.
@@ -801,17 +817,32 @@ class FakeEdits:
         task: Mapping[str, Any],
         reminders: Sequence[Planned],
         reply: str,
+        item: int = 1,
     ) -> PickedMessage:
-        self._touch("record_separately", message_id)
+        self._touch("record_separately", message_id, item)
         key, stored = next(
             (key, stored) for key, stored in self.messages.items() if stored.id == message_id
         )
-        if any(written[0] == message_id for written in self.separates):
+        written = zip(self.separates, self.separate_items, strict=True)
+        if any(entry[0] == message_id and number == item for entry, number in written):
             return PickedMessage(id=stored.id, task_id=stored.task_id, reply=stored.reply)
         self.separates.append((message_id, dict(task), list(reminders), reply))
-        task_id = f"separate-{len(self.separates)}"
+        self.separate_items.append(item)
+        task_id = f"separate-{len(self.separates)}" if item == 1 else stored.task_id
         self.messages[key] = replace(stored, task_id=task_id, reply=reply)
         return PickedMessage(id=stored.id, task_id=task_id, reply=reply)
+
+    async def append_reply(self, message_id: str, paragraph: str) -> PickedMessage:
+        self._touch("append_reply", message_id)
+        key, stored = next(
+            (key, stored) for key, stored in self.messages.items() if stored.id == message_id
+        )
+        self.appends.append((message_id, paragraph))
+        reply = stored.reply or ""
+        if paragraph not in reply.split("\n\n"):
+            reply = f"{reply}\n\n{paragraph}" if reply else paragraph
+        self.messages[key] = replace(stored, reply=reply)
+        return PickedMessage(id=stored.id, task_id=stored.task_id, reply=reply)
 
     async def reopen(self, task_id: str, schedule: Sequence[Planned]) -> TaskDetails | None:
         self._touch("reopen", task_id)
@@ -1140,8 +1171,12 @@ def make_callback_update(
     text: str = "Напоминаю: отправить расчёт",
     from_id: int = OWNER_ID,
     update_id: int = 1,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> Update:
-    """Нажатие кнопки под напоминанием — как его приносит long polling."""
+    """Нажатие кнопки под напоминанием — как его приносит long polling.
+
+    `reply_markup` — кнопки сообщения бота, под которым нажали.
+    """
     user = User(id=from_id, is_bot=False, first_name="Тим")
     message = Message(
         message_id=update_id,
@@ -1149,6 +1184,7 @@ def make_callback_update(
         chat=Chat(id=from_id, type="private"),
         from_user=User(id=1, is_bot=True, first_name="Соломон"),
         text=text,
+        reply_markup=reply_markup,
     )
     callback = CallbackQuery(
         id=f"callback-{update_id}",

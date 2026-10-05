@@ -514,19 +514,24 @@ async def handle_apart(callback: CallbackQuery, tasks: TaskService | None) -> No
 
     Порядок тот же, что у кнопки задачи: сначала база, потом сообщение —
     «Это уже записано» сменяется ответом записи, только когда задача легла
-    (инвариант 4). Отказ — всплывающий ответ, кнопка остаётся.
+    (инвариант 4). Отказ — всплывающий ответ, кнопка остаётся. Номер дела в
+    callback (`techspec/23-several-tasks.md` §23.5) — какое из дел сообщения
+    записать; без номера — дело номер 1.
     """
     message = callback.message
     if tasks is None or message is None:
         logger.error("Кнопку «Записать отдельно» некому обработать: бот собран без базы")
         await callback.answer(texts.NOT_SAVED)
         return
-    telegram_message_id = edits.parse_apart(callback.data or "")
-    if telegram_message_id is None:
+    parsed = edits.parse_apart(callback.data or "")
+    if parsed is None:
         logger.warning("Кнопка «Записать отдельно» с непонятными данными: %r", callback.data)
         await callback.answer(texts.MESSAGE_UNKNOWN)
         return
-    outcome = await tasks.apart(chat_id=message.chat.id, telegram_message_id=telegram_message_id)
+    telegram_message_id, item = parsed
+    outcome = await tasks.apart(
+        chat_id=message.chat.id, telegram_message_id=telegram_message_id, item=item
+    )
     await answer_press(callback, outcome)
 
 
@@ -536,17 +541,28 @@ async def handle_reopen(callback: CallbackQuery, tasks: TaskService | None) -> N
     Задача снова активна и с напоминаниями по сроку — и только после ответа
     базы сообщение меняется на «Вернул в работу». Уже активная задача —
     тот же ответ без записи: второе нажатие безвредно.
+
+    Под ответом о нескольких делах кнопка несёт сообщение владельца, а не
+    задачу (`techspec/23-several-tasks.md` §23.5): итог приходит новым
+    сообщением.
     """
     if tasks is None:
         logger.error("Кнопку «Вернуть» некому обработать: бот собран без базы")
         await callback.answer(texts.NOT_REOPENED)
         return
-    task_id = edits.parse_reopen(callback.data or "")
-    if task_id is None:
+    data = callback.data or ""
+    task_id = edits.parse_reopen(data)
+    if task_id is not None:
+        await answer_press(callback, await tasks.reopen(task_id=task_id))
+        return
+    telegram_message_id = edits.parse_reopen_message(data)
+    if telegram_message_id is None or callback.message is None:
         logger.warning("Кнопка «Вернуть» с непонятными данными: %r", callback.data)
         await callback.answer(texts.DONE_UNKNOWN)
         return
-    outcome = await tasks.reopen(task_id=task_id)
+    outcome = await tasks.reopen_in_message(
+        chat_id=callback.message.chat.id, telegram_message_id=telegram_message_id
+    )
     await answer_press(callback, outcome)
 
 
@@ -561,13 +577,26 @@ async def handle_back(callback: CallbackQuery, tasks: TaskService | None) -> Non
         logger.error("Кнопку «Вернуть» некому обработать: бот собран без базы")
         await callback.answer(texts.NOT_REOPENED)
         return
-    parsed = edits.parse_back(callback.data or "")
-    if parsed is None:
+    data = callback.data or ""
+    parsed = edits.parse_back(data)
+    if parsed is not None:
+        task_id, moved_from, moved_to = parsed
+        outcome = await tasks.back(task_id=task_id, back_to=moved_from, moved_from=moved_to)
+        await answer_press(callback, outcome)
+        return
+    # Под ответом о нескольких делах (§23.5) — сообщение владельца вместо задачи.
+    in_message = edits.parse_back_message(data)
+    if in_message is None or callback.message is None:
         logger.warning("Кнопка «Вернуть» с непонятными данными: %r", callback.data)
         await callback.answer(texts.DONE_UNKNOWN)
         return
-    task_id, moved_from, moved_to = parsed
-    outcome = await tasks.back(task_id=task_id, back_to=moved_from, moved_from=moved_to)
+    telegram_message_id, moved_from, moved_to = in_message
+    outcome = await tasks.back_in_message(
+        chat_id=callback.message.chat.id,
+        telegram_message_id=telegram_message_id,
+        back_to=moved_from,
+        moved_from=moved_to,
+    )
     await answer_press(callback, outcome)
 
 
@@ -576,13 +605,48 @@ async def answer_press(callback: CallbackQuery, outcome: PressOutcome) -> None:
 
     Сообщение не сменилось (старое, уже с этим текстом) — ответ всплывает
     подсказкой: база уже записала, и человек должен об этом узнать.
+
+    Нажатие под ответом о нескольких делах (`follow_up`, §23.5) текст не
+    меняет: итог — новым сообщением, с ответа снимаются кнопки нажатого
+    вопроса.
     """
+    if outcome.follow_up and isinstance(callback.message, Message):
+        await callback.message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
+        await drop_pressed(callback.message, callback.data or "")
+        await callback.answer()
+        return
     if outcome.replace and await replace_text(
         callback.message, outcome.message, keyboard(outcome.buttons)
     ):
         await callback.answer()
         return
     await callback.answer(outcome.message)
+
+
+async def drop_pressed(message: Message, pressed: str) -> None:
+    """Снять с ответа о нескольких делах кнопки нажатого вопроса (§23.5).
+
+    Telegram не дал — кнопки остаются: второе нажатие база не запишет, а
+    итог владелец уже получил.
+    """
+    markup = message.reply_markup
+    if markup is None:
+        return
+    rows = [
+        kept
+        for row in markup.inline_keyboard
+        if (
+            kept := [
+                button for button in row if edits.keeps_button(button.callback_data or "", pressed)
+            ]
+        )
+    ]
+    try:
+        await message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+        )
+    except TelegramBadRequest as error:
+        logger.warning("Кнопки нажатого вопроса не сняты: %s", error)
 
 
 async def replace_text(
