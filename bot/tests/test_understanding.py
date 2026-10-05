@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -63,6 +64,7 @@ from solomon.services.understanding import (
     ConversationAnalysis,
     ConversationAnswer,
     ConversationUnderstanding,
+    MessageAnswer,
     MessageUnderstanding,
     ModelAnswer,
     ModelCall,
@@ -1070,17 +1072,81 @@ async def test_answer_asking_to_forget_the_rules_changes_nothing() -> None:
 
 
 def test_text_and_voice_answer_is_the_understanding_plus_also() -> None:
-    """Схема текста и голоса — разбор §5.3 и `also`; у снимка и переписки
+    """Разбор текста и голоса — разбор §5.3 и `also`; у снимка и переписки
     `also` нет (`techspec/23-several-tasks.md` §23.2)."""
     fields = set(MessageUnderstanding.model_fields)
-    schema = MessageUnderstanding.model_json_schema()
 
     assert issubclass(MessageUnderstanding, Understanding)
     assert fields - set(Understanding.model_fields) == {"also"}
-    assert set(schema["required"]) == fields
-    assert "maxItems" not in json.dumps(schema["properties"]["also"])
     assert "also" not in PhotoUnderstanding.model_fields
     assert "also" not in ConversationUnderstanding.model_fields
+
+
+def test_the_model_answers_text_and_voice_with_a_list_of_understandings() -> None:
+    """Модели уходит схема-список `items` разборов §5.3 (§23.2): разбор
+    сообщения и дела `also` — одно определение, и схема укладывается в предел
+    грамматики. Пустого списка нет, верхнего предела — тоже."""
+    schema = MessageAnswer.model_json_schema()
+    items = schema["properties"]["items"]
+
+    assert set(MessageAnswer.model_fields) == {"items"}
+    assert schema["required"] == ["items"]
+    assert items["minItems"] == 1
+    assert items["items"] == {"$ref": "#/$defs/Understanding"}
+    assert "maxItems" not in json.dumps(items)
+
+
+def test_the_first_item_is_the_message_and_the_rest_go_to_also() -> None:
+    """Первый элемент — верхние поля разбора, остальные — дела `also` по
+    порядку; ответ, правка и память у них не читаются, не дело (разговор,
+    сведение о себе) — не записывается (§23.2)."""
+    first = make_understanding(title="позвонить Игорю")
+    idea = make_understanding(
+        kind="idea",
+        title="подарок к годовщине",
+        needs_review=True,
+        review_reason="Кому подарок — не понял",
+        answers_question=True,
+        reply_hint="Записал",
+    )
+    suit = make_understanding(title="забрать костюм", same_as=2)
+    chat = make_understanding(kind="chat", title="спасибо")
+
+    message = MessageAnswer(items=[first, idea, chat, suit]).as_message()
+
+    assert isinstance(message, MessageUnderstanding)
+    assert message.model_dump(exclude={"also"}) == first.model_dump()
+    assert message.also == [
+        make_item(
+            kind="idea",
+            title="подарок к годовщине",
+            needs_review=True,
+            review_reason="Кому подарок — не понял",
+        ),
+        make_item(title="забрать костюм", same_as=2),
+    ]
+    assert MessageAnswer(items=[first]).as_message().also == []
+    with pytest.raises(ValidationError):
+        MessageAnswer(items=[])
+
+
+# Предел грамматики структурированного ответа (§23.2), по живому замеру этапа
+# 023: схема, где своих полей у корня и у всех `$defs` вместе 40, проходит, а
+# 41 — уже 400 «The compiled grammar is too large». Повторная ссылка на то же
+# определение полей не добавляет.
+GRAMMAR_FIELD_LIMIT = 40
+
+
+def own_fields(schema: dict[str, Any]) -> int:
+    """Свои поля схемы: у корня и у каждого определения по разу."""
+    defs = schema.get("$defs", {}).values()
+    return len(schema.get("properties", {})) + sum(len(d.get("properties", {})) for d in defs)
+
+
+def test_every_answer_schema_fits_the_grammar_limit() -> None:
+    for model in (MessageAnswer, PhotoUnderstanding, ConversationUnderstanding):
+        fields = own_fields(model.model_json_schema())
+        assert fields <= GRAMMAR_FIELD_LIMIT, (model.__name__, fields)
 
 
 def test_an_item_has_the_fields_a_record_needs_and_nothing_else() -> None:
@@ -1158,9 +1224,11 @@ def test_several_rules_say_what_one_task_is_and_where_the_rest_go() -> None:
         "«позвонить Игорю и Олегу» — два звонка, два",
         "одно дело с правилом",
         "у каждого из",
-        "в also",
+        "список items",
+        "следующими элементами",
         "answers_question = true",
-        "also = []",
+        "Дело одно — в items",
+        "только у первого",
         "«Кому позвонить?»",
         "question = null",
         "same_as",
@@ -1212,10 +1280,10 @@ async def test_text_answer_keeps_its_other_tasks() -> None:
 # часть снимка и переписки — не менялась. Дальше промпт и схема ответа
 # текста и голоса сдвигаются только правкой, которая их меняет, — снимок и
 # прочие ветки их не трогают.
-PROMPT_WITH_EMPTY_TASKS_SHA256 = "8d779da24be3297106bb3eed8fbe607ebfeed3420eb91d07d456daae54271b0b"
-PROMPT_BARE_SHA256 = "43533fb81b8c7080b42d17fa77b48ec6aba5bc30db9ba4e8ba1dd85b95dbb4df"
+PROMPT_WITH_EMPTY_TASKS_SHA256 = "74987cc06f558ff48530aea2c18f9035660658068a12ab543897022883c72914"
+PROMPT_BARE_SHA256 = "758e646717ee85a9ee303b23f2c7fec027ca7fedca131ea37db5d18c9e995cc9"
 SCHEMA_SHA256 = "3a046fe34af88e9081ff795713cd9c90f45a58781cfa20cbe88478acc0caae24"
-MESSAGE_SCHEMA_SHA256 = "95e0e09f4c9a6c3b03f6a706e0237b0b3c56fbe837005ffd08f956ce16da48b0"
+MESSAGE_SCHEMA_SHA256 = "ad5deaba3f9bda2d19e72323e910abe5e8929fbe8b690191f042979c09f12d87"
 
 # Не настоящая картинка: модели здесь нет, важно только, что байты дошли.
 IMAGE = b"\xff\xd8\xff\xe0 not a real jpeg"
@@ -1227,9 +1295,7 @@ def sha256(text: str) -> str:
 
 def test_text_and_voice_prompt_and_schema_stay_the_same() -> None:
     schema = json.dumps(Understanding.model_json_schema(), sort_keys=True, ensure_ascii=False)
-    message = json.dumps(
-        MessageUnderstanding.model_json_schema(), sort_keys=True, ensure_ascii=False
-    )
+    message = json.dumps(MessageAnswer.model_json_schema(), sort_keys=True, ensure_ascii=False)
 
     assert sha256(build_system_prompt(NOW, TZ, tasks=[], last_tasks=())) == (
         PROMPT_WITH_EMPTY_TASKS_SHA256
@@ -1535,22 +1601,45 @@ class RecordedParse:
         return self.answer
 
 
+@dataclass(frozen=True, slots=True)
+class FakeMessageAnswer:
+    """Ответ SDK на текст и голос без сети: список `items` (§23.2)."""
+
+    parsed_output: MessageAnswer | None
+    stop_reason: str | None = "end_turn"
+    model: str = "claude-opus-5"
+    usage: FakeUsage = FakeUsage()
+
+
 async def test_text_call_keeps_its_schema_tokens_and_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Вызов текста и голоса просит список `items` и отдаёт его разбором
+    сообщения с делами `also` (§23.2); пустой ответ — пустым."""
     client = AsyncAnthropic(api_key="test-key")
-    parse = RecordedParse(FakeAnswer(parsed_output=make_understanding()))
+    first = make_understanding(title="купить лампочку")
+    items = MessageAnswer(items=[first, make_understanding(title="позвонить Игорю")])
+    parse = RecordedParse(FakeMessageAnswer(parsed_output=items))
     monkeypatch.setattr(client.messages, "parse", parse)
 
     try:
-        await anthropic_call(client)(system="правила", text="купить лампочку")
+        answer = await anthropic_call(client)(system="правила", text="купить лампочку")
+        parse.answer = FakeMessageAnswer(parsed_output=None, stop_reason="refusal")
+        refused = await anthropic_call(client)(system="правила", text="купить лампочку")
     finally:
         await client.close()
 
+    assert answer.parsed_output == items.as_message()
+    assert (answer.stop_reason, answer.model, answer.usage) == (
+        "end_turn",
+        "claude-opus-5",
+        FakeUsage(),
+    )
+    assert (refused.parsed_output, refused.stop_reason) == (None, "refusal")
     assert parse.kwargs == {
         "model": MODEL,
         "max_tokens": 4096,
-        "output_format": MessageUnderstanding,
+        "output_format": MessageAnswer,
         "output_config": OUTPUT_CONFIG,
         "system": "правила",
         "messages": [{"role": "user", "content": "купить лампочку"}],
@@ -1988,7 +2077,8 @@ async def test_conversation_part_of_day_gets_the_start_of_the_part() -> None:
 # Прогон ходит в модель по-настоящему, поэтому в воротах не участвует —
 # `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 76
+FIXTURE_COUNT = 84
+SEVERAL_COUNT = 8
 EDIT_COUNT = 21
 DUPLICATE_COUNT = 4
 REPEAT_COUNT = 9
@@ -2322,6 +2412,60 @@ def duplicate_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     return None
 
 
+def new_tasks_of(got: Understanding) -> list[Understanding]:
+    """Новые дела разбора (`techspec/23-several-tasks.md` §23.3): верх — когда
+    он дело, а не правка, ответ или дубль; за ним дела `also` с сутью."""
+    top = (
+        got.kind in ("task", "idea", "wish")
+        and got.edit is None
+        and not got.answers_question
+        and got.same_as is None
+    )
+    more = [item.as_understanding() for item in also_of(got) if item.title.strip()]
+    return ([got] if top else []) + [task for task in more if task.same_as is None]
+
+
+def several_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) -> str | None:
+    """Чем пример нескольких дел разошёлся с ожиданием; `None` — сошёлся (§23.2).
+
+    `count` — сколько новых дел (`new_tasks_of`); `has` — основы слов, каждая
+    есть в сути какого-то дела; `kinds` — виды, которые среди дел есть;
+    `dates` — дни сроков у дел со сроком по поясу владельца, без порядка;
+    `unclear` — сколько дел с пометкой или вопросом, не меньше; `edit` —
+    правка верха, как у примера правки (нет — правки быть не должно);
+    `answer` — верх отвечает на открытый вопрос.
+    """
+    expected = case["several"]
+    text = case["text"]
+    edit = edit_mismatch({"text": text, "edit": expected.get("edit")}, got, timezone)
+    if edit is not None:
+        return edit
+    answer = bool(expected.get("answer"))
+    if got.answers_question != answer:
+        return f"{text}: ждали answers_question = {answer}, получили {got.answers_question}"
+    tasks = new_tasks_of(got)
+    titles = [task.title.lower() for task in tasks]
+    if len(tasks) != expected["count"]:
+        return f"{text}: ждали дел {expected['count']}, получили {len(tasks)}: {titles}"
+    missing = [stem for stem in expected.get("has", []) if not any(stem in t for t in titles)]
+    if missing:
+        return f"{text}: нет дела со словами {missing}: {titles}"
+    kinds = {task.kind for task in tasks}
+    absent = [kind for kind in expected.get("kinds", []) if kind not in kinds]
+    if absent:
+        return f"{text}: нет дел вида {absent}, есть {sorted(kinds)}"
+    if "dates" in expected:
+        dates = sorted(
+            task.due_at.astimezone(timezone).date().isoformat() for task in tasks if task.due_at
+        )
+        if dates != sorted(expected["dates"]):
+            return f"{text}: ждали дни {sorted(expected['dates'])}, получили {dates}"
+    unclear = sum(1 for task in tasks if task.needs_review or task.question)
+    if unclear < expected.get("unclear", 0):
+        return f"{text}: ждали неясных дел {expected['unclear']}, получили {unclear}"
+    return None
+
+
 def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     """Чем пример памяти разошёлся с ожиданием; `None` — сошёлся."""
     expected = case["facts"]
@@ -2404,11 +2548,12 @@ def test_fixtures_have_the_expected_count_and_fields() -> None:
     for case in dialog:
         asked = asked_for(case)
         assert (asked is None) == (case["dialog"] == "asks"), case["text"]
-    # Открытый вопрос — только у диалога и у ответа на вопрос бота о деле.
+    # Открытый вопрос — только у диалога, у ответа на вопрос бота о деле и у
+    # ответа рядом с новым делом (§23.3).
     assert not any(
         "open_question" in case
         for case in fixtures
-        if not {"dialog", "undated", "overdue"} & set(case)
+        if not {"dialog", "undated", "overdue", "several"} & set(case)
     )
 
 
@@ -2424,11 +2569,12 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
     assert len(edits) == EDIT_COUNT
     assert all(case.get("open_tasks") for case in edits)
     # Открытые задачи без правки — только у переписки, где правки быть не может,
-    # и у ответа на вопрос бота о деле: там правку сверяет своя функция.
+    # у ответа на вопрос бота о деле и у нескольких дел: там правку сверяет
+    # своя функция.
     assert not any(
         "open_tasks" in case
         for case in fixtures
-        if not {"edit", "conversation", "undated", "overdue"} & set(case)
+        if not {"edit", "conversation", "undated", "overdue", "several"} & set(case)
     )
     assert not any({"facts", "dialog", "repeat"} & set(case) for case in edits)
     expected = [case["edit"] for case in edits if case["edit"] is not None]
@@ -2514,9 +2660,12 @@ def test_talk_fixtures_cover_the_cases_of_the_stage() -> None:
 
     assert len(talks) == TALK_COUNT
     assert not any(TALK_EXCLUDED & set(case) for case in talks)
-    # Недавний разговор — ещё у правки: «в 16» в ответ на «во сколько?» (§12.8).
+    # Недавний разговор — ещё у правки: «в 16» в ответ на «во сколько?» (§12.8),
+    # и у правки после ответа о нескольких делах (§23.4).
     assert not any(
-        "recent" in case for case in fixtures if not {"talk", "conversation", "edit"} & set(case)
+        "recent" in case
+        for case in fixtures
+        if not {"talk", "conversation", "edit", "several"} & set(case)
     )
     for case in talks:
         expected = case["talk"]
@@ -2966,6 +3115,110 @@ def test_talk_mismatch_checks_kind_reply_and_words() -> None:
     assert talk_mismatch(moved, make_understanding(kind="idea")) is not None
 
 
+def test_several_mismatch_checks_count_titles_and_dates() -> None:
+    """Пример нескольких дел (§23.2): сколько новых дел, о чём они и их дни;
+    дело с пустой сутью делом не считается."""
+    case = {
+        "text": "завтра в 10 позвонить Игорю и в пятницу забрать костюм",
+        "several": {"count": 2, "has": ["игор", "костюм"], "dates": ["2026-09-17", "2026-09-18"]},
+    }
+    thursday = datetime(2026, 9, 17, 10, 0, tzinfo=TZ)
+    friday = datetime(2026, 9, 18, 18, 0, tzinfo=TZ)
+    suit = make_item(title="забрать костюм из химчистки", due_at=friday, due_precision="day")
+
+    def call(title: str = "позвонить Игорю", *also: TaskItem) -> MessageUnderstanding:
+        return make_message_understanding(
+            title=title, due_at=thursday, due_precision="time", also=list(also)
+        )
+
+    assert several_mismatch(case, call("позвонить Игорю", suit), TZ) is None
+    assert several_mismatch(case, call("позвонить Игорю", suit, make_item(title=" ")), TZ) is None
+    assert several_mismatch(case, call("позвонить Игорю"), TZ) is not None
+    assert several_mismatch(case, call("позвонить Олегу", suit), TZ) is not None
+    late = make_item(title="забрать костюм", due_at=friday + timedelta(days=1), due_precision="day")
+    assert several_mismatch(case, call("позвонить Игорю", late), TZ) is not None
+
+
+def test_several_mismatch_counts_no_task_on_top_of_an_edit_or_an_answer() -> None:
+    """Правка и ответ рядом с делами: верх — не новое дело; правка сверяется
+    как у примера правки, ответ — по признаку."""
+    flowers = make_item(title="купить цветы")
+    moving = {
+        "text": "перенеси встречу с Олегом на четверг и купи цветы",
+        "several": {
+            "count": 1,
+            "has": ["цвет"],
+            "edit": {"action": "change", "task": 1, "due_date": "2026-09-17"},
+        },
+    }
+    thursday = datetime(2026, 9, 17, 17, 0, tzinfo=TZ)
+    moved = make_message_understanding(
+        title="встреча с Олегом",
+        edit=model_edit(task=1, due_at=thursday, due_precision="time"),
+        also=[flowers],
+    )
+    unmoved = make_message_understanding(title="встреча с Олегом", also=[flowers])
+
+    assert several_mismatch(moving, moved, TZ) is None
+    assert several_mismatch(moving, unmoved, TZ) is not None
+
+    answer = {"text": "Олегу, и купить цветы", "several": {"count": 1, "answer": True}}
+    answered = make_message_understanding(
+        title="позвонить Олегу", answers_question=True, also=[flowers]
+    )
+
+    assert several_mismatch(answer, answered, TZ) is None
+    assert several_mismatch(answer, unmoved, TZ) is not None
+
+
+def test_several_mismatch_checks_kinds_and_unclear_tasks() -> None:
+    unclear = {"text": "позвонить и отправить документы", "several": {"count": 2, "unclear": 2}}
+    both = make_message_understanding(
+        title="позвонить",
+        question="Кому позвонить?",
+        also=[make_item(title="отправить документы", needs_review=True)],
+    )
+    one = make_message_understanding(
+        title="позвонить", question="Кому позвонить?", also=[make_item(title="отправить документы")]
+    )
+
+    assert several_mismatch(unclear, both, TZ) is None
+    assert several_mismatch(unclear, one, TZ) is not None
+
+    idea = {"text": "позвонить Игорю и идея подарка", "several": {"count": 2, "kinds": ["idea"]}}
+    gift = make_message_understanding(
+        title="позвонить Игорю", also=[make_item(kind="idea", title="подарок")]
+    )
+    errand = make_message_understanding(title="позвонить Игорю", also=[make_item(title="подарок")])
+
+    assert several_mismatch(idea, gift, TZ) is None
+    assert several_mismatch(idea, errand, TZ) is not None
+
+
+def test_several_fixtures_cover_the_cases_of_the_stage() -> None:
+    """Несколько дел (`techspec/23-several-tasks.md`): три дела, покупки одним
+    походом, два неясных, правка и новое, ответ и новое, «перенеси на
+    завтра» и «второе» после списка, десять дел."""
+    several = [case for case in load_fixtures() if "several" in case]
+
+    assert len(several) == SEVERAL_COUNT
+    counts = [case["several"]["count"] for case in several]
+    assert 3 in counts and 10 in counts
+    assert any(
+        case["several"]["count"] == 1 and not case["several"].get("edit") for case in several
+    )
+    assert any(case["several"].get("unclear") == 2 for case in several)
+    assert any(case["several"].get("answer") and "open_question" in case for case in several)
+    edits = [case["several"]["edit"] for case in several if case["several"].get("edit")]
+    assert any(edit["task"] is None and len(edit["candidates"]) == 3 for edit in edits)
+    assert any(edit["task"] == 2 for edit in edits)
+    after_list = [case for case in several if len(case.get("last_tasks", [])) == 3]
+    assert len(after_list) == 2
+    for case in after_list:
+        block = recent_for(case, TZ)
+        assert block is not None and "Записал:" in block, case["text"]
+
+
 def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Нет ключа — живой прогон пропускается, а не падает."""
 
@@ -2985,9 +3238,11 @@ async def test_live_model_understands_the_fixtures() -> None:
     и признаку ответа, ответа на вопрос о деле без срока и о прошедшем деле —
     ответ это или правка, её вид и есть ли срок, повтора — по виду, правилу,
     пометке и вопросу, правки — по действию, задаче, сроку и правилу, дубля —
-    по номеру задачи, разговора — по виду и ответу, как его отправил бы бот.
-    Переписка — своим прогоном, ниже. Блок открытых задач — как у бота:
-    пустой список, если пример своего не дал, и короткий у пересланного;
+    по номеру задачи, разговора — по виду и ответу, как его отправил бы бот,
+    нескольких дел — по числу дел, их сути, видам и дням, неясным, правке и
+    ответу рядом с ними (`several_mismatch`). Переписка — своим прогоном,
+    ниже. Блок открытых задач — как у бота: пустой список, если пример
+    своего не дал, и короткий у пересланного;
     правки там, где её не ждали, быть не должно."""
     settings = live_settings()
     now = datetime(*LIVE_MOMENT, tzinfo=settings.owner_timezone)
@@ -3023,6 +3278,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     talks: list[str] = []
     undated: list[str] = []
     overdue: list[str] = []
+    several: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
@@ -3036,6 +3292,11 @@ async def test_live_model_understands_the_fixtures() -> None:
             mismatch = overdue_mismatch(case, got, settings.owner_timezone)
             if mismatch:
                 overdue.append(mismatch)
+            continue
+        if "several" in case:
+            mismatch = several_mismatch(case, got, settings.owner_timezone)
+            if mismatch:
+                several.append(mismatch)
             continue
         mismatch = edit_mismatch({"edit": None, **case}, got, settings.owner_timezone)
         if mismatch:
@@ -3083,8 +3344,44 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not edits, "Правка разошлась:\n" + "\n".join(edits)
     assert not duplicates, "Дубль разошёлся:\n" + "\n".join(duplicates)
     assert not talks, "Разговор разошёлся:\n" + "\n".join(talks)
+    assert not several, "Несколько дел разошлись:\n" + "\n".join(several)
     matched = general - len(kinds)
     assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)
+
+
+# Замер вызова о десяти делах (`techspec/23-several-tasks.md` §23.2): на время
+# замера таймаут вызова — потолок, чтобы увидеть настоящее время и там, где
+# оно больше таймаута. Вызовов несколько: время ответа модели гуляет.
+TIMEOUT_CEILING = 90.0
+TIMING_RUNS = 3
+
+
+@pytest.mark.live
+async def test_live_ten_tasks_fit_one_call_and_the_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Вживую: сообщение о десяти делах — один вызов, все десять в разборе, и
+    каждый вызов укладывается в `TIMEOUT_SECONDS`. Время печатается
+    (`pytest -s`): по нему решён таймаут."""
+    settings = live_settings()
+    now = datetime(*LIVE_MOMENT, tzinfo=settings.owner_timezone)
+    case = next(case for case in load_fixtures() if case.get("several", {}).get("count") == 10)
+    monkeypatch.setattr("solomon.services.understanding.TIMEOUT_SECONDS", TIMEOUT_CEILING)
+    client = create_anthropic_client(settings)
+    service = service_for(settings, anthropic_call(client), now, case)
+    seconds: list[float] = []
+    try:
+        for _ in range(TIMING_RUNS):
+            started = time.monotonic()
+            verdict = await service.analyze(case["text"], tasks=tasks_for(case))
+            seconds.append(time.monotonic() - started)
+            assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
+            mismatch = several_mismatch(case, verdict.understanding, settings.owner_timezone)
+            assert mismatch is None, mismatch
+    finally:
+        await client.close()
+    print("Десять дел, секунд на вызов:", ", ".join(f"{value:.1f}" for value in seconds))
+    assert max(seconds) < TIMEOUT_SECONDS
 
 
 # Снимки живого прогона (`techspec/14-photo.md`): нарисованы один раз

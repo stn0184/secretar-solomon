@@ -38,7 +38,7 @@ from anthropic import (
     RateLimitError,
 )
 from anthropic.types import ImageBlockParam, OutputConfigParam, TextBlockParam
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from supabase import Client
 
 from solomon import texts
@@ -204,13 +204,41 @@ class TaskItem(BaseModel):
 
 # Разбор текста и голоса (§23.2): верхние поля — первое дело, правка или
 # ответ, как было; `also` — остальные новые дела по порядку. У снимка и
-# переписки схемы свои, `also` в них нет (§14.4, §18.4). Доккомментарий —
-# для модели.
+# переписки схемы свои, `also` в них нет (§14.4, §18.4). Модели уходит не
+# он, а `MessageAnswer`.
 class MessageUnderstanding(Understanding):
     """Разбор одного сообщения владельца: первое дело — в полях верхнего
     уровня, остальные новые дела — в also."""
 
     also: list[TaskItem]
+
+
+ITEM_KINDS: frozenset[str] = frozenset(("task", "idea", "wish"))
+
+
+# Ответ модели у текста и голоса (§23.2): список разборов одного
+# определения. Разбор и отдельное `TaskItem` в одной схеме не проходят
+# предел грамматики структурированного ответа (400 «The compiled grammar is
+# too large»: своих полей у схемы не больше 40), а повторная ссылка на то же
+# определение полей не добавляет. Доккомментарий — для модели.
+class MessageAnswer(BaseModel):
+    """Разбор одного сообщения владельца: первый элемент items — разбор
+    сообщения, следующие — ещё новые дела, по одному на дело."""
+
+    items: list[Understanding] = Field(min_length=1)
+
+    def as_message(self) -> MessageUnderstanding:
+        """Разбор сообщения: первый элемент — верхние поля, следующие —
+        дела `also` по порядку. У следующих читаются только поля дела; не
+        дело — разговор или сведение о себе — не записывается."""
+        first, *rest = self.items
+        fields = set(TaskItem.model_fields)
+        also = [
+            TaskItem.model_validate(item.model_dump(include=fields))
+            for item in rest
+            if item.kind in ITEM_KINDS
+        ]
+        return MessageUnderstanding.model_validate({**first.model_dump(), "also": also})
 
 
 def also_of(understanding: Understanding) -> list[TaskItem]:
@@ -499,7 +527,7 @@ facts у переписки — всегда пустой список: из п�
 
 # Абзац о нескольких делах (`techspec/23-several-tasks.md` §23.1–23.2):
 # дописывается к блоку 1 только у текста и голоса — `RULES` общий со снимком
-# и перепиской, а поля `also` у них нет.
+# и перепиской, а списка `items` (`MessageAnswer`) у них нет.
 SEVERAL_RULES = """В одном сообщении бывает несколько дел. Дело — то, что делается за один
 раз: один поход, один звонок, одна встреча, одна поездка. Шаги одного дела —
 одно дело: «позвонить Игорю и договориться о встрече» — одно,
@@ -514,13 +542,17 @@ SEVERAL_RULES = """В одном сообщении бывает несколь�
 и задача. Сведение о себе и реплика разговора — не дела: сведения идут
 в facts, как обычно, а на реплику рядом с делами не отвечайте.
 
-Первое новое дело — в полях верхнего уровня, остальные — в also, по одному
-на дело, в том порядке, в каком они сказаны. Если сообщение отвечает на
-открытый вопрос (answers_question = true) или правит задачу (edit), поля
-верхнего уровня — о них, как всегда, и все новые дела — в also. Дело одно —
-also = []. У каждого дела в also свои kind (task, idea или wish), суть,
-срок, повтор, срочность, обещание, люди и признаки — по тем же правилам, что
-у полей верхнего уровня.
+Ответ — список items. Первый элемент — разбор сообщения: всё, что в правилах
+сказано о полях верхнего уровня, — о нём. Первое новое дело — в первом
+элементе, остальные — следующими элементами, по одному на дело, в том
+порядке, в каком они сказаны. Если сообщение отвечает на открытый вопрос
+(answers_question = true) или правит задачу (edit), первый элемент — о них,
+как всегда, и все новые дела — следующими элементами. Дело одно — в items
+один элемент. У каждого следующего элемента свои kind (task, idea или wish),
+суть, срок, повтор, срочность, обещание, люди и признаки — по тем же
+правилам, что у первого. Ответ, правка, память и подсказка бывают
+только у первого: у следующих answers_question = false, edit = null,
+facts = [], reply_hint = null.
 
 question — только у одного дела, первого из тех, что без ответа не сделать.
 Вопрос называет дело: «Кому позвонить?», «Когда забрать костюм?», а не
@@ -1147,19 +1179,38 @@ def create_anthropic_client(settings: Settings) -> AsyncAnthropic:
     )
 
 
+@dataclass(frozen=True)
+class MessageReply:
+    """Ответ модели на текст и голос, где список `items` уже прочитан как
+    `MessageUnderstanding` (§23.2); остальное — как пришло."""
+
+    parsed_output: MessageUnderstanding | None
+    stop_reason: str | None
+    model: str
+    usage: ModelUsage
+
+
 def anthropic_call(client: AsyncAnthropic, model: str = MODEL) -> ModelCall:
-    """Настоящий вызов: структурированный ответ по схеме
-    `MessageUnderstanding` — разбор и остальные дела сообщения (§23.2)."""
+    """Настоящий вызов: структурированный ответ по схеме `MessageAnswer` —
+    разбор и остальные дела сообщения (§23.2) — и он же как
+    `MessageUnderstanding`."""
 
     async def call(*, system: str, text: str) -> ModelAnswer:
-        return await client.messages.parse(
+        answer = await client.messages.parse(
             model=model,
             max_tokens=MAX_TOKENS,
-            output_format=MessageUnderstanding,
+            output_format=MessageAnswer,
             output_config=OUTPUT_CONFIG,
             system=system,
             messages=[{"role": "user", "content": text}],
             timeout=TIMEOUT_SECONDS,
+        )
+        parsed = answer.parsed_output
+        return MessageReply(
+            parsed_output=None if parsed is None else parsed.as_message(),
+            stop_reason=answer.stop_reason,
+            model=answer.model,
+            usage=answer.usage,
         )
 
     return call
