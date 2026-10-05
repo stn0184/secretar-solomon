@@ -106,22 +106,26 @@ def candidates_of(tasks: Sequence[TaskDetails], numbers: Iterable[int]) -> list[
     return picked
 
 
-def last_task_number(
+def last_task_numbers(
     events: Iterable[TaskEvent | None], tasks: Sequence[TaskDetails], now: datetime
-) -> int | None:
-    """«Последняя задача в разговоре» (§12.2): задача более позднего события.
+) -> list[int]:
+    """«Последние задачи в разговоре» (§12.2, `techspec/23-several-tasks.md`
+    §23.2): номера задач более позднего события — у сообщения о нескольких
+    делах их несколько, по порядку дел.
 
-    Событию больше часа или его задачи нет в списке (закрыта) — строки нет;
-    к более раннему событию бот не откатывается: о закрытой задаче говорили
+    Событию больше часа — строки нет. Задачи, которой нет в списке
+    (закрыта), нет и среди номеров; нет ни одной — строки нет: к более
+    раннему событию бот не откатывается, о закрытой задаче говорили
     последней, и подставить вместо неё другую значило бы угадывать.
     """
     known = [event for event in events if event is not None]
     if not known:
-        return None
+        return []
     latest = max(known, key=lambda event: event.at)
     if now - latest.at > LAST_TASK_WINDOW:
-        return None
-    return number_of(tasks, latest.task_id)
+        return []
+    numbers = (number_of(tasks, task_id) for task_id in (latest.task_id, *latest.more))
+    return [number for number in numbers if number is not None]
 
 
 def _quoted(text: str | None) -> str | None:
@@ -134,17 +138,21 @@ def _quoted(text: str | None) -> str | None:
     return f"«{body}»"
 
 
-def swipe_line(target: SwipeTarget, number: int | None, text: str | None) -> str | None:
+def swipe_line(target: SwipeTarget, numbers: Sequence[int], text: str | None) -> str | None:
     """Строка перед текстом сообщения — на что ответили свайпом (§5.2, §12.2).
 
-    Номер есть — строка с номером; нет — с текстом того сообщения (до 200
+    Номера есть — строка с номером; у своего сообщения о нескольких делах —
+    «о задачах №A, №B» (§23.2). Нет — с текстом того сообщения (до 200
     знаков); нет и текста — строки нет. У сообщения бота, которое не
     напоминание, номера не бывает.
     """
-    if target == "reminder" and number is not None:
-        return f"Ответ на напоминание о задаче №{number}"
-    if target == "own" and number is not None:
-        return f"Ответ на своё сообщение о задаче №{number}"
+    if target == "reminder" and numbers:
+        return f"Ответ на напоминание о задаче №{numbers[0]}"
+    if target == "own" and len(numbers) == 1:
+        return f"Ответ на своё сообщение о задаче №{numbers[0]}"
+    if target == "own" and numbers:
+        listed = ", ".join(f"№{number}" for number in numbers)
+        return f"Ответ на своё сообщение о задачах {listed}"
     quoted = _quoted(text)
     if quoted is None:
         return None

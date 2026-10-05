@@ -146,8 +146,9 @@ class FakeResponse:
 class FakeQuery:
     """Цепочка postgrest: всё записывает и ничего не делает."""
 
-    def __init__(self, client: FakeClient) -> None:
+    def __init__(self, client: FakeClient, table: str | None = None) -> None:
         self.client = client
+        self.table = table
         self.negate = False
 
     def select(self, *columns: str) -> FakeQuery:
@@ -200,18 +201,28 @@ class FakeQuery:
     def execute(self) -> FakeResponse:
         if self.client.error is not None:
             raise self.client.error
+        if self.table is not None and self.table in self.client.tables:
+            return FakeResponse(self.client.tables[self.table])
         return FakeResponse(self.client.data)
 
 
 class FakeClient:
-    def __init__(self, data: Any = None, error: Exception | None = None) -> None:
+    """Ответ один на все выборки; `tables` — свой ответ для выборок из таблицы."""
+
+    def __init__(
+        self,
+        data: Any = None,
+        error: Exception | None = None,
+        tables: dict[str, Any] | None = None,
+    ) -> None:
         self.data = data
         self.error = error
+        self.tables = tables or {}
         self.calls: list[tuple[Any, ...]] = []
 
     def table(self, name: str) -> FakeQuery:
         self.calls.append(("table", name))
-        return FakeQuery(self)
+        return FakeQuery(self, name)
 
     def rpc(self, function: str, params: dict[str, Any]) -> FakeQuery:
         self.calls.append(("rpc", function, params))
@@ -1228,7 +1239,15 @@ async def test_missing_task_details_are_none() -> None:
 
 async def test_last_message_task_is_the_newest_message_about_a_task() -> None:
     """Событие разговора (§12.2): своё сообщение с задачей, не раньше `since`."""
-    fake = FakeClient(data=[{"task_id": TASK_ID, "received_at": "2026-09-29T11:40:00+05:00"}])
+    fake = FakeClient(
+        tables={
+            "messages": [
+                {"id": "m2", "task_id": TASK_ID, "received_at": "2026-09-29T11:40:00+05:00"},
+                {"id": "m1", "task_id": "0e2f", "received_at": "2026-09-29T11:20:00+05:00"},
+            ],
+            "tasks": [],
+        }
+    )
 
     found = await db_tasks.last_message_task(
         as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE
@@ -1236,11 +1255,95 @@ async def test_last_message_task_is_the_newest_message_about_a_task() -> None:
 
     assert found == TaskEvent(task_id=TASK_ID, at=datetime(2026, 9, 29, 11, 40, tzinfo=TZ))
     assert ("table", "messages") in fake.calls
-    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
-    assert ("not.is", "task_id", "null") in fake.calls
+    assert ("select", ("id, task_id, received_at",)) in fake.calls
     assert ("gte", "received_at", SINCE.isoformat()) in fake.calls
     assert ("order", "received_at", True) in fake.calls
-    assert ("limit", 1) in fake.calls
+    assert ("limit", db_tasks.LAST_MESSAGES_LIMIT) in fake.calls
+    # Задачи сообщений — второй выборкой, тоже по владельцу (инвариант 2).
+    assert ("table", "tasks") in fake.calls
+    assert ("in", "source_message_id", ("m2", "m1")) in fake.calls
+    assert ("order", "source_item", False) in fake.calls
+    assert fake.calls.count(("eq", "owner_telegram_id", OWNER_ID)) == 2
+
+
+async def test_message_about_several_tasks_gives_them_all_in_item_order() -> None:
+    """Сообщение о нескольких делах (§23.6): `task_id` первым, дальше заведённые
+    из него по номерам дел, без повторов."""
+    fake = FakeClient(
+        tables={
+            "messages": [
+                {"id": "m2", "task_id": TASK_ID, "received_at": "2026-09-29T11:40:00+05:00"},
+            ],
+            "tasks": [
+                {"id": TASK_ID, "source_message_id": "m2", "source_item": 1},
+                {"id": "0e2f", "source_message_id": "m2", "source_item": 2},
+                {"id": "7c4d", "source_message_id": "m2", "source_item": 3},
+            ],
+        }
+    )
+
+    found = await db_tasks.last_message_task(
+        as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE
+    )
+
+    assert found == TaskEvent(
+        task_id=TASK_ID, at=datetime(2026, 9, 29, 11, 40, tzinfo=TZ), more=("0e2f", "7c4d")
+    )
+
+
+async def test_message_without_tasks_is_skipped_for_an_older_one() -> None:
+    """Сообщение без задач (болтовня, отказ) событием не считается: берётся
+    более раннее — с задачами, заведёнными из него."""
+    fake = FakeClient(
+        tables={
+            "messages": [
+                {"id": "m3", "task_id": None, "received_at": "2026-09-29T11:50:00+05:00"},
+                {"id": "m2", "task_id": None, "received_at": "2026-09-29T11:40:00+05:00"},
+            ],
+            "tasks": [
+                {"id": "0e2f", "source_message_id": "m2", "source_item": 2},
+                {"id": "7c4d", "source_message_id": "m2", "source_item": 3},
+            ],
+        }
+    )
+
+    found = await db_tasks.last_message_task(
+        as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE
+    )
+
+    assert found == TaskEvent(
+        task_id="0e2f", at=datetime(2026, 9, 29, 11, 40, tzinfo=TZ), more=("7c4d",)
+    )
+
+
+async def test_window_without_task_messages_is_none() -> None:
+    fake = FakeClient(
+        tables={
+            "messages": [
+                {"id": "m3", "task_id": None, "received_at": "2026-09-29T11:50:00+05:00"},
+            ],
+            "tasks": [],
+        }
+    )
+
+    assert (
+        await db_tasks.last_message_task(as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE)
+        is None
+    )
+
+
+async def test_broken_source_task_row_is_a_failure() -> None:
+    fake = FakeClient(
+        tables={
+            "messages": [
+                {"id": "m2", "task_id": None, "received_at": "2026-09-29T11:40:00+05:00"},
+            ],
+            "tasks": [{"id": "0e2f"}],
+        }
+    )
+
+    with pytest.raises(DatabaseError):
+        await db_tasks.last_message_task(as_client(fake), owner_telegram_id=OWNER_ID, since=SINCE)
 
 
 RECENT_ROWS = [
@@ -1386,7 +1489,7 @@ async def test_other_bot_message_is_no_reminder() -> None:
 
 
 async def test_stored_message_is_found_by_owner_chat_and_telegram_id() -> None:
-    fake = FakeClient(data=[STORED_ROW])
+    fake = FakeClient(tables={"messages": [STORED_ROW], "tasks": []})
 
     found = await db_tasks.message_by_telegram_id(
         as_client(fake), owner_telegram_id=OWNER_ID, chat_id=OWNER_ID, telegram_message_id=7
@@ -1403,6 +1506,29 @@ async def test_stored_message_is_found_by_owner_chat_and_telegram_id() -> None:
     assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
     assert ("eq", "chat_id", OWNER_ID) in fake.calls
     assert ("eq", "telegram_message_id", 7) in fake.calls
+
+
+async def test_stored_message_knows_all_its_tasks() -> None:
+    """Свайп на своё сообщение о нескольких делах (§23.6): задачи — по номерам дел."""
+    fake = FakeClient(
+        tables={
+            "messages": [{**STORED_ROW, "task_id": TASK_ID}],
+            "tasks": [
+                {"id": TASK_ID, "source_message_id": "9a71", "source_item": 1},
+                {"id": "0e2f", "source_message_id": "9a71", "source_item": 2},
+            ],
+        }
+    )
+
+    found = await db_tasks.message_by_telegram_id(
+        as_client(fake), owner_telegram_id=OWNER_ID, chat_id=OWNER_ID, telegram_message_id=7
+    )
+
+    assert found is not None
+    assert found.tasks == (TASK_ID, "0e2f")
+    assert ("table", "tasks") in fake.calls
+    assert ("in", "source_message_id", ("9a71",)) in fake.calls
+    assert fake.calls.count(("eq", "owner_telegram_id", OWNER_ID)) == 2
 
 
 async def test_unknown_stored_message_is_none() -> None:

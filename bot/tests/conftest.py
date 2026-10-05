@@ -66,12 +66,14 @@ from solomon.services.understanding import (
     ConversationUnderstanding,
     ConversationVerdict,
     ImageType,
+    MessageUnderstanding,
     NotUnderstood,
     OpenTask,
     PhotoAnalysis,
     PhotoUnderstanding,
     PhotoVerdict,
     SpeechQuality,
+    TaskItem,
     Understanding,
     Verdict,
 )
@@ -450,6 +452,34 @@ def make_photo_understanding(**fields: Any) -> PhotoUnderstanding:
     return PhotoUnderstanding.model_validate({**base, **fields})
 
 
+def make_item(**fields: Any) -> TaskItem:
+    """Ещё одно дело сообщения (`techspec/23-several-tasks.md` §23.2) —
+    меняется только то, что важно тесту."""
+    base: dict[str, Any] = {
+        "kind": "task",
+        "title": "забрать костюм из химчистки",
+        "due_at": None,
+        "due_precision": None,
+        "repeat": None,
+        "priority": "normal",
+        "promise": None,
+        "people": [],
+        "needs_review": False,
+        "review_reason": None,
+        "question": None,
+        "same_as": None,
+    }
+    return TaskItem.model_validate({**base, **fields})
+
+
+def make_message_understanding(
+    also: list[TaskItem] | None = None, **fields: Any
+) -> MessageUnderstanding:
+    """Ответ модели на текст и голос (§23.2): разбор §5.3 и остальные дела."""
+    base = make_understanding().model_dump()
+    return MessageUnderstanding.model_validate({**base, **fields, "also": also or []})
+
+
 def make_conversation_understanding(**fields: Any) -> ConversationUnderstanding:
     """Ответ модели на переписку (§18.2): разбор §5.3 и остальные дела владельца."""
     base = make_understanding().model_dump()
@@ -484,9 +514,9 @@ class FakeAnalyst:
         # Открытый вопрос, с которым звали модель (§10.2), — по вызову.
         self.questions: list[AskedQuestion | None] = []
         # Подсказки правки словом (§12.2) — по вызову: список задач (`None` —
-        # блока 5 нет), номер последней задачи и строка свайпа.
+        # блока 5 нет), номера последних задач и строка свайпа.
         self.tasks: list[list[OpenTask] | None] = []
-        self.last_tasks: list[int | None] = []
+        self.last_tasks: list[list[int]] = []
         self.swipes: list[str | None] = []
         # Блок 6 «Недавний разговор» (§17.3) — по вызову; `None` — блока нет.
         self.recents: list[str | None] = []
@@ -526,14 +556,14 @@ class FakeAnalyst:
         spoken: SpeechQuality | None = None,
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
-        last_task: int | None = None,
+        last_tasks: Sequence[int] = (),
         swipe: str | None = None,
         recent: str | None = None,
     ) -> Verdict:
         self.calls.append((text, forwarded_from, spoken))
         self.questions.append(open_question)
         self.tasks.append(None if tasks is None else list(tasks))
-        self.last_tasks.append(last_task)
+        self.last_tasks.append(list(last_tasks))
         self.swipes.append(swipe)
         self.recents.append(recent)
         return self.verdict
@@ -686,7 +716,11 @@ class FakeEdits:
 
     async def message(self, chat_id: int, telegram_message_id: int) -> StoredMessage | None:
         self._touch("message", chat_id, telegram_message_id)
-        return self.messages.get(telegram_message_id)
+        stored = self.messages.get(telegram_message_id)
+        if stored is None or stored.tasks or stored.task_id is None:
+            return stored
+        # Как `message_by_telegram_id` (§23.6): `task_id` — первая задача сообщения.
+        return replace(stored, tasks=(stored.task_id,))
 
     async def task(self, task_id: str) -> TaskDetails | None:
         self._touch("task", task_id)

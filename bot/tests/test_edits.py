@@ -148,7 +148,7 @@ def test_no_valid_candidates_is_an_empty_list() -> None:
     assert edits.candidates_of(numbered, [0, 2, 7]) == []
 
 
-# --- последняя задача в разговоре ------------------------------------------
+# --- последние задачи в разговоре -------------------------------------------
 
 
 def test_last_task_is_the_later_of_the_message_and_the_reminder() -> None:
@@ -156,10 +156,10 @@ def test_last_task_is_the_later_of_the_message_and_the_reminder() -> None:
     message = TaskEvent(task_id="a", at=NOW - timedelta(minutes=30))
     reminder = TaskEvent(task_id="b", at=NOW - timedelta(minutes=10))
 
-    assert edits.last_task_number([message, reminder], numbered, NOW) == 1
-    assert edits.last_task_number([reminder, message], numbered, NOW) == 1
+    assert edits.last_task_numbers([message, reminder], numbered, NOW) == [1]
+    assert edits.last_task_numbers([reminder, message], numbered, NOW) == [1]
     earlier_reminder = TaskEvent(task_id="b", at=NOW - timedelta(minutes=50))
-    assert edits.last_task_number([message, earlier_reminder], numbered, NOW) == 2
+    assert edits.last_task_numbers([message, earlier_reminder], numbered, NOW) == [2]
 
 
 def test_last_task_older_than_an_hour_is_not_named() -> None:
@@ -168,9 +168,9 @@ def test_last_task_older_than_an_hour_is_not_named() -> None:
     fresh = TaskEvent(task_id="a", at=NOW - timedelta(minutes=59))
     stale = TaskEvent(task_id="a", at=NOW - timedelta(minutes=61))
 
-    assert edits.last_task_number([fresh], numbered, NOW) == 1
-    assert edits.last_task_number([stale], numbered, NOW) is None
-    assert edits.last_task_number([None, None], numbered, NOW) is None
+    assert edits.last_task_numbers([fresh], numbered, NOW) == [1]
+    assert edits.last_task_numbers([stale], numbered, NOW) == []
+    assert edits.last_task_numbers([None, None], numbered, NOW) == []
 
 
 def test_later_event_about_a_closed_task_hides_the_earlier_one() -> None:
@@ -179,36 +179,57 @@ def test_later_event_about_a_closed_task_hides_the_earlier_one() -> None:
     message = TaskEvent(task_id="a", at=NOW - timedelta(minutes=40))
     reminder = TaskEvent(task_id="closed", at=NOW - timedelta(minutes=5))
 
-    assert edits.last_task_number([message, reminder], numbered, NOW) is None
+    assert edits.last_task_numbers([message, reminder], numbered, NOW) == []
+
+
+def test_message_about_several_tasks_names_all_of_them_in_order() -> None:
+    """Сообщение о нескольких делах (`techspec/23-several-tasks.md` §23.2):
+    номера всех его задач по порядку дел; закрытой среди них нет."""
+    numbered = edits.number_tasks(
+        [make_task("a"), make_task("b", created_at=NOW), make_task("c", created_at=NOW)]
+    )
+    message = TaskEvent(task_id="c", at=NOW - timedelta(minutes=5), more=("closed", "a"))
+
+    assert edits.last_task_numbers([message], numbered, NOW) == [
+        edits.number_of(numbered, "c"),
+        edits.number_of(numbered, "a"),
+    ]
 
 
 # --- свайп -------------------------------------------------------------------
 
 
 def test_swipe_on_a_reminder_names_the_task_number() -> None:
-    line = edits.swipe_line("reminder", 3, "Напоминаю: встреча с Ренатой")
+    line = edits.swipe_line("reminder", [3], "Напоминаю: встреча с Ренатой")
     assert line == "Ответ на напоминание о задаче №3"
 
 
 def test_swipe_on_a_reminder_of_a_task_outside_the_list_carries_the_text() -> None:
-    line = edits.swipe_line("reminder", None, "Напоминаю: встреча с Ренатой")
+    line = edits.swipe_line("reminder", [], "Напоминаю: встреча с Ренатой")
     assert line == "Ответ на напоминание: «Напоминаю: встреча с Ренатой»"
 
 
 def test_swipe_on_another_bot_message_carries_its_text() -> None:
-    line = edits.swipe_line("bot", None, "Записал: встреча с Ренатой")
+    line = edits.swipe_line("bot", [], "Записал: встреча с Ренатой")
     assert line == "Ответ на сообщение бота: «Записал: встреча с Ренатой»"
 
 
 def test_swipe_on_an_own_message_names_the_task_or_carries_the_text() -> None:
-    assert edits.swipe_line("own", 2, "встреча завтра") == "Ответ на своё сообщение о задаче №2"
-    assert edits.swipe_line("own", None, "встреча завтра") == (
+    assert edits.swipe_line("own", [2], "встреча завтра") == "Ответ на своё сообщение о задаче №2"
+    assert edits.swipe_line("own", [], "встреча завтра") == (
         "Ответ на своё сообщение: «встреча завтра»"
     )
 
 
+def test_swipe_on_an_own_message_about_several_tasks_names_them_all() -> None:
+    """Своё сообщение о нескольких делах (§23.2) — «о задачах №A, №B»."""
+    line = edits.swipe_line("own", [4, 1, 2], "позвонить Игорю и забрать костюм")
+
+    assert line == "Ответ на своё сообщение о задачах №4, №1, №2"
+
+
 def test_swipe_text_is_cut_at_two_hundred_characters() -> None:
-    line = edits.swipe_line("bot", None, "а" * 250)
+    line = edits.swipe_line("bot", [], "а" * 250)
 
     assert line == f"Ответ на сообщение бота: «{'а' * 200}…»"
 
@@ -218,7 +239,7 @@ def test_swipe_text_is_cut_at_two_hundred_characters() -> None:
 def test_swipe_without_text_or_number_is_no_line(
     target: edits.SwipeTarget, text: str | None
 ) -> None:
-    assert edits.swipe_line(target, None, text) is None
+    assert edits.swipe_line(target, [], text) is None
 
 
 # --- правка для базы ---------------------------------------------------------

@@ -223,7 +223,7 @@ async def test_forwarded_message_gets_only_the_list_and_its_edit_is_dropped() ->
     outcome = await say(service, "пришлю смету", forwarded_from="Аня")
 
     assert analyst.tasks == [[MEETING, REPORT, LAMP]]
-    assert analyst.last_tasks == [None]
+    assert analyst.last_tasks == [[]]
     assert analyst.swipes == [None]
     assert store.calls == [("open_tasks", 50)]
     assert saved_edit(understandings) is None
@@ -263,7 +263,7 @@ async def test_last_task_is_the_later_event_within_an_hour() -> None:
 
     await say(service)
 
-    assert analyst.last_tasks == [1]
+    assert analyst.last_tasks == [[1]]
     assert ("last_message_event", NOW - timedelta(hours=1)) in store.calls
 
 
@@ -277,7 +277,7 @@ async def test_last_task_is_the_later_message_too() -> None:
 
     await say(service)
 
-    assert analyst.last_tasks == [2]
+    assert analyst.last_tasks == [[2]]
 
 
 async def test_event_older_than_an_hour_names_no_last_task() -> None:
@@ -288,7 +288,7 @@ async def test_event_older_than_an_hour_names_no_last_task() -> None:
 
     await say(service)
 
-    assert analyst.last_tasks == [None]
+    assert analyst.last_tasks == [[]]
 
 
 async def test_closed_last_task_names_nothing() -> None:
@@ -303,7 +303,7 @@ async def test_closed_last_task_names_nothing() -> None:
 
     await say(service)
 
-    assert analyst.last_tasks == [None]
+    assert analyst.last_tasks == [[]]
 
 
 async def test_failed_last_task_read_keeps_the_list() -> None:
@@ -316,7 +316,7 @@ async def test_failed_last_task_read_keeps_the_list() -> None:
 
     await say(service)
 
-    assert analyst.last_tasks == [None]
+    assert analyst.last_tasks == [[]]
     assert analyst.tasks == [[MEETING, REPORT, LAMP]]
 
 
@@ -1682,7 +1682,7 @@ async def test_hour_after_the_question_moves_the_same_task() -> None:
     outcome = await say(service, "в 16")
 
     # Отчёт раньше по сроку — встреча в списке вторая.
-    assert analyst.last_tasks == [2]
+    assert analyst.last_tasks == [[2]]
     assert saved_edit(understandings)["task_id"] == MEETING_ID
     assert saved_edit(understandings)["changes"] == {"due_at": "2026-10-04T16:00:00+05:00"}
     assert outcome.message == (

@@ -51,8 +51,11 @@ logger = logging.getLogger(__name__)
 
 MODEL = "claude-opus-5"
 # Модель пишет и разбор, и ответ разговора (`techspec/17-conversation.md`
-# §17.4): отказ по `max_tokens` записал бы вопрос задачей «как есть».
-MAX_TOKENS = 2048
+# §17.4): отказ по `max_tokens` записал бы вопрос задачей «как есть». Десять
+# дел одного сообщения с мышлением в 2048 не помещаются
+# (`techspec/23-several-tasks.md` §23.2) — поэтому 4096; переписка делит
+# константу с текстом и голосом.
+MAX_TOKENS = 4096
 # Мышление у Opus 5 включено по умолчанию; `effort` — единственная ручка
 # глубины, `budget_tokens` и `temperature` модель отвергает (§5.1).
 OUTPUT_CONFIG: OutputConfigParam = {"effort": "medium"}
@@ -164,6 +167,58 @@ class Understanding(BaseModel):
     edit: TaskEdit | None
     same_as: int | None
     facts: list[FactItem]
+
+
+# Ещё одно новое дело того же сообщения (`techspec/23-several-tasks.md`
+# §23.2): поля верхнего разбора, которые нужны записи. Ответа, правки,
+# разговора и памяти у него нет — они у сообщения целиком. Доккомментарий —
+# для модели.
+class TaskItem(BaseModel):
+    """Ещё одно новое дело из того же сообщения: поля — по тем же правилам,
+    что у верхнего уровня."""
+
+    kind: Literal["task", "idea", "wish"]
+    title: str
+    due_at: datetime | None
+    due_precision: DuePrecision | None
+    repeat: Repeat | None
+    priority: Literal["low", "normal", "high"]
+    promise: Literal["mine", "to_me"] | None
+    people: list[str]
+    needs_review: bool
+    review_reason: str | None
+    question: str | None
+    same_as: int | None
+
+    def as_understanding(self) -> Understanding:
+        """Дело как разбор об одном деле: так его пишут и проверяют те же
+        функции, что верхние поля (дубль, накладка, вопрос, напоминания)."""
+        return Understanding(
+            **self.model_dump(),
+            reply_hint=None,
+            answers_question=False,
+            edit=None,
+            facts=[],
+        )
+
+
+# Разбор текста и голоса (§23.2): верхние поля — первое дело, правка или
+# ответ, как было; `also` — остальные новые дела по порядку. У снимка и
+# переписки схемы свои, `also` в них нет (§14.4, §18.4). Доккомментарий —
+# для модели.
+class MessageUnderstanding(Understanding):
+    """Разбор одного сообщения владельца: первое дело — в полях верхнего
+    уровня, остальные новые дела — в also."""
+
+    also: list[TaskItem]
+
+
+def also_of(understanding: Understanding) -> list[TaskItem]:
+    """Остальные новые дела разбора (§23.2): у снимка, переписки и разбора
+    до этапа их нет — пустой список."""
+    if isinstance(understanding, MessageUnderstanding):
+        return list(understanding.also)
+    return []
 
 
 # Ответ на снимок (§14.3): разбор §5.3 и два поля снимка. Доккомментарий —
@@ -442,6 +497,38 @@ facts у переписки — всегда пустой список: из п�
 запишет дело. Без подписи и во всех остальных случаях reply_hint = null."""
 
 
+# Абзац о нескольких делах (`techspec/23-several-tasks.md` §23.1–23.2):
+# дописывается к блоку 1 только у текста и голоса — `RULES` общий со снимком
+# и перепиской, а поля `also` у них нет.
+SEVERAL_RULES = """В одном сообщении бывает несколько дел. Дело — то, что делается за один
+раз: один поход, один звонок, одна встреча, одна поездка. Шаги одного дела —
+одно дело: «позвонить Игорю и договориться о встрече» — одно,
+«купить хлеб, молоко и яйца» — одно, покупки одним походом не дробятся.
+Разные действия, разные сроки или разные люди — разные дела:
+«завтра позвонить Игорю, а в пятницу забрать костюм» — два,
+«позвонить Игорю и Олегу» — два звонка, два дела. Одно и то же, сказанное
+дважды, — одно дело. Повтор («каждый день», «по вторникам») —
+одно дело с правилом, а не несколько. Срок, сказанный один раз на несколько
+дел («завтра позвонить Игорю и написать Олегу»), — у каждого из них. Идея
+и желание — тоже дела: «запиши идею подарка и в субботу купи цветы» — идея
+и задача. Сведение о себе и реплика разговора — не дела: сведения идут
+в facts, как обычно, а на реплику рядом с делами не отвечайте.
+
+Первое новое дело — в полях верхнего уровня, остальные — в also, по одному
+на дело, в том порядке, в каком они сказаны. Если сообщение отвечает на
+открытый вопрос (answers_question = true) или правит задачу (edit), поля
+верхнего уровня — о них, как всегда, и все новые дела — в also. Дело одно —
+also = []. У каждого дела в also свои kind (task, idea или wish), суть,
+срок, повтор, срочность, обещание, люди и признаки — по тем же правилам, что
+у полей верхнего уровня.
+
+question — только у одного дела, первого из тех, что без ответа не сделать.
+Вопрос называет дело: «Кому позвонить?», «Когда забрать костюм?», а не
+«Когда?». У остальных неясных дел — needs_review = true и review_reason, а
+question = null. Дубль — same_as у того дела, которое уже есть в списке
+открытых задач, по правилам дубля; у остальных дел same_as = null."""
+
+
 class KnownFact(Protocol):
     """Уже известная запись памяти — то, что нужно промпту (§5.2)."""
 
@@ -600,9 +687,14 @@ EDIT_RULES = """Если сообщение просит поменять уже
 строка перед текстом «Ответ на напоминание о задаче №N» или «Ответ на своё
 сообщение о задаче №N» — человек ответил на сообщение об этой задаче; строка
 «Последняя задача в разговоре: №N» — если задача в сообщении не названа
-(«перенеси на завтра», «сделал»), речь о ней. Подходят несколько и не
-понять, какая, — task = null, а номера похожих в candidates. Подходящей
-задачи в списке нет — task = null и пустой candidates.
+(«перенеси на завтра», «сделал»), речь о ней. Строка
+«Последние задачи в разговоре: №A, №B» или «Ответ на своё сообщение
+о задачах №A, №B» — речь шла о нескольких делах сразу: задача в сообщении
+не названа — task = null, а все эти номера в candidates;
+«второе», «последнее» — по нумерации списка в вашем ответе из недавнего
+разговора, а в task — номер этой задачи из списка выше.
+Подходят несколько и не понять, какая, — task = null, а номера похожих в
+candidates. Подходящей задачи в списке нет — task = null и пустой candidates.
 В остальных полях edit — только то, что меняется; не меняется — null, а
 due_removed и time_removed = false. Новый срок — due_at и due_precision по
 тем же правилам времени: «перенеси на завтра утром» — часть дня, «на 11» —
@@ -682,7 +774,7 @@ RECENT_RULES = """Это прошлые сообщения владельца и
   kind = task, суть и срок — то, что вы предложили записать;
 - «а в пятницу?» после вопроса о четверге — вопрос о пятнице.
 Задачу из разговора править можно, только назвав её номером из списка
-открытых задач: у недавнего разговора номеров нет. Последняя задача в
+открытых задач: у недавнего разговора номеров нет. Последние задачи в
 разговоре и открытый вопрос работают, как и без этого блока."""
 
 
@@ -719,9 +811,20 @@ def _open_task_line(number: int, task: OpenTask, timezone: ZoneInfo) -> str:
     return f"{line} ({'; '.join(details)})" if details else line
 
 
+def last_tasks_line(numbers: Sequence[int]) -> str | None:
+    """Строка о последних задачах в разговоре (§12.2, §23.2): одна — «Последняя
+    задача в разговоре: №N», несколько — «Последние задачи в разговоре: №A,
+    №B»; нет — строки нет."""
+    if not numbers:
+        return None
+    if len(numbers) == 1:
+        return f"Последняя задача в разговоре: №{numbers[0]}"
+    return "Последние задачи в разговоре: " + ", ".join(f"№{number}" for number in numbers)
+
+
 def format_open_tasks(
     tasks: Sequence[OpenTask] | None,
-    last_task: int | None,
+    last_tasks: Sequence[int],
     timezone: ZoneInfo,
     *,
     short: bool = False,
@@ -732,13 +835,14 @@ def format_open_tasks(
 
     `tasks` приходят уже в порядке `edits.number_tasks`: номер строки —
     место в этом списке, по нему бот потом переводит номер модели в задачу.
-    Полный блок — строки, последняя задача в разговоре, правила правки и
-    правила дубля. Пустой список — строка «Открытых задач нет.» и те же
+    Полный блок — строки, последние задачи в разговоре (`last_tasks` —
+    задачи последнего сообщения о задачах, §23.2), правила правки и правила
+    дубля. Пустой список — строка «Открытых задач нет.» и те же
     правила: «перенеси встречу» при пустом списке — тоже правка, просто
     задача не найдётся.
 
     `short` — пересланное и снимок: строки, пометка «задач не меняет» и
-    правила дубля, без правил правки и без последней задачи; задач нет —
+    правила дубля, без правил правки и без последних задач; задач нет —
     блока нет, сверять не с чем. `photo` дописывает к короткому блоку
     строку о главном поручении снимка, `conversation` — о деле переписки
     (§18.2).
@@ -758,8 +862,9 @@ def format_open_tasks(
         if conversation:
             lines.append(CONVERSATION_DUPLICATE_RULE)
         return "\n".join(lines)
-    if last_task is not None:
-        lines.append(f"Последняя задача в разговоре: №{last_task}")
+    last = last_tasks_line(last_tasks)
+    if last is not None:
+        lines.append(last)
     lines.extend((EDIT_RULES, DUPLICATE_RULES))
     return "\n".join(lines)
 
@@ -781,7 +886,7 @@ def build_system_prompt(
     known: Sequence[KnownFact] = (),
     open_question: AskedQuestion | None = None,
     tasks: Sequence[OpenTask] | None = None,
-    last_task: int | None = None,
+    last_tasks: Sequence[int] = (),
     recent: str | None = None,
     *,
     photo: bool = False,
@@ -796,20 +901,22 @@ def build_system_prompt(
     снимка, блок 5 — короткий. `conversation` — переписка, пересланная
     разом (§18.2): так же с правилами переписки. `short` — короткий блок 5 у
     пересланного (§15.2). `recent` — готовые строки блока 6 (§17.3); у
-    пересланного и снимка их не передают, у переписки — передают. Без флагов
-    строка та же, что у своего текста и голоса."""
-    rules = RULES
+    пересланного и снимка их не передают, у переписки — передают. Без
+    `photo` и `conversation` — текст и голос, свой или пересланный: к блоку 1
+    дописываются правила о нескольких делах (§23.2)."""
     if photo:
         rules = f"{RULES}\n\n{PHOTO_RULES}"
     elif conversation:
         rules = f"{RULES}\n\n{CONVERSATION_RULES}"
+    else:
+        rules = f"{RULES}\n\n{SEVERAL_RULES}"
     parts = [rules, format_moment(now, timezone)]
     blocks = (
         format_known(known),
         format_open_question(open_question, timezone),
         format_open_tasks(
             tasks,
-            last_task,
+            last_tasks,
             timezone,
             short=short or photo or conversation,
             photo=photo,
@@ -888,12 +995,15 @@ def settle_parts[U: Understanding](parsed: U, timezone: ZoneInfo) -> U:
     Часть вместе с повтором — срок со временем с моментом модели (§21.6):
     у поручения повтор верхнего уровня, у правки — свой. Зовётся там, где
     ответ модели становится разбором, во всех трёх путях — до плана
-    напоминаний и до записи. Остальные поля не трогаются.
+    напоминаний и до записи. Дела `also` (§23.2) — так же, каждое со своим
+    повтором. Остальные поля не трогаются.
     """
     due_at, precision = parts.settle(
         parsed.due_at, parsed.due_precision, repeating=parsed.repeat is not None, timezone=timezone
     )
     update: dict[str, Any] = {"due_at": due_at, "due_precision": precision}
+    if isinstance(parsed, MessageUnderstanding):
+        update["also"] = [_settle_item(item, timezone) for item in parsed.also]
     edit = parsed.edit
     if edit is not None:
         edit_due, edit_precision = parts.settle(
@@ -903,6 +1013,14 @@ def settle_parts[U: Understanding](parsed: U, timezone: ZoneInfo) -> U:
             update={"due_at": edit_due, "due_precision": edit_precision}
         )
     return parsed.model_copy(update=update)
+
+
+def _settle_item(item: TaskItem, timezone: ZoneInfo) -> TaskItem:
+    """Часть дня у дела `also` — как у верхнего поручения."""
+    due_at, precision = parts.settle(
+        item.due_at, item.due_precision, repeating=item.repeat is not None, timezone=timezone
+    )
+    return item.model_copy(update={"due_at": due_at, "due_precision": precision})
 
 
 def trim_photo(parsed: PhotoUnderstanding) -> PhotoUnderstanding:
@@ -1030,13 +1148,14 @@ def create_anthropic_client(settings: Settings) -> AsyncAnthropic:
 
 
 def anthropic_call(client: AsyncAnthropic, model: str = MODEL) -> ModelCall:
-    """Настоящий вызов: структурированный ответ по схеме `Understanding`."""
+    """Настоящий вызов: структурированный ответ по схеме
+    `MessageUnderstanding` — разбор и остальные дела сообщения (§23.2)."""
 
     async def call(*, system: str, text: str) -> ModelAnswer:
         return await client.messages.parse(
             model=model,
             max_tokens=MAX_TOKENS,
-            output_format=Understanding,
+            output_format=MessageUnderstanding,
             output_config=OUTPUT_CONFIG,
             system=system,
             messages=[{"role": "user", "content": text}],
@@ -1066,7 +1185,8 @@ def anthropic_photo_call(client: AsyncAnthropic, model: str = MODEL) -> PhotoCal
 
 def anthropic_conversation_call(client: AsyncAnthropic, model: str = MODEL) -> ConversationCall:
     """Настоящий вызов с перепиской (§18.2): схема `ConversationUnderstanding`,
-    лимиты текста — 2048 токенов и минута; модель и `effort` прежние."""
+    лимиты текста — `MAX_TOKENS` и `TIMEOUT_SECONDS`; модель и `effort`
+    прежние."""
 
     async def call(*, system: str, text: str) -> ConversationAnswer:
         return await client.messages.parse(
@@ -1132,7 +1252,7 @@ class UnderstandingService:
         spoken: SpeechQuality | None = None,
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
-        last_task: int | None = None,
+        last_tasks: Sequence[int] = (),
         swipe: str | None = None,
         recent: str | None = None,
     ) -> Verdict:
@@ -1146,10 +1266,10 @@ class UnderstandingService:
         промпт, а ответ ли это — решает модель.
 
         `tasks` — открытые задачи по номерам (§12.2), `None` — блока 5 нет
-        (сбой чтения); `last_task` — номер последней задачи в разговоре;
-        `swipe` — строка о том, на что ответили свайпом. Всё это читает и
-        нумерует слой выше. У пересланного блок 5 короткий — только для
-        дубля (§15.2), последней задачи в нём нет.
+        (сбой чтения); `last_tasks` — номера задач последнего сообщения о
+        задачах (§12.2, §23.2); `swipe` — строка о том, на что ответили
+        свайпом. Всё это читает и нумерует слой выше. У пересланного блок 5
+        короткий — только для дубля (§15.2), последних задач в нём нет.
 
         `recent` — строки недавнего разговора (блок 6, §17.3); у
         пересланного блока нет, даже если строки пришли: чужие слова
@@ -1163,7 +1283,7 @@ class UnderstandingService:
             known,
             open_question,
             tasks,
-            None if forwarded else last_task,
+            () if forwarded else last_tasks,
             None if forwarded else recent,
             short=forwarded,
         )
@@ -1178,13 +1298,14 @@ class UnderstandingService:
 
         logger.info(
             "Разобрано: kind=%s, needs_review=%s, вопрос=%s, ответ на вопрос=%s, "
-            "правка=%s, дубль=%s, сведений %s, ответ знаков %s, токенов %s/%s",
+            "правка=%s, дубль=%s, ещё дел %s, сведений %s, ответ знаков %s, токенов %s/%s",
             parsed.kind,
             parsed.needs_review,
             parsed.question is not None,
             parsed.answers_question,
             None if parsed.edit is None else parsed.edit.action,
             parsed.same_as,
+            len(also_of(parsed)),
             len(parsed.facts),
             len(parsed.reply_hint or ""),
             answer.usage.input_tokens,

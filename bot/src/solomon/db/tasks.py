@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -48,6 +48,9 @@ DETAIL_COLUMNS = (
 # Сообщение владельца, на которое ответили свайпом или по которому нажали
 # кнопку кандидата: текст, задача, разбор и ответ бота (§12.2, §12.6).
 STORED_MESSAGE_COLUMNS = "id, text, task_id, analysis, reply"
+# Сколько свежих сообщений окна смотрит поиск последних задач разговора
+# (§12.2): за час разговора больше полусотни сообщений не бывает.
+LAST_MESSAGES_LIMIT = 50
 # Поля задачи, которые нужны промпту с открытым вопросом и слиянию ответа
 # с задачей (`techspec/10-dialog.md` §10.2).
 QUESTION_COLUMNS = (
@@ -125,12 +128,15 @@ class TaskDetails:
 class TaskEvent:
     """Событие разговора о задаче: сообщение владельца или ушедшее напоминание.
 
-    По более позднему из них бот называет модели последнюю задачу в
-    разговоре (§12.2).
+    По более позднему из них бот называет модели последние задачи в
+    разговоре (§12.2). `task_id` — первая задача события, `more` — остальные
+    задачи того же сообщения по номерам дел (`techspec/23-several-tasks.md`
+    §23.6); у напоминания их нет.
     """
 
     task_id: str
     at: datetime
+    more: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +145,8 @@ class StoredMessage:
 
     `text` у голосового — расшифровка; `analysis` — сырой разбор модели, из
     него кнопка кандидата строит правку (§12.6); `task_id` — задача, о
-    которой сообщение, если бот её знает.
+    которой сообщение, если бот её знает. `tasks` — все задачи сообщения
+    (§23.6): `task_id` первой, дальше заведённые из него по номерам дел.
     """
 
     id: str
@@ -147,6 +154,7 @@ class StoredMessage:
     task_id: str | None
     analysis: Mapping[str, Any] | None
     reply: str | None
+    tasks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -658,26 +666,75 @@ def _event_from_row(row: Any, field: str) -> TaskEvent:
 async def last_message_task(
     db: Client, *, owner_telegram_id: int, since: datetime
 ) -> TaskEvent | None:
-    """Последнее сообщение владельца о задаче не раньше `since` (§12.2).
+    """Последнее сообщение владельца о задачах не раньше `since` (§12.2).
 
-    «О задаче» — у сообщения есть `task_id` (§3.2): из него задачу завели,
-    дополнили, поправили, закрыли или выбрали кнопкой.
+    «О задачах» — у сообщения есть задачи (`techspec/23-several-tasks.md`
+    §23.6): `messages.task_id` — из него задачу завели, дополнили, поправили,
+    закрыли или выбрали кнопкой — и задачи, заведённые из него по номерам
+    дел. Двумя выборками, обе с фильтром владельца: свежие сообщения окна, затем
+    задачи этих сообщений. Вложенной выборки нет — таблицы связаны дважды
+    (`messages.task_id` и `tasks.source_message_id`).
     """
     rows = await ask(
         lambda: (
             db.table(MESSAGES_TABLE)
-            .select("task_id, received_at")
+            .select("id, task_id, received_at")
             .eq("owner_telegram_id", owner_telegram_id)
-            .not_.is_("task_id", "null")
             .gte("received_at", since.isoformat())
             .order("received_at", desc=True)
-            .limit(1)
+            .limit(LAST_MESSAGES_LIMIT)
             .execute()
             .data
         )
     )
-    found = _rows(rows, "сообщений")
-    return _event_from_row(found[0], "received_at") if found else None
+    messages = _rows(rows, "сообщений")
+    if not messages:
+        return None
+    ids = [str(_field(row, "id")) for row in messages]
+    sourced = await _source_tasks(db, owner_telegram_id=owner_telegram_id, message_ids=ids)
+    for message_id, row in zip(ids, messages, strict=True):
+        found = _message_tasks(_optional_text(_field(row, "task_id")), sourced.get(message_id))
+        if found:
+            at = moment(_field(row, "received_at"), "received_at")
+            return TaskEvent(task_id=found[0], at=at, more=found[1:])
+    return None
+
+
+def _field(row: Any, name: str) -> Any:
+    """Поле строки ответа; нет строки или поля — отказ."""
+    if not isinstance(row, Mapping) or name not in row:
+        raise DatabaseError(f"В ответе базы нет поля {name}.")
+    return row[name]
+
+
+async def _source_tasks(
+    db: Client, *, owner_telegram_id: int, message_ids: Sequence[str]
+) -> dict[str, list[str]]:
+    """Задачи, заведённые из этих сообщений, по номерам дел (§23.6):
+    сообщение → id задач."""
+    rows = await ask(
+        lambda: (
+            db.table(TASKS_TABLE)
+            .select("id, source_message_id, source_item")
+            .eq("owner_telegram_id", owner_telegram_id)
+            .in_("source_message_id", list(message_ids))
+            .order("source_item")
+            .execute()
+            .data
+        )
+    )
+    found: dict[str, list[str]] = {}
+    for row in _rows(rows, "задач"):
+        found.setdefault(str(_field(row, "source_message_id")), []).append(str(_field(row, "id")))
+    return found
+
+
+def _message_tasks(task_id: str | None, sourced: Sequence[str] | None) -> tuple[str, ...]:
+    """Задачи сообщения (§23.6): `task_id` первой, дальше заведённые из
+    него по номерам дел, без повторов."""
+    ordered = [task_id] if task_id is not None else []
+    ordered.extend(item for item in sourced or () if item != task_id)
+    return tuple(ordered)
 
 
 async def recent_messages(
@@ -766,7 +823,8 @@ async def message_by_telegram_id(
     """Сообщение владельца по id в Telegram — для свайпа и кнопок (§12.2, §12.6).
 
     Ключ тот же, что у повтора в `record_message`: владелец, чат и номер
-    сообщения. Нет в базе — `None`.
+    сообщения. Нет в базе — `None`. Задачи сообщения (§23.6) — второй
+    выборкой, тоже по владельцу.
     """
     rows = await ask(
         lambda: (
@@ -781,7 +839,11 @@ async def message_by_telegram_id(
         )
     )
     found = _rows(rows, "сообщений")
-    return _stored_message_from_row(found[0]) if found else None
+    if not found:
+        return None
+    stored = _stored_message_from_row(found[0])
+    sourced = await _source_tasks(db, owner_telegram_id=owner_telegram_id, message_ids=[stored.id])
+    return replace(stored, tasks=_message_tasks(stored.task_id, sourced.get(stored.id)))
 
 
 async def pick_task(

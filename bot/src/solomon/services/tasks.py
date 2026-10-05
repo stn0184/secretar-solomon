@@ -119,6 +119,7 @@ from solomon.services.understanding import (
     ConversationUnderstanding,
     ConversationVerdict,
     ImageType,
+    MessageUnderstanding,
     OpenTask,
     PhotoAnalysis,
     PhotoUnderstanding,
@@ -279,7 +280,7 @@ class Analyst(Protocol):
         spoken: SpeechQuality | None = None,
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
-        last_task: int | None = None,
+        last_tasks: Sequence[int] = (),
         swipe: str | None = None,
         recent: str | None = None,
     ) -> Verdict: ...
@@ -349,7 +350,7 @@ class Swipe:
 
 @dataclass(frozen=True, slots=True)
 class EditContext:
-    """Подсказки модели для правки (§12.2): список, последняя задача, свайп,
+    """Подсказки модели для правки (§12.2): список, последние задачи, свайп,
     недавний разговор.
 
     `tasks` — открытые задачи в порядке номеров (`edits.number_tasks`);
@@ -362,21 +363,24 @@ class EditContext:
     """
 
     tasks: list[TaskDetails] | None
-    last_task: int | None
+    last_tasks: tuple[int, ...]
     swipe: str | None
     edits: bool = True
     recent: str | None = None
 
 
-NO_EDIT = EditContext(tasks=None, last_task=None, swipe=None)
+NO_EDIT = EditContext(tasks=None, last_tasks=(), swipe=None)
 
 
 @dataclass(frozen=True, slots=True)
 class _Swiped:
-    """На что ответили свайпом, как это знает база: вид, задача, текст."""
+    """На что ответили свайпом, как это знает база: вид, задачи, текст.
+
+    У напоминания задача одна, у своего сообщения — все его задачи (§23.6).
+    """
 
     target: edits.SwipeTarget
-    task_id: str | None
+    task_ids: tuple[str, ...]
     text: str | None
 
 
@@ -1544,7 +1548,7 @@ class TaskService:
             spoken=spoken,
             open_question=asked,
             tasks=context.tasks,
-            last_task=context.last_task,
+            last_tasks=context.last_tasks,
             swipe=context.swipe,
             recent=context.recent,
         )
@@ -1806,7 +1810,7 @@ class TaskService:
             return await self._check_context()
         store = self._edits
         if store is None:
-            return EditContext(tasks=[], last_task=None, swipe=None)
+            return EditContext(tasks=[], last_tasks=(), swipe=None)
         now = self._clock()
         since = now - edits.LAST_TASK_WINDOW
         tasks, events, swiped, recent = await asyncio.gather(
@@ -1817,18 +1821,19 @@ class TaskService:
         )
         if tasks is None:
             return replace(NO_EDIT, recent=recent)
-        last_task = edits.last_task_number(events, tasks, now)
+        last_tasks = tuple(edits.last_task_numbers(events, tasks, now))
         line = None
         if swiped is not None:
-            number = edits.number_of(tasks, swiped.task_id)
-            line = edits.swipe_line(swiped.target, number, swiped.text)
+            numbers = [edits.number_of(tasks, task_id) for task_id in swiped.task_ids]
+            known = [number for number in numbers if number is not None]
+            line = edits.swipe_line(swiped.target, known, swiped.text)
         logger.info(
-            "Контекст правки: задач %s, последняя №%s, свайп %s",
+            "Контекст правки: задач %s, последние %s, свайп %s",
             len(tasks),
-            last_task,
+            list(last_tasks),
             line is not None,
         )
-        return EditContext(tasks=tasks, last_task=last_task, swipe=line, recent=recent)
+        return EditContext(tasks=tasks, last_tasks=last_tasks, swipe=line, recent=recent)
 
     async def _recent(self, store: EditStore, since: datetime, before: datetime) -> str | None:
         """Блок 6 «Недавний разговор» (§17.3) или `None`, если блока нет.
@@ -1854,12 +1859,12 @@ class TaskService:
         """
         store = self._edits
         if store is None:
-            return EditContext(tasks=[], last_task=None, swipe=None, edits=False)
+            return EditContext(tasks=[], last_tasks=(), swipe=None, edits=False)
         tasks = await self._open_tasks(store)
         if tasks is None:
             return NO_EDIT
         logger.info("Список для сверки дублей: задач %s", len(tasks))
-        return EditContext(tasks=tasks, last_task=None, swipe=None, edits=False)
+        return EditContext(tasks=tasks, last_tasks=(), swipe=None, edits=False)
 
     async def _open_tasks(self, store: EditStore) -> list[TaskDetails] | None:
         """Открытые задачи по номерам; база не ответила — `None`, блока нет."""
@@ -1942,8 +1947,9 @@ class TaskService:
         try:
             if swipe.from_bot:
                 task_id = await store.reminder_task(swipe.telegram_message_id)
-                target: edits.SwipeTarget = "bot" if task_id is None else "reminder"
-                return _Swiped(target=target, task_id=task_id, text=swipe.text)
+                if task_id is None:
+                    return _Swiped(target="bot", task_ids=(), text=swipe.text)
+                return _Swiped(target="reminder", task_ids=(task_id,), text=swipe.text)
             stored = await store.message(chat_id, swipe.telegram_message_id)
         except DatabaseError as error:
             logger.warning("Свайп не прочитан: %s", error)
@@ -1952,9 +1958,7 @@ class TaskService:
         if not text and stored is not None:
             # Голосовое: в Telegram текста нет, расшифровка — в базе.
             text = stored.text
-        return _Swiped(
-            target="own", task_id=stored.task_id if stored is not None else None, text=text
-        )
+        return _Swiped(target="own", task_ids=stored.tasks if stored is not None else (), text=text)
 
     async def _decide_edit(
         self,
@@ -2273,9 +2277,11 @@ class TaskService:
 
         Разбор снимка узнаётся по `photo_text`, переписки — по `more_tasks` без
         него; оба читаются своей моделью: они нужны ответу «Записать
-        отдельно» (§15.4, §18.4). В разборе, записанном до этапа 013, нет
-        `same_as` — он читается как «не дубль»; в правке до этапа 021 нет
-        `time_removed` — она читается как «час не снимали» (§12.8).
+        отдельно» (§15.4, §18.4). Разбор текста и голоса с `also` — своей
+        моделью, без него (до этапа 023) — как разбор без других дел
+        (`techspec/23-several-tasks.md` §23.2). В разборе, записанном до этапа
+        013, нет `same_as` — он читается как «не дубль»; в правке до этапа 021
+        нет `time_removed` — она читается как «час не снимали» (§12.8).
         """
         if stored.analysis is None:
             return None
@@ -2287,6 +2293,8 @@ class TaskService:
             model = PhotoUnderstanding
         elif "more_tasks" in analysis:
             model = ConversationUnderstanding
+        elif "also" in analysis:
+            model = MessageUnderstanding
         try:
             return model.model_validate(analysis)
         except ValidationError as error:

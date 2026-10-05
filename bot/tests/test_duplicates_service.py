@@ -303,7 +303,7 @@ async def test_forwarded_message_is_checked_against_the_list_but_edits_nothing()
     outcome = await say(service, "жду отчёт к пятнице", forwarded_from="Аня")
 
     assert analyst.tasks == [[MEETING, REPORT, LAMP]]
-    assert analyst.last_tasks == [None]
+    assert analyst.last_tasks == [[]]
     assert analyst.swipes == [None]
     assert store.calls == [("open_tasks", 50)]
     assert saved(understandings, "edit") is None
