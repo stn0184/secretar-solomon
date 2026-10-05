@@ -18,6 +18,7 @@ from solomon.services.reminders import ReminderService, mirror_timezone
 from solomon.services.tasks import TaskService
 from solomon.services.transcription import DeepgramTranscriber, create_deepgram_client
 from solomon.services.understanding import UnderstandingService, create_anthropic_client
+from solomon.telegram import TelegramSession
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,8 @@ def build_dispatcher(
 
 async def run(settings: Settings, db: Client | None = None) -> None:
     """Запустить опрос Telegram и работать, пока не остановят."""
-    bot = Bot(token=settings.telegram_bot_token)
+    # Своя сессия: соединение с Telegram ждёт 5 с, а не минуту (`telegram.py`).
+    bot = Bot(token=settings.telegram_bot_token, session=TelegramSession())
     client = create_anthropic_client(settings)
     speech = create_deepgram_client(settings)
     tasks = build_tasks(settings, db, client, speech) if db is not None else None

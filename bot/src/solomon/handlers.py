@@ -23,7 +23,6 @@ from aiogram.types import (
     MessageOriginHiddenUser,
     MessageOriginUser,
 )
-from aiogram.utils.chat_action import ChatActionSender
 from aiohttp import ClientConnectionError, ClientPayloadError
 
 from solomon import texts
@@ -32,6 +31,7 @@ from solomon.services import edits
 from solomon.services.reminders import ReminderService
 from solomon.services.tasks import Button, PressOutcome, Swipe, TaskService
 from solomon.services.understanding import ImageType
+from solomon.telegram import typing_status
 
 logger = logging.getLogger(__name__)
 
@@ -409,8 +409,9 @@ async def handle_speech(
     на диск не попадают (`techspec/09-voice.md` §9.2, §9.3). Пока идёт
     распознавание и разбор, в чате висит «печатает…» — это дольше текста, и
     молчание пугает; статус живёт пять секунд, поэтому его повторяет
-    `ChatActionSender`. Пустой ответ — голосовое пересланной переписки,
-    за которую отвечает другое сообщение (`techspec/18-forwarded.md` §18.1).
+    `typing_status`, и повисший статус ответ не держит. Пустой ответ —
+    голосовое пересланной переписки, за которую отвечает другое сообщение
+    (`techspec/18-forwarded.md` §18.1).
     """
     if tasks is None:
         logger.error("Голосовое некуда записать: бот собран без базы")
@@ -420,7 +421,7 @@ async def handle_speech(
     async def load_audio() -> bytes:
         return await load_file(bot, speech.file_id)
 
-    async with ChatActionSender.typing(chat_id=message.chat.id, bot=bot):
+    async with typing_status(bot, message.chat.id):
         outcome = await tasks.record_from_voice(
             chat_id=message.chat.id,
             telegram_message_id=message.message_id,
@@ -615,7 +616,7 @@ async def handle_photo(message: Message, bot: Bot, tasks: TaskService | None, ph
     async def load_image() -> bytes:
         return await load_file(bot, photo.file_id)
 
-    async with ChatActionSender.typing(chat_id=message.chat.id, bot=bot):
+    async with typing_status(bot, message.chat.id):
         outcome = await tasks.record_from_photo(
             chat_id=message.chat.id,
             telegram_message_id=message.message_id,
