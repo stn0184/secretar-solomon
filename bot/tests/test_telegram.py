@@ -201,8 +201,13 @@ async def test_typing_repeats_until_the_work_is_done(
     """Статус повторяется, пока идёт работа, и больше не уходит после неё."""
     monkeypatch.setattr(telegram, "TYPING_INTERVAL_SECONDS", 0.01)
 
+    # Ждём третьего статуса, а не фиксированные 0,1 с: под нагрузкой
+    # ворот цикл успевал отправить только два.
     async with typing_status(bot, OWNER_ID):
-        await asyncio.sleep(0.1)
+        for _ in range(500):
+            if len(session.actions) >= 3:
+                break
+            await asyncio.sleep(0.01)
     sent = len(session.actions)
     await asyncio.sleep(0.05)
 
