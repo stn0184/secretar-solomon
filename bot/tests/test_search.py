@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from supabase import Client
 
+from solomon import texts
 from solomon.db import searches as db_searches
 from solomon.db.rpc import DatabaseError
 from solomon.db.searches import PastSearch, SearchRow, SearchTrace
@@ -272,3 +273,50 @@ async def test_broken_connection_is_a_refusal_for_every_call() -> None:
     for call in calls:
         with pytest.raises(DatabaseError):
             await call
+
+
+# --------------------------------------------------------- тексты (§24.4, §24.6)
+
+
+def test_searching_names_the_query_and_promises_the_answer() -> None:
+    assert texts.searching(QUERY) == f"Ищу: {QUERY}. Пришлю, как найду."
+    # Знак в конце запроса не встаёт перед точкой.
+    assert texts.searching("какая погода завтра? ") == (
+        "Ищу: какая погода завтра. Пришлю, как найду."
+    )
+
+
+def test_one_at_a_time_names_the_searches_left() -> None:
+    assert texts.one_at_a_time(["школа с математикой"]) == (
+        "Ищу по одному: «школа с математикой» поищу, если попросите отдельно."
+    )
+    assert texts.one_at_a_time(["школа", "квартира"]) == (
+        "Ищу по одному: «школа», «квартира» поищу, если попросите отдельно."
+    )
+
+
+def test_failure_texts_name_the_query_shortly() -> None:
+    assert texts.search_failed("билеты") == (
+        "Не получилось поискать «билеты»: поиск не ответил. Попросите ещё раз, если ещё нужно."
+    )
+    assert texts.search_late("билеты") == (
+        "Не успел поискать «билеты»: бот не работал. Попросите ещё раз, если ещё нужно."
+    )
+    long = "я" * 300
+    assert f"«{'я' * 200}…»" in texts.search_failed(long)
+
+
+def test_search_refusals_say_what_to_do() -> None:
+    assert texts.SEARCH_NOT_SAVED == (
+        "Не получилось записать поиск — попросите ещё раз, пожалуйста."
+    )
+    assert "текстом или голосом" in texts.SEARCH_TEXT_ONLY
+    assert "Ищу" not in texts.SEARCH_NOT_SAVED
+
+
+def test_help_tells_about_the_search() -> None:
+    assert "Интернета у меня нет" not in texts.HELP
+    assert (
+        "Могу поискать в интернете: «найди билеты в Москву на 15-е» — пришлю варианты "
+        "со ссылками." in " ".join(texts.HELP.split())
+    )
