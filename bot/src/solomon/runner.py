@@ -7,6 +7,7 @@ import contextlib
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.types import LinkPreviewOptions, ReplyParameters
 from anthropic import AsyncAnthropic
 from deepgram import AsyncDeepgramClient
 from supabase import Client
@@ -15,6 +16,7 @@ from solomon import handlers
 from solomon.config import Settings
 from solomon.middlewares import OwnerOnlyMiddleware
 from solomon.services.reminders import ReminderService, mirror_timezone
+from solomon.services.search import SearchService
 from solomon.services.tasks import TaskService
 from solomon.services.transcription import DeepgramTranscriber, create_deepgram_client
 from solomon.services.understanding import UnderstandingService, create_anthropic_client
@@ -40,7 +42,32 @@ def build_tasks(
     )
 
 
-def build_reminders(settings: Settings, db: Client, bot: Bot) -> ReminderService:
+def build_searches(
+    settings: Settings, db: Client, bot: Bot, client: AsyncAnthropic
+) -> SearchService:
+    """Поиски по поручению (`techspec/24-search.md` §24.3): база, тот же клиент
+    Claude и отправка ответом на просьбу владельца.
+
+    Ответ уходит ответом на сообщение с просьбой — и тогда, когда его уже
+    удалили (`allow_sending_without_reply`), — а превью ссылки выключено: из
+    пяти ссылок картинка первой — шум.
+    """
+
+    async def reply(*, chat_id: int, reply_to: int, text: str) -> int:
+        message = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_parameters=ReplyParameters(message_id=reply_to, allow_sending_without_reply=True),
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        return message.message_id
+
+    return SearchService.with_database(settings, db, client, reply)
+
+
+def build_reminders(
+    settings: Settings, db: Client, bot: Bot, searches: SearchService | None = None
+) -> ReminderService:
     """Цикл напоминаний: база своя, отправка — через этого бота.
 
     Отправка приходит в сервис замыканием, а не объектом aiogram: сервис
@@ -48,7 +75,7 @@ def build_reminders(settings: Settings, db: Client, bot: Bot) -> ReminderService
     её нажатие (`handlers.py`). Чат — личный чат владельца: его id совпадает
     с id пользователя, других чатов у помощника нет. Строка «Перенёс»
     (`techspec/11-edit.md` §11.4) уходит своим замыканием — без кнопки:
-    это не напоминание.
+    это не напоминание. Шаг тика о поисках (§24.3) — `searches`.
     """
 
     async def notify(*, text: str, task_id: str, occurrence: int | None = None) -> int:
@@ -63,7 +90,7 @@ def build_reminders(settings: Settings, db: Client, bot: Bot) -> ReminderService
         message = await bot.send_message(chat_id=settings.owner_telegram_id, text=text)
         return message.message_id
 
-    return ReminderService.with_database(settings, db, notify, announce)
+    return ReminderService.with_database(settings, db, notify, announce, searches=searches)
 
 
 def build_dispatcher(
@@ -71,14 +98,18 @@ def build_dispatcher(
     db: Client | None = None,
     tasks: TaskService | None = None,
     reminders: ReminderService | None = None,
+    searches: SearchService | None = None,
 ) -> Dispatcher:
     """Собрать диспетчер: фильтр владельца снаружи, обработчики внутри.
 
     Операции над задачами уезжают в workflow data — обработчик получает
     готовый сервис по имени параметра и своих зависимостей не собирает.
-    Готовый сервис можно передать снаружи: так его подменяет тест.
+    Готовый сервис можно передать снаружи: так его подменяет тест. `searches`
+    обработчик зовёт, чтобы запустить поиск после ответа «Ищу» (§24.3).
     """
-    dispatcher = Dispatcher(settings=settings, db=db, tasks=tasks, reminders=reminders)
+    dispatcher = Dispatcher(
+        settings=settings, db=db, tasks=tasks, reminders=reminders, searches=searches
+    )
     dispatcher.update.outer_middleware(OwnerOnlyMiddleware(settings.owner_telegram_id))
     dispatcher.include_router(handlers.build_router())
     return dispatcher
@@ -91,8 +122,11 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     client = create_anthropic_client(settings)
     speech = create_deepgram_client(settings)
     tasks = build_tasks(settings, db, client, speech) if db is not None else None
-    reminders = build_reminders(settings, db, bot) if db is not None else None
-    dispatcher = build_dispatcher(settings, db=db, tasks=tasks, reminders=reminders)
+    searches = build_searches(settings, db, bot, client) if db is not None else None
+    reminders = build_reminders(settings, db, bot, searches) if db is not None else None
+    dispatcher = build_dispatcher(
+        settings, db=db, tasks=tasks, reminders=reminders, searches=searches
+    )
     if db is not None:
         # Пояс владельца — в базу до первого сообщения: правка срока из
         # приложения берёт его оттуда (`techspec/11-edit.md` §11.3). Сбой —
@@ -115,6 +149,10 @@ async def run(settings: Settings, db: Client | None = None) -> None:
             ticking.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await ticking
+        if searches is not None:
+            # Поиски в работе обрываются: строка остаётся начатой, и после
+            # запуска тик возьмёт её через десять минут (§24.3).
+            await searches.stop()
         await client.close()
         await bot.session.close()
         logger.info("Соломон остановлен.")

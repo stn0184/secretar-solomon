@@ -49,6 +49,12 @@
 в их строки. Остальные сообщения переписки получают пустой ответ, и
 обработчик его не отправляет.
 
+Поиск по поручению (`techspec/24-search.md`) начинается здесь: разбор с
+поиском заводит строку поиска раньше, чем ответ скажет «Ищу» (инварианты 4
+и 5), — не записалась, и «Ищу» не звучит. Ищет `services/search.py`, а
+обработчик запускает поиск, когда «Ищу» уже ушло. Пересланное, снимок и
+переписка поиска не запускают: ответ — просьба сказать текстом или голосом.
+
 Обработчик ничего не решает: он зовёт `record_from_message` или
 `record_from_voice` и отправляет то, что вернулось. Владелец берётся из
 настроек, а не из сообщения — чужие обновления до этого слоя не доходят
@@ -75,6 +81,7 @@ from solomon import texts
 from solomon.config import Settings
 from solomon.db import facts as db_facts
 from solomon.db import reminders as db_reminders
+from solomon.db import searches as db_searches
 from solomon.db import tasks as db_tasks
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
@@ -111,6 +118,7 @@ from solomon.services.transcription import (
     TranscriptionResult,
 )
 from solomon.services.understanding import (
+    SEARCH_KIND,
     TASK_KINDS,
     Analysis,
     AskedQuestion,
@@ -132,6 +140,7 @@ from solomon.services.understanding import (
     Verdict,
     also_of,
     fact_status,
+    searches_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -176,11 +185,16 @@ class RecordOutcome:
 
     `buttons` — кнопки под ответом, по одной в ряд: кандидаты «какую задачу»
     или «Вернуть» (§12.6). У повтора обновления их нет.
+
+    `search_id` — поиск, заведённый этим сообщением (`techspec/24-search.md`
+    §24.3): обработчик запускает его, когда ответ «Ищу» уже ушёл. У повтора
+    обновления его нет — брошенный поиск подхватит тик.
     """
 
     ok: bool
     message: str
     buttons: tuple[Button, ...] = ()
+    search_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +289,16 @@ async def no_next_occurrence(
 ) -> datetime:
     """Сборка без базы: следующего раза не посчитать — как отказ базы."""
     raise DatabaseError("repeat_next is not wired")
+
+
+class SearchStarter(Protocol):
+    """Завести поиск по сообщению (`techspec/24-search.md` §24.3, шаг 1).
+
+    Возвращает id поиска; по этому сообщению он уже есть — тот же id. Отказ —
+    `DatabaseError`: «Ищу» тогда не звучит (§24.6).
+    """
+
+    async def __call__(self, *, message_id: str, query: str) -> str: ...
 
 
 class QuestionReader(Protocol):
@@ -619,9 +643,11 @@ def several_items(also: Sequence[TaskItem]) -> tuple[list[tuple[int, TaskItem]],
 
 def is_several(understanding: Understanding) -> bool:
     """Сообщение о нескольких делах (`techspec/23-several-tasks.md` §23.5) —
-    то, чей разбор пошёл путём `_decide_several`: в `also` есть дело с сутью."""
+    то, чей разбор пошёл путём `_decide_several`: в `also` есть дело с сутью
+    или в сообщении есть поиск (`techspec/24-search.md` §24.4). Кнопки под
+    таким ответом шлют итог новым сообщением и не стирают «Ищу»."""
     numbered, beyond = several_items(also_of(understanding))
-    return bool(numbered or beyond)
+    return bool(numbered or beyond or searches_of(understanding))
 
 
 def item_of(understanding: Understanding, item: int) -> Understanding | None:
@@ -982,6 +1008,7 @@ class TaskService:
         repeat_next: NextOccurrence | None = None,
         names: NameSource | None = None,
         batches: Batches[Pending] | None = None,
+        start_search: SearchStarter | None = None,
     ) -> None:
         self._settings = settings
         self._record_message = record_message
@@ -1008,6 +1035,9 @@ class TaskService:
         # собираются тесты одного сообщения. Обычная сборка пачку подключает
         # (`techspec/18-forwarded.md` §18.1).
         self._batches = batches
+        # Без него поиск завести некуда: на просьбу найти — «Не получилось
+        # записать поиск» (§24.6). Обычная сборка его подключает.
+        self._start_search = start_search
         # «Сейчас» внедряется: от него зависит расписание напоминаний, и
         # тесты не должны угадывать, который час (`services/reminders.py`).
         self._clock = clock or self._now
@@ -1097,6 +1127,14 @@ class TaskService:
                 timezone=settings.owner_timezone.key,
             )
 
+        async def start_search(*, message_id: str, query: str) -> str:
+            return await db_searches.start_search(
+                db,
+                owner_telegram_id=settings.owner_telegram_id,
+                message_id=message_id,
+                query=query,
+            )
+
         return cls(
             settings=settings,
             record_message=record_message,
@@ -1109,6 +1147,7 @@ class TaskService:
             repeat_next=repeat_next,
             names=DatabaseNames(settings, db),
             batches=Batches(),
+            start_search=start_search,
         )
 
     @classmethod
@@ -1321,7 +1360,12 @@ class TaskService:
         if (asked is None or not photo.answers_question) and photo.kind not in TASK_KINDS:
             # Поручения нет — задачи и подсказки тоже. Разбор записывается:
             # вопрос снимается, как любым другим сообщением (§10.3).
-            reply = texts.PHOTO_ABOUT_ME if photo.kind == "about_me" else texts.PHOTO_NO_ERRAND
+            reply = texts.PHOTO_NO_ERRAND
+            if photo.kind == "about_me":
+                reply = texts.PHOTO_ABOUT_ME
+            elif photo.kind == SEARCH_KIND:
+                # Снимок поиска не запускает (`techspec/24-search.md` §24.1).
+                reply = texts.SEARCH_TEXT_ONLY
             decision = Decision(reply=reply, task=None, reminders=[])
         else:
             try:
@@ -1470,6 +1514,9 @@ class TaskService:
         if (asked is None or not read.answers_question) and read.kind not in TASK_KINDS:
             if read.kind == "about_me":
                 reply = texts.CONVERSATION_ABOUT_ME
+            elif read.kind == SEARCH_KIND:
+                # Переписка поиска не запускает (`techspec/24-search.md` §24.1).
+                reply = texts.SEARCH_TEXT_ONLY
             elif caption:
                 reply = self._talk_reply(read.reply_hint, fallback=texts.CONVERSATION_NO_ERRAND)
             else:
@@ -1708,6 +1755,11 @@ class TaskService:
         Своё сообщение ведёт разговор: его `chat` отвечает текстом модели
         (§17.2). Пересланное — нет: блока 6 у него нет, а ответ разговора
         не слушается.
+
+        Поиск (`techspec/24-search.md` §24.3) заводится до решения: от того,
+        записалась ли его строка, зависит абзац ответа — «Ищу» или «Не
+        получилось записать поиск». Ответ записан — его id уходит наружу, и
+        обработчик запустит поиск.
         """
         spoken: SpeechQuality | None = None
         if transcript is not None:
@@ -1730,19 +1782,26 @@ class TaskService:
             swipe=context.swipe,
             recent=context.recent,
         )
-        now = self._clock()
         if isinstance(verdict, Analysis):
             understanding = verdict.understanding
+            note, search_id = await self._search_note(saved, understanding, talk=talk)
+            now = self._clock()
             try:
                 decision = await self._decide(
-                    understanding, asked, now, context, telegram_message_id, talk=talk
+                    understanding,
+                    asked,
+                    now,
+                    context,
+                    telegram_message_id,
+                    talk=talk,
+                    search_note=note,
                 )
             except DatabaseError as error:
                 # Без плана «Напомню» было бы неправдой, а задача без
                 # напоминаний — тихой потерей: честнее не записать (§11.3).
                 logger.warning("Расписание не получено, разбор не записан: %s", error)
                 return RecordOutcome(ok=False, message=texts.NOT_SAVED)
-            return await self._write(
+            outcome = await self._write(
                 saved,
                 decision,
                 analysis=understanding.model_dump(mode="json"),
@@ -1750,6 +1809,9 @@ class TaskService:
                 verdict=verdict,
                 transcript=transcript,
             )
+            if outcome.ok and search_id is not None:
+                return replace(outcome, search_id=search_id)
+            return outcome
         # Разбора не случилось: записываем буквально и говорим об этом.
         # Срока у такой задачи нет, значит и напоминать не о чем.
         decision = Decision(
@@ -1760,6 +1822,43 @@ class TaskService:
         return await self._write(
             saved, decision, analysis=None, facts=[], verdict=None, transcript=transcript
         )
+
+    async def _search_note(
+        self, saved: SavedMessage, understanding: Understanding, *, talk: bool
+    ) -> tuple[str | None, str | None]:
+        """Абзац ответа о поиске и id заведённого поиска (§24.3–24.4).
+
+        Поисков нет — ничего. Пересланное поиска не запускает (§24.1):
+        абзац — `SEARCH_TEXT_ONLY`. Своё — заводится первый поиск: строка в
+        базе — «Ищу: …», не записалась — `SEARCH_NOT_SAVED`, и «Ищу» не
+        звучит (§24.6); остальные поиски сообщения не запускаются — «Ищу по
+        одному». В журнал — только числа и id.
+        """
+        queries = searches_of(understanding)
+        if not queries:
+            return None, None
+        if not talk:
+            logger.info("Поиск в пересланном не запускается: поисков %s", len(queries))
+            return texts.SEARCH_TEXT_ONLY, None
+        first, rest = queries[0], queries[1:]
+        search_id = await self._start(saved.id, first)
+        said = texts.searching(first) if search_id is not None else texts.SEARCH_NOT_SAVED
+        if rest:
+            logger.info("Поиск по одному: ещё поисков в сообщении %s", len(rest))
+        return paragraphs(said, texts.one_at_a_time(rest) if rest else None), search_id
+
+    async def _start(self, message_id: str, query: str) -> str | None:
+        """Строка поиска в базе (§24.3, шаг 1) или `None`, если не записалась."""
+        if self._start_search is None:
+            logger.warning("Поиск по сообщению %s некуда записать", message_id)
+            return None
+        try:
+            search_id = await self._start_search(message_id=message_id, query=query)
+        except DatabaseError as error:
+            logger.warning("Поиск по сообщению %s не записан: %s", message_id, error)
+            return None
+        logger.info("Поиск %s заведён по сообщению %s", search_id, message_id)
+        return search_id
 
     async def _write(
         self,
@@ -1832,6 +1931,7 @@ class TaskService:
         telegram_message_id: int,
         *,
         talk: bool = False,
+        search_note: str | None = None,
     ) -> Decision:
         """Пять путей разбора: ответ на вопрос, правка словом, дубль, запись
         с вопросом, обычная запись.
@@ -1866,12 +1966,21 @@ class TaskService:
 
         Есть в разборе дела `also` (`techspec/23-several-tasks.md` §23.3) —
         сообщение о нескольких делах, путь `_decide_several`; без них ответ
-        и запись прежние.
+        и запись прежние. Тем же путём идёт сообщение с поиском
+        (`techspec/24-search.md` §24.4): `search_note` — его абзац, он встаёт
+        после записи и перед вопросом, а поиск задачей не становится.
         """
         numbered, beyond = several_items(also_of(understanding))
-        if numbered or beyond:
+        if numbered or beyond or search_note is not None:
             return await self._decide_several(
-                understanding, asked, now, context, telegram_message_id, numbered, beyond
+                understanding,
+                asked,
+                now,
+                context,
+                telegram_message_id,
+                numbered,
+                beyond,
+                search_note=search_note,
             )
         top = await self._top(understanding, asked, now, context, telegram_message_id)
         if top.first is None:
@@ -2046,6 +2155,8 @@ class TaskService:
         telegram_message_id: int,
         numbered: Sequence[tuple[int, TaskItem]],
         beyond: Sequence[str],
+        *,
+        search_note: str | None = None,
     ) -> Decision:
         """Сообщение о нескольких делах (`techspec/23-several-tasks.md` §23.3).
 
@@ -2060,8 +2171,10 @@ class TaskService:
         задачи ответа или правки.
 
         Абзацы — §23.4: итог правки или ответа, запись (одна строка или
-        список), дубли, накладки, дела сверх десяти, вопрос — последним. Вопрос
-        встаёт в строку записи, только когда весь ответ — одна эта строка.
+        список), дубли, накладки, дела сверх десяти, поиск (`search_note`,
+        `techspec/24-search.md` §24.4), вопрос — последним. Вопрос встаёт в
+        строку записи, только когда весь ответ — одна эта строка. Поиск в
+        верхних полях задачей не становится: его вид не дело.
         """
         top = await self._top(understanding, asked, now, context, telegram_message_id)
         question = top.question
@@ -2126,7 +2239,13 @@ class TaskService:
         record = None
         if len(lines) == 1:
             line = lines[0]
-            alone = top.head is None and not dups and not clashes and more is None
+            alone = (
+                top.head is None
+                and not dups
+                and not clashes
+                and more is None
+                and search_note is None
+            )
             if alone and line.asks and question is not None:
                 record = self._asked_line(line, question, now)
                 question = None
@@ -2156,7 +2275,13 @@ class TaskService:
         )
         return Decision(
             reply=paragraphs(
-                top.head, record, *(said for _, _, said in dups), *clashes, more, question
+                top.head,
+                record,
+                *(said for _, _, said in dups),
+                *clashes,
+                more,
+                search_note,
+                question,
             ),
             task=first.task if first is not None else None,
             reminders=first.reminders if first is not None else [],

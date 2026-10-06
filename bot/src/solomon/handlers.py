@@ -29,7 +29,8 @@ from solomon import texts
 from solomon.db.tasks import SpeechKind
 from solomon.services import edits
 from solomon.services.reminders import ReminderService
-from solomon.services.tasks import Button, PressOutcome, Swipe, TaskService
+from solomon.services.search import SearchService
+from solomon.services.tasks import Button, PressOutcome, RecordOutcome, Swipe, TaskService
 from solomon.services.understanding import ImageType
 from solomon.telegram import typing_status
 
@@ -370,14 +371,29 @@ async def handle_help(message: Message) -> None:
     await message.answer(texts.HELP)
 
 
-async def handle_text(message: Message, tasks: TaskService | None) -> None:
+def launch_search(searches: SearchService | None, outcome: RecordOutcome) -> None:
+    """Запустить поиск, заведённый сообщением, — когда «Ищу» уже ушло
+    (`techspec/24-search.md` §24.3): ответ поиска его не обгонит. Обработчик
+    поиска не ждёт. Не запустился — его подхватит тик."""
+    if outcome.search_id is None:
+        return
+    if searches is None:
+        logger.error("Поиск %s некому запустить: бот собран без поиска", outcome.search_id)
+        return
+    searches.launch(outcome.search_id)
+
+
+async def handle_text(
+    message: Message, tasks: TaskService | None, searches: SearchService | None = None
+) -> None:
     """Текст владельца — поручение: записываем и подтверждаем своими словами.
 
     Пересланное сообщение с текстом — такой же текст: разбирается как
     поручение, а имя отправителя уходит в разбор отдельным полем. Решение
     принимает слой операций, обработчик только отправляет его ответ.
     Пустой ответ — сообщение пересланной переписки, за которую отвечает
-    другое (`techspec/18-forwarded.md` §18.1): отправлять нечего.
+    другое (`techspec/18-forwarded.md` §18.1): отправлять нечего. Сообщение
+    завело поиск — он запускается после ответа «Ищу» (§24.3).
     """
     if tasks is None:
         # Бота запустили без клиента базы — записывать некуда, и молчать о
@@ -397,10 +413,15 @@ async def handle_text(message: Message, tasks: TaskService | None) -> None:
     )
     if outcome.message:
         await message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
+    launch_search(searches, outcome)
 
 
 async def handle_speech(
-    message: Message, bot: Bot, tasks: TaskService | None, speech: Speech
+    message: Message,
+    bot: Bot,
+    tasks: TaskService | None,
+    speech: Speech,
+    searches: SearchService | None = None,
 ) -> None:
     """Голосовое или кружок владельца — поручение: скачать, расслышать, записать.
 
@@ -436,6 +457,7 @@ async def handle_speech(
         )
     if outcome.message:
         await message.answer(outcome.message, reply_markup=keyboard(outcome.buttons))
+    launch_search(searches, outcome)
 
 
 async def handle_done(callback: CallbackQuery, reminders: ReminderService | None) -> None:

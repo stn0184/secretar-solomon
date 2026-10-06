@@ -554,9 +554,18 @@ class SearchService:
         return True
 
     async def wait(self) -> None:
-        """Дождаться всех поисков в очереди — тестам и штатной остановке."""
+        """Дождаться всех поисков в очереди."""
         while self._tasks:
             await asyncio.gather(*self._tasks)
+
+    async def stop(self) -> None:
+        """Оборвать поиски в очереди и в работе — при остановке бота. Строка
+        начатого поиска остаётся начатой: после запуска тик возьмёт её через
+        `STALE_AFTER` (§24.3)."""
+        running = list(self._tasks)
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
 
     async def resume(self, now: datetime | None = None) -> int:
         """Шаг тика (§24.3, шаг 3): ждущие поиски, о которых сказано «Ищу».

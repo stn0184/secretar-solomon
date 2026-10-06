@@ -28,6 +28,10 @@ aiogram, ни про сеть, и тест подставляет свою за�
 плане и отдельным шагом тика перед вопросом о деле без срока (§22.2): окно,
 границы и слова — в `services/overdue.py`, отбор и запись — в базе, здесь —
 «отправить → записать» и память о делах, о которых процесс спрашивал сегодня.
+
+Поиски по поручению (`techspec/24-search.md` §24.3) — шаг тика после строк
+«Перенёс»: брошенные перезапуском поиски, записанные и не ушедшие ответы и
+отказы — в `services/search.py`, здесь — только место шага и счёт ушедшего.
 """
 
 from __future__ import annotations
@@ -247,6 +251,13 @@ class OverdueRecorder(Protocol):
     ) -> TaskDetails | None: ...
 
 
+class SearchResumer(Protocol):
+    """Шаг тика о поисках (`techspec/24-search.md` §24.3): возвращает, сколько
+    сообщений ушло этим шагом; запуск поиска — фоновый, тик его не ждёт."""
+
+    async def resume(self, now: datetime | None = None) -> int: ...
+
+
 class PlanChecker(Protocol):
     """Был ли у владельца утренний план за этот день (§20.4)."""
 
@@ -304,6 +315,7 @@ class ReminderService:
         record_plan: PlanRecorder | None = None,
         overdue_task: OverdueFinder | None = None,
         record_overdue: OverdueRecorder | None = None,
+        searches: SearchResumer | None = None,
     ) -> None:
         self._settings = settings
         self._due = due
@@ -339,6 +351,8 @@ class ReminderService:
         self._overdue_on: date | None = None
         self._overdue_asked: set[str] = set()
         self._overdue_stuck = False
+        # Без него тик поисков не подхватывает — как до этапа 024 (§24.3).
+        self._searches = searches
         self._clock = clock or self._now
 
     def _now(self) -> datetime:
@@ -346,9 +360,15 @@ class ReminderService:
 
     @classmethod
     def with_database(
-        cls, settings: Settings, db: Client, notify: Notifier, announce: Announcer
+        cls,
+        settings: Settings,
+        db: Client,
+        notify: Notifier,
+        announce: Announcer,
+        searches: SearchResumer | None = None,
     ) -> ReminderService:
-        """Обычная сборка: настоящая база и настоящая отправка в Telegram."""
+        """Обычная сборка: настоящая база и настоящая отправка в Telegram;
+        `searches` — шаг тика о поисках (§24.3)."""
 
         async def due(*, owner_telegram_id: int, now: datetime) -> list[DueReminder]:
             return await db_reminders.due_reminders(
@@ -471,13 +491,15 @@ class ReminderService:
             record_plan=record_plan,
             overdue_task=overdue_task,
             record_overdue=record_overdue,
+            searches=searches,
         )
 
     async def tick(self, now: datetime | None = None) -> int:
         """Один заход: перекатывание (§13.4), утренний план (§20.2), созревшее
-        (§6.2), строки «Перенёс» (§11.4), затем вопрос о прошедшем деле
-        (§22.2) и последним — вопрос о деле без срока (§19.2): каждый из двух
-        вопросов — только если до него в этом тике ничего не ушло.
+        (§6.2), строки «Перенёс» (§11.4), поиски (§24.3), затем вопрос о
+        прошедшем деле (§22.2) и последним — вопрос о деле без срока (§19.2):
+        каждый из двух вопросов — только если до него в этом тике ничего не
+        ушло; ответ или отказ поиска — тоже ушедшее сообщение.
 
         Порядок нарочно такой: новый раз получает свои ступени до выборки, и
         созревшая уходит этим же тиком; план называет дела уже на сегодняшнем
@@ -499,6 +521,7 @@ class ReminderService:
         for task in await self._moved(owner_telegram_id=owner):
             if await self._announce_one(task, moment):
                 sent += 1
+        sent += await self._resume_searches(moment)
         # В этом тике уже ушли план, напоминание или «Перенёс» — тишины нет
         # (§19.2, §20.2, §22.2). Пока идут вопросы о прошедших делах, вопрос о
         # деле без срока ждёт: ушедший вопрос — тоже не тишина.
@@ -507,6 +530,17 @@ class ReminderService:
         if sent == 0 and await self._ask_undated(moment):
             sent += 1
         return sent
+
+    async def _resume_searches(self, now: datetime) -> int:
+        """Шаг поисков (§24.3): сколько сообщений ушло. Сбой шага — строка в
+        журнал, вопросы тика идут как обычно: поиск — не повод их пропустить."""
+        if self._searches is None:
+            return 0
+        try:
+            return await self._searches.resume(now)
+        except Exception:  # шаг поисков не роняет тик: напоминания важнее
+            logger.exception("Шаг поисков в тике не удался")
+            return 0
 
     async def _send_plan(self, now: datetime) -> bool:
         """Утренний план (§20.4): отправить и только потом записать.

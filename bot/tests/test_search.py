@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import httpx2
 import pytest
+from aiogram import Bot
 from anthropic import (
     APIConnectionError,
     APIStatusError,
@@ -37,13 +38,56 @@ from anthropic.types import (
 from supabase import Client
 
 from solomon import texts
+from solomon.config import Settings
 from solomon.db import searches as db_searches
 from solomon.db.facts import Fact
 from solomon.db.rpc import DatabaseError
 from solomon.db.searches import PastSearch, SearchRow, SearchTrace
+from solomon.db.tasks import SavedMessage
+from solomon.runner import build_dispatcher
 from solomon.services import search
-from tests.conftest import OWNER_ID, OWNER_TIMEZONE, make_settings
-from tests.test_reminders import FakeRpcClient
+from solomon.services.reminders import ReminderService
+from solomon.services.tasks import RecordOutcome, TaskService, is_several
+from solomon.services.understanding import (
+    MessageUnderstanding,
+    NotUnderstood,
+    PhotoUnderstanding,
+    Understanding,
+    Verdict,
+)
+from tests.conftest import (
+    OWNER_ID,
+    OWNER_TIMEZONE,
+    FakeAnalyst,
+    FakeMessages,
+    FakePlanner,
+    FakeTranscriber,
+    FakeUnderstandings,
+    RecordingSession,
+    load_audio,
+    load_image,
+    make_conversation_understanding,
+    make_message_understanding,
+    make_photo_understanding,
+    make_settings,
+    make_update,
+    make_voice_update,
+)
+from tests.test_reminders import (
+    SATURDAY_NOON,
+    FakeAnnouncer,
+    FakeAskRecorder,
+    FakeClearMoved,
+    FakeCloser,
+    FakeDue,
+    FakeMarks,
+    FakeMoved,
+    FakeNotifier,
+    FakeRpcClient,
+    FakeUndated,
+    make_undated,
+)
+from tests.test_tasks_service import CHAT, HEAD, conversation_service, record_of, send
 
 TZ = ZoneInfo(OWNER_TIMEZONE)
 SEARCH_ID = "5d1e0f3a-7b2c-4d8e-9f10-2a3b4c5d6e7f"
@@ -1107,3 +1151,359 @@ async def test_tick_survives_a_silent_base() -> None:
     service, _, _ = build_searches(store)
 
     assert await service.resume() == 0
+
+
+# ------------------------------------------- приём сообщения с поиском (§24.3)
+
+
+class FakeStarter:
+    """Вместо `start_search` — список заведённого; `broken` — база не ответила.
+
+    `seen` — сколько записей разбора было к моменту заведения: строка поиска
+    обязана лечь раньше, чем ответ «Ищу» (инварианты 4 и 5).
+    """
+
+    def __init__(self, understandings: FakeUnderstandings, broken: bool = False) -> None:
+        self.understandings = understandings
+        self.broken = broken
+        self.calls: list[tuple[str, str]] = []
+        self.seen: list[int] = []
+
+    async def __call__(self, *, message_id: str, query: str) -> str:
+        self.calls.append((message_id, query))
+        self.seen.append(len(self.understandings.calls))
+        if self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return SEARCH_ID
+
+
+def tasks_service(
+    verdict: Understanding | Verdict,
+    *,
+    broken_start: bool = False,
+    messages: FakeMessages | None = None,
+    understandings: FakeUnderstandings | None = None,
+    photo: PhotoUnderstanding | None = None,
+) -> tuple[TaskService, FakeStarter, FakeUnderstandings, FakeAnalyst]:
+    """Приём поручения на подменённой базе и модели — с заведением поиска."""
+    recorder = understandings or FakeUnderstandings()
+    starter = FakeStarter(recorder, broken=broken_start)
+    analyst = FakeAnalyst(verdict, photo=photo)
+    service = TaskService(
+        settings=make_settings(),
+        record_message=messages or FakeMessages(),
+        record_understanding=recorder,
+        analyst=analyst,
+        transcriber=FakeTranscriber(),
+        planner=FakePlanner(),
+        clock=lambda: NOW,
+        start_search=starter,
+    )
+    return service, starter, recorder, analyst
+
+
+async def say(service: TaskService, text_: str, forwarded_from: str | None = None) -> RecordOutcome:
+    return await service.record_from_message(
+        chat_id=OWNER_ID, telegram_message_id=7, text=text_, forwarded_from=forwarded_from
+    )
+
+
+def tickets(**fields: Any) -> MessageUnderstanding:
+    """Разбор просьбы найти билеты."""
+    return make_message_understanding(**{"kind": "search", "title": QUERY, **fields})
+
+
+async def test_search_row_is_written_before_the_reply_says_searching() -> None:
+    """Приёмка 1, 12, 13: строка поиска — раньше «Ищу» (§24.3); ответ — «Ищу:
+    …», задачи нет, в `messages.reply` — только «Ищу»."""
+    service, starter, understandings, _ = tasks_service(tickets())
+
+    outcome = await say(service, "найди билеты в Москву на 15-е")
+
+    assert outcome.ok
+    assert outcome.message == f"Ищу: {QUERY}. Пришлю, как найду."
+    assert outcome.search_id == SEARCH_ID
+    assert starter.calls == [("9a71", QUERY)]
+    assert starter.seen == [0]
+    [call] = understandings.calls
+    assert call["reply"] == outcome.message
+    assert call["tasks"] == []
+    assert cast(dict[str, Any], call["analysis"])["kind"] == "search"
+
+
+async def test_search_not_written_is_not_announced() -> None:
+    """Приёмка 11: строка не записалась — «Ищу» не звучит, поиска нет."""
+    service, _, understandings, _ = tasks_service(tickets(), broken_start=True)
+
+    outcome = await say(service, "найди билеты в Москву на 15-е")
+
+    assert outcome.message == texts.SEARCH_NOT_SAVED
+    assert outcome.search_id is None
+    assert understandings.calls[0]["reply"] == texts.SEARCH_NOT_SAVED
+
+
+async def test_tasks_are_recorded_and_the_search_is_started() -> None:
+    """Приёмка 8: дело записано как раньше, «Ищу» — отдельным абзацем после."""
+    verdict = make_message_understanding(title="позвонить Игорю", more_searches=[QUERY])
+    service, starter, understandings, _ = tasks_service(verdict)
+
+    outcome = await say(service, "позвони Игорю и найди билеты в Москву на 15-е")
+
+    assert outcome.message == f"Записал: позвонить Игорю\n\nИщу: {QUERY}. Пришлю, как найду."
+    assert outcome.search_id == SEARCH_ID
+    rows = cast(list[dict[str, Any]], understandings.calls[0]["tasks"])
+    assert [entry["item"] for entry in rows] == [1]
+    assert starter.calls == [("9a71", QUERY)]
+
+
+async def test_second_search_of_the_message_is_not_started() -> None:
+    """Приёмка 8: из сообщения ищется один поиск, второй — «Ищу по одному»."""
+    service, starter, _, _ = tasks_service(tickets(more_searches=["школа с математикой"]))
+
+    outcome = await say(service, "найди билеты и школу с математикой")
+
+    assert outcome.message == (
+        f"Ищу: {QUERY}. Пришлю, как найду.\n\n"
+        "Ищу по одному: «школа с математикой» поищу, если попросите отдельно."
+    )
+    assert starter.calls == [("9a71", QUERY)]
+
+
+async def test_question_stays_the_last_paragraph_after_the_search() -> None:
+    """Вопрос — всегда последний абзац (§23.4): «Ищу» встаёт перед ним."""
+    verdict = make_message_understanding(
+        title="позвонить", question="Кому позвонить?", needs_review=True, more_searches=[QUERY]
+    )
+    service, _, understandings, _ = tasks_service(verdict)
+
+    outcome = await say(service, "позвонить и найди билеты")
+
+    assert outcome.message == (
+        f"Записал: позвонить\n\nИщу: {QUERY}. Пришлю, как найду.\n\nКому позвонить?"
+    )
+    rows = cast(list[dict[str, Any]], understandings.calls[0]["tasks"])
+    assert rows[0]["task"]["open_question"] == "Кому позвонить?"
+
+
+async def test_forwarded_request_does_not_search() -> None:
+    """Пересланное — слова отправителя (инвариант 3): поиска нет, просьба
+    сказать текстом или голосом."""
+    service, starter, _, _ = tasks_service(tickets())
+
+    outcome = await say(service, "найди мне билеты", forwarded_from="Олег")
+
+    assert outcome.message == texts.SEARCH_TEXT_ONLY
+    assert outcome.search_id is None
+    assert starter.calls == []
+
+
+async def test_message_not_recorded_starts_no_search() -> None:
+    """Запись разбора упала — «Не смог записать», и запускать нечего; строка
+    поиска остаётся без «Ищу», и тик её не возьмёт (`searches_to_resume`)."""
+    service, starter, _, _ = tasks_service(
+        tickets(), understandings=FakeUnderstandings(broken=True)
+    )
+
+    outcome = await say(service, "найди билеты в Москву на 15-е")
+
+    assert outcome.ok is False
+    assert outcome.message == texts.NOT_SAVED
+    assert outcome.search_id is None
+    assert starter.calls == [("9a71", QUERY)]
+
+
+async def test_repeated_update_answers_with_the_saved_reply_and_starts_nothing() -> None:
+    saved = SavedMessage(id="9a71", reply=f"Ищу: {QUERY}. Пришлю, как найду.")
+    service, starter, _, _ = tasks_service(tickets(), messages=FakeMessages(message=saved))
+
+    outcome = await say(service, "найди билеты в Москву на 15-е")
+
+    assert outcome.message == saved.reply
+    assert outcome.search_id is None
+    assert starter.calls == []
+
+
+async def test_voice_request_searches_too() -> None:
+    service, starter, _, _ = tasks_service(tickets())
+
+    outcome = await service.record_from_voice(
+        chat_id=OWNER_ID,
+        telegram_message_id=7,
+        kind="voice",
+        file_id="voice-1",
+        duration=4,
+        load_audio=load_audio,
+    )
+
+    assert outcome.message == f"Ищу: {QUERY}. Пришлю, как найду."
+    assert outcome.search_id == SEARCH_ID
+    assert starter.calls == [("9a71", QUERY)]
+
+
+async def test_photo_request_does_not_search() -> None:
+    """Приёмка 15: снимок поиска не запускает — просьба сказать текстом или голосом."""
+    photo = make_photo_understanding(kind="search", title="кроссовки как на фото")
+    service, starter, understandings, _ = tasks_service(
+        NotUnderstood(reason="текста тест не ждал"), photo=photo
+    )
+
+    outcome = await service.record_from_photo(
+        chat_id=OWNER_ID,
+        telegram_message_id=7,
+        file_id="photo-1",
+        media_type="image/jpeg",
+        caption="найди такие же",
+        load_image=load_image,
+    )
+
+    assert outcome.message == texts.SEARCH_TEXT_ONLY
+    assert outcome.search_id is None
+    assert starter.calls == []
+    assert understandings.calls[0]["tasks"] == []
+
+
+async def test_forwarded_conversation_does_not_search() -> None:
+    """Приёмка 15: переписка, пересланная разом, поиска не запускает."""
+    analyst = FakeAnalyst(
+        NotUnderstood(reason="одно сообщение тест не ждал"),
+        conversation=make_conversation_understanding(kind="search", title="школа"),
+    )
+    service, _, understandings = conversation_service(analyst)
+
+    replies = await send(service, *CHAT)
+
+    assert replies[-1] == texts.SEARCH_TEXT_ONLY
+    assert record_of(understandings, HEAD)["tasks"] == []
+
+
+def test_message_with_a_search_answers_like_several_tasks() -> None:
+    """Кнопки под ответом с «Ищу» шлют итог новым сообщением (§23.5, §24.4)."""
+    assert is_several(tickets()) is True
+    assert is_several(make_message_understanding(more_searches=[QUERY])) is True
+    assert is_several(make_message_understanding()) is False
+
+
+# ---------------------------------------------- обработчик, тик и сборка
+
+
+class FakeSearches:
+    """Вместо очереди поисков — запуски и сколько сообщений ушло к запуску."""
+
+    def __init__(self, session: RecordingSession) -> None:
+        self.session = session
+        self.launched: list[tuple[str, int]] = []
+
+    def launch(self, search_id: str) -> bool:
+        self.launched.append((search_id, len(self.session.texts)))
+        return True
+
+
+async def test_handler_launches_the_search_after_the_reply(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    """«Ищу» уходит первым, поиск запускается потом — ответ его не обгонит."""
+    service, _, _, _ = tasks_service(tickets())
+    searches = FakeSearches(session)
+    dispatcher = build_dispatcher(
+        settings, tasks=service, searches=cast(search.SearchService, searches)
+    )
+
+    await dispatcher.feed_update(bot, make_update("найди билеты в Москву на 15-е"))
+
+    assert session.texts == [f"Ищу: {QUERY}. Пришлю, как найду."]
+    assert searches.launched == [(SEARCH_ID, 1)]
+
+
+async def test_handler_launches_nothing_without_a_search(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    service, _, _, _ = tasks_service(make_message_understanding(title="купить лампочку"))
+    searches = FakeSearches(session)
+    dispatcher = build_dispatcher(
+        settings, tasks=service, searches=cast(search.SearchService, searches)
+    )
+
+    await dispatcher.feed_update(bot, make_update("купить лампочку"))
+
+    assert searches.launched == []
+
+
+async def test_voice_handler_launches_the_search_after_the_reply(
+    bot: Bot, session: RecordingSession, settings: Settings
+) -> None:
+    service, _, _, _ = tasks_service(tickets())
+    searches = FakeSearches(session)
+    dispatcher = build_dispatcher(
+        settings, tasks=service, searches=cast(search.SearchService, searches)
+    )
+
+    await dispatcher.feed_update(bot, make_voice_update())
+
+    assert session.texts == [f"Ищу: {QUERY}. Пришлю, как найду."]
+    assert searches.launched == [(SEARCH_ID, 1)]
+
+
+class FakeResumer:
+    """Шаг поисков тика: сколько сообщений «ушло»; `broken` — шаг упал."""
+
+    def __init__(self, sent: int = 0, broken: bool = False) -> None:
+        self.sent = sent
+        self.broken = broken
+        self.calls: list[datetime | None] = []
+
+    async def resume(self, now: datetime | None = None) -> int:
+        self.calls.append(now)
+        if self.broken:
+            raise RuntimeError("шаг поисков упал")
+        return self.sent
+
+
+def ticking(resumer: FakeResumer, undated: FakeUndated) -> ReminderService:
+    return ReminderService(
+        settings=make_settings(),
+        due=FakeDue(),
+        mark_sent=FakeMarks(),
+        close_task=FakeCloser(),
+        notify=FakeNotifier(),
+        moved=FakeMoved(),
+        clear_moved=FakeClearMoved(),
+        announce=FakeAnnouncer(),
+        clock=lambda: SATURDAY_NOON,
+        undated=undated,
+        record_ask=FakeAskRecorder(),
+        searches=resumer,
+    )
+
+
+async def test_tick_resumes_searches_and_counts_what_they_sent() -> None:
+    """Шаг поисков (§6.2, §24.3): ушедший ответ поиска — не тишина, вопрос о
+    деле без срока в этом тике не задаётся."""
+    resumer = FakeResumer(sent=1)
+    undated = FakeUndated(make_undated())
+    service = ticking(resumer, undated)
+
+    assert await service.tick(SATURDAY_NOON) == 1
+    assert resumer.calls == [SATURDAY_NOON]
+    assert undated.calls == []
+
+
+async def test_failed_search_step_does_not_stop_the_tick(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resumer = FakeResumer(broken=True)
+    undated = FakeUndated(make_undated())
+    service = ticking(resumer, undated)
+
+    with caplog.at_level(logging.ERROR):
+        assert await service.tick(SATURDAY_NOON) == 1
+
+    assert len(undated.calls) == 1, "вопрос о деле без срока ушёл как обычно"
+    assert "Шаг поисков" in caplog.text
+
+
+def test_dispatcher_carries_the_searches(settings: Settings, session: RecordingSession) -> None:
+    searches = FakeSearches(session)
+
+    dispatcher = build_dispatcher(settings, searches=cast(search.SearchService, searches))
+
+    assert dispatcher["searches"] is searches
