@@ -54,6 +54,7 @@ from solomon.services.understanding import (
     PhotoUnderstanding,
     Understanding,
     Verdict,
+    create_anthropic_client,
 )
 from tests.conftest import (
     OWNER_ID,
@@ -88,6 +89,7 @@ from tests.test_reminders import (
     make_undated,
 )
 from tests.test_tasks_service import CHAT, HEAD, conversation_service, record_of, send
+from tests.test_understanding import live_settings
 
 TZ = ZoneInfo(OWNER_TIMEZONE)
 SEARCH_ID = "5d1e0f3a-7b2c-4d8e-9f10-2a3b4c5d6e7f"
@@ -1507,3 +1509,57 @@ def test_dispatcher_carries_the_searches(settings: Settings, session: RecordingS
     dispatcher = build_dispatcher(settings, searches=cast(search.SearchService, searches))
 
     assert dispatcher["searches"] is searches
+
+
+# --------------------------------------------------------------- живой прогон
+
+# Три поручения через того же посредника, что у бота (§24.2): билеты, контакт
+# организации и уточнение вдогонку с прошлым ответом. Прогон ходит в модель
+# по-настоящему и стоит денег, поэтому в воротах не участвует — маркер `live`:
+# `uv run --directory bot pytest -m live -k search -s`. Печатает время и след
+# каждого поиска и сами ответы — по ним владелец смотрит, как бот ищет.
+LIVE_TICKETS = "билеты на самолёт Екатеринбург — Москва 20 октября, обратно 23 октября"
+LIVE_CONTACT = "телефон и адрес официального сервиса Kia в Екатеринбурге"
+LIVE_CHEAPER = f"{LIVE_TICKETS}, подешевле"
+
+
+@pytest.mark.live
+async def test_live_search_tickets_contact_and_follow_up() -> None:
+    """Вживую: у каждого поиска — ответ со ссылками, «Советую» в конце, хотя
+    бы один поиск, и время в пределах таймаута; уточнение вдогонку получает
+    прошлый ответ."""
+    settings = live_settings()
+    timezone = settings.owner_timezone
+    client = create_anthropic_client(settings)
+    model = search.anthropic_search_model(client, timezone)
+    system = search.build_search_system(datetime.now(timezone), timezone, ())
+    outcomes: list[tuple[str, search.SearchOutcome]] = []
+    try:
+        for name, query in (("билеты", LIVE_TICKETS), ("контакт", LIVE_CONTACT)):
+            request = search.build_search_request(query, None)
+            outcomes.append((name, await search.run_search(model, system=system, text=request)))
+        tickets_found = outcomes[0][1]
+        assert isinstance(tickets_found, search.Searched), tickets_found
+        previous = PastSearch(query=LIVE_TICKETS, answer=tickets_found.answer)
+        request = search.build_search_request(LIVE_CHEAPER, previous)
+        outcomes.append(("вдогонку", await search.run_search(model, system=system, text=request)))
+    finally:
+        await client.close()
+
+    for name, outcome in outcomes:
+        assert isinstance(outcome, search.Searched), f"{name}: {outcome}"
+        trace = outcome.trace
+        print(
+            f"{name}: {trace.duration_ms / 1000:.1f} с, поисков {trace.web_searches}, "
+            f"страниц {trace.web_fetches}, токенов {trace.input_tokens}/{trace.output_tokens}, "
+            f"продолжений {outcome.continuations}, ссылок не из результатов {outcome.foreign}, "
+            f"знаков {len(outcome.answer)}"
+        )
+        print(outcome.answer, end="\n\n")
+    for name, outcome in outcomes:
+        assert isinstance(outcome, search.Searched)
+        assert "http" in outcome.answer, name
+        assert "Советую" in outcome.answer, name
+        assert "**" not in outcome.answer, name
+        assert outcome.trace.web_searches >= 1, name
+        assert outcome.trace.duration_ms < search.TIMEOUT_SECONDS * 1000, name
