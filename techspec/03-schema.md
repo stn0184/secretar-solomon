@@ -786,3 +786,68 @@ authenticated`; приложение таблицу не читает.
 - `record_morning_plan(owner_telegram_id bigint, day date,
   telegram_message_id bigint) returns boolean` — вставляет строку;
   строка за этот день уже есть — ничего не меняет и возвращает `false`.
+
+### 3.10 `searches` — поиски по поручению
+
+Строка на поиск в интернете по просьбе владельца (`techspec/24-search.md`
+§24.5, этап 024): по ней поиск переживает перезапуск, а ответ уходит
+владельцу, не попадая в `messages.reply` — там остаётся «Ищу: …», и текст
+чужих сайтов в промпт разбора не идёт (инвариант 3).
+
+| Колонка | Тип | Что это |
+| --- | --- | --- |
+| `id` | uuid, ключ, `default gen_random_uuid()` | §3.1 |
+| `owner_telegram_id` | bigint | владелец (§3.1) |
+| `message_id` | uuid, `references messages(id) on delete cascade`, `not null` | сообщение с просьбой |
+| `query` | text, `not null`, 1–500 знаков | запрос — `title` разбора |
+| `status` | text, `check in ('pending', 'done', 'failed')`, `default 'pending'` | ждёт · ответ ушёл · не удался или не успел |
+| `attempts` | smallint, `default 0` | сколько раз поиск начинали |
+| `started_at` | timestamptz, nullable | начало текущей попытки; пусто — не начат или попытку вернули |
+| `answer` | text, nullable, до 4096 знаков | ответ поиска; пишется до отправки |
+| `telegram_message_id` | bigint, nullable | сообщение с ответом в чате; есть ровно у `done` |
+| `input_tokens`, `output_tokens`, `web_searches`, `web_fetches`, `duration_ms` | integer, nullable | след (§24.2): пишется вместе с ответом |
+| `created_at` | timestamptz, `default now()` | когда поиск заведён |
+| `finished_at` | timestamptz, nullable | когда ответ ушёл или поиск помечен `failed`; у `pending` пусто |
+
+Ограничения: `searches_message_id_key unique (message_id)` — поиск из
+сообщения один, и повтор обновления второго не заводит;
+`searches_finished_check` — `finished_at` пуст ровно у `pending`;
+`searches_done_check` — у `done` есть ответ и id сообщения, у других id
+сообщения нет. Индекс `searches_pending_idx (owner_telegram_id,
+created_at) where status = 'pending'` — под тик. RLS — §4.2, та же
+политика `for all to authenticated`; приложение таблицу не читает.
+
+Функции — только `service_role` (`public`, `anon` и `authenticated` —
+`revoke`), миграция 024 (`20261006200000_search.sql`):
+
+- `start_search(owner_telegram_id bigint, message_id uuid, query text)
+  returns uuid` — заводит строку `pending`; сообщение чужое или его нет —
+  отказ; строка по сообщению уже есть — её id, запрос прежний.
+- `take_search(owner_telegram_id bigint, search_id uuid, stale_before
+  timestamptz)` → строка поиска — взять в работу одной правкой:
+  `pending` без ответа, не начатый или начатый раньше `stale_before`;
+  `started_at = now()`, `attempts + 1`. Не взят — пусто.
+- `record_search_answer(owner_telegram_id bigint, search_id uuid, answer
+  text, input_tokens integer, output_tokens integer, web_searches integer,
+  web_fetches integer, duration_ms integer) returns boolean` — ответ и
+  след одной записью, только у `pending` без ответа.
+- `finish_search(owner_telegram_id bigint, search_id uuid,
+  telegram_message_id bigint) returns boolean` — `done`, id сообщения,
+  `finished_at`; только у `pending` с ответом.
+- `release_search(owner_telegram_id bigint, search_id uuid) returns
+  integer` — попытка не удалась: `started_at = null`, возвращает
+  `attempts`; нет `pending` без ответа — `null`.
+- `fail_search(owner_telegram_id bigint, search_id uuid) returns
+  boolean` — `failed` и `finished_at`; только у `pending` без ответа.
+- `searches_to_resume(owner_telegram_id bigint, stale_before
+  timestamptz)` → строки поиска для тика: `pending`, у сообщения с
+  просьбой есть `reply` («Ищу» прозвучало), и ответ записан, или поиск
+  не начат, или начат раньше `stale_before`; порядок `created_at`, `id`.
+- `previous_search(owner_telegram_id bigint, before timestamptz, since
+  timestamptz)` → `(query text, answer text)` — последний `done`,
+  заведённый раньше `before` и завершённый не раньше `since`.
+
+Строка поиска у `take_search` и `searches_to_resume` — `id uuid, query
+text, attempts smallint, answer text, created_at timestamptz,
+request_chat_id bigint, request_message_id bigint`: чат и сообщение
+просьбы из `messages`, им бот отвечает.
