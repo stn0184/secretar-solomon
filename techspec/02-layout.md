@@ -29,6 +29,7 @@ bot/                     Telegram-бот, Python 3.12, long polling
       asks.py            вопрос о деле без срока: окно, день владельца и полночь, границы отбора, текст вопроса
       morning.py         утренний план: окно, день владельца и его границы, строки плана
       overdue.py         вопрос о прошедшем деле: окно, свои вопросы, границы отбора для плана и шага, текст вопроса
+      search.py          поиск по поручению: вызов с серверным поиском, ответ из текста, очередь поисков, шаг тика
     db/
       client.py          клиент Supabase на ключе service-role
       rpc.py             общий поход в базу: отдельный поток, DatabaseError
@@ -36,6 +37,7 @@ bot/                     Telegram-бот, Python 3.12, long polling
       tasks.py           сообщения и задачи: запись и чтение
       reminders.py       план reminder_plan, пояс владельца, созревшие, «ушло», перенесённые, repeat_next, roll_repeats, дело без срока, прошедшее дело и запись вопросов
       morning.py         утренний план: был ли сегодня, дела дня, запись плана
+      searches.py        поиски: завести, взять в работу, ответ, done, попытка, failed, для тика, прошлый
       facts.py           память о пользователе: известные факты для промпта, тексты для подсказок
   tests/                 pytest; сеть не трогается
     fixtures/            примеры для живого прогона (маркер live)
@@ -288,6 +290,23 @@ aiogram, ни про сеть — отправка приходит в него 
 его зовут `services/understanding.py` (все три пути разбора — до плана
 и записи), `services/edits.py` (перенос на часть) и `services/morning.py`
 (строки плана). Подписи частей («утром», «Утром») — в `texts.py`.
+
+Поиск по поручению (§24, этап 024) — `services/search.py`: правила и
+вызов модели с базовыми `web_search` и `web_fetch` (протокол
+`SearchModel`, настоящий — `anthropic_search_model`, продолжения после
+`pause_turn` — `run_search`), чистые функции ответа (`answer_text`,
+`glue`, `plain`, `cut_answer`, `foreign_links`) и `SearchService` —
+очередь поисков процесса и шаг тика `resume`. Базу он видит через
+`SearchStore` (обычная сборка — `DatabaseSearchStore` поверх
+`db/searches.py`), Telegram — через замыкание `Replier` из `runner.py`
+(ответом на просьбу, без превью). Строку поиска до «Ищу» заводит
+`services/tasks.py` — своим `SearchStarter` поверх `db/searches.py`;
+`handlers.py` запускает поиск после ответа, `ReminderService` зовёт
+`resume` шагом тика. Модуль импортирует `texts.py`,
+`services/understanding.py` (модель, момент, что известно),
+`services/conversation.py` (`cut_middle`) и `db/`; `tasks.py` и
+`reminders.py` его не импортируют — им хватает своих протоколов
+(`SearchStarter`, `SearchResumer`).
 
 Журнал придёт следующими этапами и ляжет в `services/` рядом с `tasks.py`:
 запрос к таблице с данными человека вне `db/` и решение о поведении вне
