@@ -79,8 +79,12 @@ def build_service(
     transcriber: FakeTranscriber | DeepgramTranscriber | None = None,
     planner: FakePlanner | None = None,
     names: FakeNames | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> tuple[TaskService, FakeMessages, FakeUnderstandings]:
-    """Сервис на подменённой базе: и запись сообщения, и запись разбора."""
+    """Сервис на подменённой базе: и запись сообщения, и запись разбора.
+
+    `clock` — «сейчас» сервиса; без него — настоящие часы, и тест, где
+    «Напомню» зависит от дня, должен его задать."""
     record_message = messages or FakeMessages()
     record_understanding = understandings or FakeUnderstandings()
     service = TaskService(
@@ -91,6 +95,7 @@ def build_service(
         transcriber=transcriber or FakeTranscriber(),
         planner=planner or FakePlanner(),
         names=names,
+        clock=clock,
     )
     return service, record_message, record_understanding
 
@@ -1610,7 +1615,12 @@ async def test_photo_is_saved_before_download_and_becomes_a_task() -> None:
     """Порядок §14.2: сообщение с файлом → скачивание → разбор → задача."""
     analyst = photo_analyst(meeting())
     planner = FakePlanner([Planned(stage="due", fire_at=MEETING_DUE)])
-    service, messages, understandings = build_service(analyst, planner=planner)
+    # «Сейчас» — за неделю до собрания: в день собрания «Напомню» сказало бы
+    # «сегодня».
+    week_before = MEETING_DUE - timedelta(days=7)
+    service, messages, understandings = build_service(
+        analyst, planner=planner, clock=lambda: week_before
+    )
 
     outcome = await record_photo(service)
 

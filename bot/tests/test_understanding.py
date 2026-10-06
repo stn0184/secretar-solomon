@@ -56,9 +56,11 @@ from solomon.services.understanding import (
     PHOTO_RULES,
     PHOTO_TEXT_LIMIT,
     PHOTO_TIMEOUT_SECONDS,
+    QUERY_LIMIT,
     RECENT_RULES,
     RULES,
     SEVERAL_RULES,
+    TASK_KINDS,
     TIMEOUT_SECONDS,
     Analysis,
     ConversationAnalysis,
@@ -94,6 +96,7 @@ from solomon.services.understanding import (
     format_open_question,
     format_open_tasks,
     format_recent,
+    searches_of,
     settle_parts,
     trim_conversation,
     trim_photo,
@@ -907,7 +910,7 @@ def test_rules_tell_how_to_answer_a_conversation() -> None:
         "reply_hint",
         "на «вы»",
         "выдумывайте ни дел",
-        "Интернета у вас нет",
+        "не разговор, а search",
         "к кому",
         "450",
         "Записать задачей?",
@@ -1077,7 +1080,7 @@ def test_text_and_voice_answer_is_the_understanding_plus_also() -> None:
     fields = set(MessageUnderstanding.model_fields)
 
     assert issubclass(MessageUnderstanding, Understanding)
-    assert fields - set(Understanding.model_fields) == {"also"}
+    assert fields - set(Understanding.model_fields) == {"also", "more_searches"}
     assert "also" not in PhotoUnderstanding.model_fields
     assert "also" not in ConversationUnderstanding.model_fields
 
@@ -1115,7 +1118,7 @@ def test_the_first_item_is_the_message_and_the_rest_go_to_also() -> None:
     message = MessageAnswer(items=[first, idea, chat, suit]).as_message()
 
     assert isinstance(message, MessageUnderstanding)
-    assert message.model_dump(exclude={"also"}) == first.model_dump()
+    assert message.model_dump(exclude={"also", "more_searches"}) == first.model_dump()
     assert message.also == [
         make_item(
             kind="idea",
@@ -1236,6 +1239,115 @@ def test_several_rules_say_what_one_task_is_and_where_the_rest_go() -> None:
         assert phrase in SEVERAL_RULES, phrase
 
 
+# ------------------------------------------------------------ поиск (§24.1)
+
+
+def test_search_is_a_kind_of_the_answer_and_not_of_an_item() -> None:
+    """`search` — новое значение `kind` разбора (§24.1): полей схемы оно не
+    прибавляет, а дело `also` поиском не бывает — поиски идут отдельно."""
+    schema = MessageAnswer.model_json_schema()
+
+    assert "search" in schema["$defs"]["Understanding"]["properties"]["kind"]["enum"]
+    assert "search" not in TaskItem.model_json_schema()["properties"]["kind"]["enum"]
+    assert "search" not in TASK_KINDS
+
+
+def test_searches_among_the_items_go_aside_and_keep_the_numbers_of_tasks() -> None:
+    """Поиск среди следующих элементов `items` — не дело `also`: его суть ложится
+    в `more_searches` по порядку, а номера дел не сдвигаются (§24.1, §23.2)."""
+    first = make_understanding(title="позвонить Игорю")
+    tickets = make_understanding(kind="search", title="билеты в Москву 15 октября")
+    suit = make_understanding(title="забрать костюм")
+    school = make_understanding(kind="search", title="школа с сильной математикой")
+
+    message = MessageAnswer(items=[first, tickets, suit, school]).as_message()
+
+    assert message.also == [make_item(title="забрать костюм")]
+    assert message.more_searches == ["билеты в Москву 15 октября", "школа с сильной математикой"]
+    assert MessageAnswer(items=[first]).as_message().more_searches == []
+
+
+def test_stored_answer_before_the_stage_reads_without_searches() -> None:
+    """Разбор, записанный до этапа 024, — без `more_searches`: читается без поисков."""
+    stored = {**make_understanding().model_dump(mode="json"), "also": []}
+
+    assert MessageUnderstanding.model_validate(stored).more_searches == []
+
+
+def test_searches_of_names_the_top_search_first_then_the_rest() -> None:
+    """Поиски сообщения по порядку (§24.1): верх, если он поиск, потом остальные;
+    суть без пробелов по краям, пустые не считаются."""
+    message = make_message_understanding(
+        kind="search", title="  билеты в Москву 15 октября ", more_searches=["школа", "  "]
+    )
+
+    assert searches_of(message) == ["билеты в Москву 15 октября", "школа"]
+    assert searches_of(make_message_understanding(more_searches=["школа"])) == ["школа"]
+    assert searches_of(make_message_understanding()) == []
+    assert searches_of(make_understanding(kind="search", title="погода на завтра")) == [
+        "погода на завтра"
+    ]
+
+
+def test_the_top_is_a_search_only_when_it_is_a_new_errand() -> None:
+    """Верх — ответ на вопрос или правка: его поля заняты ими, поиска в нём нет."""
+    answer = make_message_understanding(kind="search", title="билеты", answers_question=True)
+    edit = make_message_understanding(
+        kind="search", title="билеты", edit=model_edit(task=1, action="done")
+    )
+
+    assert searches_of(answer) == []
+    assert searches_of(edit) == []
+
+
+def test_search_query_is_cut_to_the_limit_of_the_base() -> None:
+    """Запрос в базе — до 500 знаков (§3.10): длиннее режет бот, а не отказ базы."""
+    message = make_message_understanding(kind="search", title="я" * 700)
+
+    assert searches_of(message) == ["я" * QUERY_LIMIT]
+    assert QUERY_LIMIT == 500
+
+
+def test_photo_and_conversation_start_no_search() -> None:
+    """Снимок и переписка поиска не запускают (§24.1): у них поисков нет, даже
+    если модель отдала `search`."""
+    assert searches_of(make_photo_understanding(kind="search", title="кроссовки")) == []
+    assert searches_of(make_conversation_understanding(kind="search", title="школа")) == []
+
+
+def test_rules_name_the_search_and_what_it_is_not() -> None:
+    """Блок 1 (§24.1): что поиск, что нет, запрос целиком с датами числами,
+    «искать нечего» — вопрос, уточнение вдогонку; интернета у бота теперь есть
+    поиск, а в разговоре он не отвечает из интернета."""
+    rules = flat(RULES)
+    for phrase in (
+        "search — найти в интернете сейчас",
+        "погода, цены, курсы, расписание, новости",
+        "«найди время позвонить маме» — задача",
+        "«в пятницу поищи билеты»",
+        "«найди мою задачу про маму» — разговор",
+        "строка «Переслано от»",
+        "даты — числами",
+        "«билеты на самолёт Екатеринбург — Москва 15 октября, обратно 18 октября",
+        "«Куда и на какие числа искать билеты?»",
+        "«Соломон: Ищу: …»",
+        "«а подешевле?»",
+        "прежний запрос с поправкой",
+        "не разговор, а search",
+    ):
+        assert phrase in rules, phrase
+    assert "Интернета у вас нет" not in rules
+    assert "сведение о себе и поиск вопросов не получают" in rules
+
+
+def test_several_rules_count_a_search_as_its_own_item() -> None:
+    """Поиск рядом с делами — свой элемент списка (§24.1, §23.2)."""
+    rules = flat(SEVERAL_RULES)
+
+    assert "Поиск — тоже отдельный элемент" in rules
+    assert "задача и поиск" in rules
+
+
 def test_part_of_day_of_every_item_gets_the_start_of_the_part() -> None:
     """Часть дня у дел `also` — как у верхнего поручения (§21.2), повтор —
     свой у каждого дела."""
@@ -1273,17 +1385,15 @@ async def test_text_answer_keeps_its_other_tasks() -> None:
 
 # ------------------------------------------------------------ снимок (§14.3)
 
-# Эталоны пересчитаны после этапа 023 (`techspec/23-several-tasks.md` §23.2):
-# к блоку 1 текста и голоса дописан абзац о нескольких делах, правила правки
-# в блоке 5 знают о последних задачах и свайпе о задачах, схема текста и
-# голоса — `MessageUnderstanding` с `also`. Схема `Understanding` — общая
-# часть снимка и переписки — не менялась. Дальше промпт и схема ответа
-# текста и голоса сдвигаются только правкой, которая их меняет, — снимок и
-# прочие ветки их не трогают.
-PROMPT_WITH_EMPTY_TASKS_SHA256 = "74987cc06f558ff48530aea2c18f9035660658068a12ab543897022883c72914"
-PROMPT_BARE_SHA256 = "758e646717ee85a9ee303b23f2c7fec027ca7fedca131ea37db5d18c9e995cc9"
-SCHEMA_SHA256 = "3a046fe34af88e9081ff795713cd9c90f45a58781cfa20cbe88478acc0caae24"
-MESSAGE_SCHEMA_SHA256 = "ad5deaba3f9bda2d19e72323e910abe5e8929fbe8b690191f042979c09f12d87"
+# Эталоны пересчитаны после этапа 024 (`techspec/24-search.md` §24.1): в
+# блоке 1 — вид `search`, что поиск и что нет, «Интернета у вас нет» ушло, и
+# поиск среди нескольких дел; в схеме `Understanding` — значение `search` у
+# `kind`. Дальше промпт и схема ответа текста и голоса сдвигаются только
+# правкой, которая их меняет, — снимок и прочие ветки их не трогают.
+PROMPT_WITH_EMPTY_TASKS_SHA256 = "a4470b46bb2a016f0b64304c8e97ca24531038881f9fac0e136099216da08da6"
+PROMPT_BARE_SHA256 = "2487ea973df399a69d7c1cbb1afffa5c0d61ff0a7c1f867fa0257ecb0d321973"
+SCHEMA_SHA256 = "9c676ee6efa0794be5704a3e063c9dd49e3babea4f3fd9a9b28aee93152f3f5b"
+MESSAGE_SCHEMA_SHA256 = "d23cd53df543af65b08641e10dfaa21ce6d95b869673e4df044521968dc4ab49"
 
 # Не настоящая картинка: модели здесь нет, важно только, что байты дошли.
 IMAGE = b"\xff\xd8\xff\xe0 not a real jpeg"
@@ -2072,13 +2182,16 @@ async def test_conversation_part_of_day_gets_the_start_of_the_part() -> None:
 # примеров повтора, двадцать один пример со списком открытых задач —
 # семнадцать о правке словом (пять — по повторяющейся задаче, четыре — о
 # переносе без потери часа, §12.8) и четыре о дубле (§15), — одиннадцать
-# примеров разговора (§17) и девять примеров пересланной переписки (§18).
+# примеров разговора (§17), девять примеров пересланной переписки (§18),
+# восемь примеров нескольких дел (§23) и тринадцать — о поиске (§24.1): что
+# поиск, что нет, вопрос «куда искать», ответ на него и уточнение вдогонку.
 # Этим владелец смотрит, как помощник понимает.
 # Прогон ходит в модель по-настоящему, поэтому в воротах не участвует —
 # `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 84
-SEVERAL_COUNT = 8
+FIXTURE_COUNT = 97
+SEVERAL_COUNT = 9
+SEARCH_COUNT = 13
 EDIT_COUNT = 21
 DUPLICATE_COUNT = 4
 REPEAT_COUNT = 9
@@ -2425,6 +2538,34 @@ def new_tasks_of(got: Understanding) -> list[Understanding]:
     return ([got] if top else []) + [task for task in more if task.same_as is None]
 
 
+def search_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
+    """Чем пример поиска разошёлся с ожиданием; `None` — сошёлся (§24.1).
+
+    `count` — сколько поисков в разборе (`searches_of`, как их увидит бот);
+    `has` — основы слов, каждая есть в первом запросе, без регистра;
+    `kinds` — каким бывает верх; `asks` — искать нечего: верх — разговор, а
+    в ответе разговора вопрос.
+    """
+    expected = case["search"]
+    text = case["text"]
+    found = searches_of(got)
+    if len(found) != expected["count"]:
+        return f"{text}: ждали поисков {expected['count']}, получили {found}"
+    kinds = expected.get("kinds")
+    if kinds and got.kind not in kinds:
+        return f"{text}: ждали {' или '.join(kinds)}, получили {got.kind}"
+    if found:
+        query = found[0].lower()
+        missing = [stem for stem in expected.get("has", []) if stem not in query]
+        if missing:
+            return f"{text}: в запросе нет {missing}: {found[0]!r}"
+    if expected.get("asks"):
+        reply = reply_text(got.reply_hint)
+        if got.kind != "chat" or reply is None or "?" not in reply:
+            return f"{text}: ждали вопрос, куда искать, получили {got.kind}, {got.reply_hint!r}"
+    return None
+
+
 def several_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) -> str | None:
     """Чем пример нескольких дел разошёлся с ожиданием; `None` — сошёлся (§23.2).
 
@@ -2574,7 +2715,7 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
     assert not any(
         "open_tasks" in case
         for case in fixtures
-        if not {"edit", "conversation", "undated", "overdue", "several"} & set(case)
+        if not {"edit", "conversation", "undated", "overdue", "several", "search"} & set(case)
     )
     assert not any({"facts", "dialog", "repeat"} & set(case) for case in edits)
     expected = [case["edit"] for case in edits if case["edit"] is not None]
@@ -2665,7 +2806,7 @@ def test_talk_fixtures_cover_the_cases_of_the_stage() -> None:
     assert not any(
         "recent" in case
         for case in fixtures
-        if not {"talk", "conversation", "edit", "several"} & set(case)
+        if not {"talk", "conversation", "edit", "several", "search"} & set(case)
     )
     for case in talks:
         expected = case["talk"]
@@ -3219,6 +3360,58 @@ def test_several_fixtures_cover_the_cases_of_the_stage() -> None:
         assert block is not None and "Записал:" in block, case["text"]
 
 
+def test_search_mismatch_checks_count_kind_words_and_the_question() -> None:
+    tickets = {
+        "text": "найди билеты в Москву на 25-е",
+        "search": {"count": 1, "has": ["москв", "25 сентября"]},
+    }
+    found = make_message_understanding(kind="search", title="Билеты в Москву 25 сентября")
+
+    assert search_mismatch(tickets, found) is None
+    assert search_mismatch(tickets, make_message_understanding()) is not None
+    assert (
+        search_mismatch(tickets, make_message_understanding(kind="search", title="билеты в Москву"))
+        is not None
+    )
+
+    call = {"text": "найди время позвонить маме", "search": {"count": 0, "kinds": ["task"]}}
+    assert search_mismatch(call, make_message_understanding(title="позвонить маме")) is None
+    assert search_mismatch(call, make_message_understanding(kind="chat", title="мама")) is not None
+
+    nothing = {"text": "найди билеты", "search": {"count": 0, "asks": True}}
+    asked = make_message_understanding(kind="chat", reply_hint="Куда и на какие числа искать?")
+    assert search_mismatch(nothing, asked) is None
+    assert search_mismatch(nothing, make_message_understanding(kind="chat")) is not None
+
+    two = {"text": "найди билеты и школу", "search": {"count": 2}}
+    both = make_message_understanding(kind="search", title="билеты", more_searches=["школа"])
+    assert search_mismatch(two, both) is None
+    assert search_mismatch(two, found) is not None
+
+
+def test_search_fixtures_cover_the_cases_of_the_stage() -> None:
+    """Поиск (`techspec/24-search.md` §24.1): билеты, школа, контакт, погода;
+    «найди время», «в пятницу поищи», «найди мою задачу» и пересланное — не
+    поиск; «найди билеты» — вопрос, ответ на него и «а подешевле?» — поиск
+    целиком; дело рядом с поиском и два поиска."""
+    cases = [case for case in load_fixtures() if "search" in case]
+
+    assert len(cases) == SEARCH_COUNT
+    found = [case for case in cases if case["search"]["count"] >= 1]
+    assert all(case["kind"] in ("search", "task") for case in found)
+    assert all(case["search"].get("has") for case in found)
+    assert any(case["search"]["count"] == 2 for case in cases)
+    assert sum(case["search"]["count"] == 0 for case in cases) == 5
+    assert [case["text"] for case in cases if case["search"].get("asks")] == ["найди билеты"]
+    assert any("forwarded_from" in case and case["search"]["count"] == 0 for case in cases)
+    assert any("several" in case and case["search"]["count"] == 1 for case in cases)
+    follow = [case for case in cases if "recent" in case]
+    assert len(follow) == 2
+    blocks = [recent_for(case, TZ) or "" for case in follow]
+    assert any("Соломон: Куда и на какие числа искать билеты?" in block for block in blocks)
+    assert any("Соломон: Ищу: билеты" in block for block in blocks)
+
+
 def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Нет ключа — живой прогон пропускается, а не падает."""
 
@@ -3279,6 +3472,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     undated: list[str] = []
     overdue: list[str] = []
     several: list[str] = []
+    searches: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
@@ -3293,6 +3487,17 @@ async def test_live_model_understands_the_fixtures() -> None:
             if mismatch:
                 overdue.append(mismatch)
             continue
+        if "search" in case:
+            mismatch = search_mismatch(case, got)
+            if mismatch:
+                searches.append(mismatch)
+            if "several" not in case:
+                expected_date = case["due_date"]
+                local = got.due_at.astimezone(settings.owner_timezone) if got.due_at else None
+                actual_date = local.date().isoformat() if local else None
+                if expected_date is not None and actual_date != expected_date:
+                    dates.append(f"{case['text']}: ждали {expected_date}, получили {actual_date}")
+                continue
         if "several" in case:
             mismatch = several_mismatch(case, got, settings.owner_timezone)
             if mismatch:
@@ -3345,6 +3550,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not duplicates, "Дубль разошёлся:\n" + "\n".join(duplicates)
     assert not talks, "Разговор разошёлся:\n" + "\n".join(talks)
     assert not several, "Несколько дел разошлись:\n" + "\n".join(several)
+    assert not searches, "Поиск разошёлся: " + "; ".join(searches)
     matched = general - len(kinds)
     assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)
 
