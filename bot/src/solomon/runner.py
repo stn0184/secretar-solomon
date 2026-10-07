@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Sequence
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import LinkPreviewOptions, ReplyParameters
@@ -15,9 +16,10 @@ from supabase import Client
 from solomon import handlers
 from solomon.config import Settings
 from solomon.middlewares import OwnerOnlyMiddleware
+from solomon.services.chats import ChatService, Connection
 from solomon.services.reminders import ReminderService, mirror_timezone
 from solomon.services.search import SearchService
-from solomon.services.tasks import TaskService
+from solomon.services.tasks import Button, TaskService
 from solomon.services.transcription import DeepgramTranscriber, create_deepgram_client
 from solomon.services.understanding import UnderstandingService, create_anthropic_client
 from solomon.telegram import TelegramSession
@@ -65,6 +67,33 @@ def build_searches(
     return SearchService.with_database(settings, db, client, reply)
 
 
+def build_chats(
+    settings: Settings, db: Client, bot: Bot, speech: AsyncDeepgramClient
+) -> ChatService:
+    """Личные чаты (`techspec/25-chats.md`): база, Deepgram и две связи с Telegram.
+
+    Отправка — только владельцу в чат с Соломоном (`chat_id` — его id) и
+    без `business_connection_id`: в бизнес-чаты бот не пишет никогда
+    (§25.2). Чьё подключение — `getBusinessConnection`.
+    """
+
+    async def send(*, text: str, buttons: Sequence[Button] = ()) -> int:
+        message = await bot.send_message(
+            chat_id=settings.owner_telegram_id,
+            text=text,
+            reply_markup=handlers.keyboard(buttons),
+        )
+        return message.message_id
+
+    async def lookup(connection_id: str) -> Connection:
+        connection = await bot.get_business_connection(business_connection_id=connection_id)
+        return Connection(user_id=connection.user.id, is_enabled=connection.is_enabled)
+
+    return ChatService.with_database(
+        settings, db, send, lookup, DeepgramTranscriber.with_client(speech)
+    )
+
+
 def build_reminders(
     settings: Settings, db: Client, bot: Bot, searches: SearchService | None = None
 ) -> ReminderService:
@@ -99,6 +128,7 @@ def build_dispatcher(
     tasks: TaskService | None = None,
     reminders: ReminderService | None = None,
     searches: SearchService | None = None,
+    chats: ChatService | None = None,
 ) -> Dispatcher:
     """Собрать диспетчер: фильтр владельца снаружи, обработчики внутри.
 
@@ -106,12 +136,21 @@ def build_dispatcher(
     готовый сервис по имени параметра и своих зависимостей не собирает.
     Готовый сервис можно передать снаружи: так его подменяет тест. `searches`
     обработчик зовёт, чтобы запустить поиск после ответа «Ищу» (§24.3).
+    `chats` — личные чаты: бизнес-обновления идут своим роутером (§25.2), и
+    long polling просит их у Telegram сам — по зарегистрированным
+    обработчикам.
     """
     dispatcher = Dispatcher(
-        settings=settings, db=db, tasks=tasks, reminders=reminders, searches=searches
+        settings=settings,
+        db=db,
+        tasks=tasks,
+        reminders=reminders,
+        searches=searches,
+        chats=chats,
     )
     dispatcher.update.outer_middleware(OwnerOnlyMiddleware(settings.owner_telegram_id))
     dispatcher.include_router(handlers.build_router())
+    dispatcher.include_router(handlers.build_business_router())
     return dispatcher
 
 
@@ -123,9 +162,10 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     speech = create_deepgram_client(settings)
     tasks = build_tasks(settings, db, client, speech) if db is not None else None
     searches = build_searches(settings, db, bot, client) if db is not None else None
+    chats = build_chats(settings, db, bot, speech) if db is not None else None
     reminders = build_reminders(settings, db, bot, searches) if db is not None else None
     dispatcher = build_dispatcher(
-        settings, db=db, tasks=tasks, reminders=reminders, searches=searches
+        settings, db=db, tasks=tasks, reminders=reminders, searches=searches, chats=chats
     )
     if db is not None:
         # Пояс владельца — в базу до первого сообщения: правка срока из

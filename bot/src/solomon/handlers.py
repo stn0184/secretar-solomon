@@ -1,4 +1,11 @@
-"""Обработчики сообщений. Сюда приходит только владелец — см. middlewares."""
+"""Обработчики сообщений. Сюда приходит только владелец — см. middlewares.
+
+Исключение — бизнес-обновления личных чатов владельца (`techspec/25-chats.md`
+§25.2): их пишут собеседники, и отбирает их не отправитель, а подключение —
+в `services/chats.py`. Их обработчики собраны отдельным роутером
+(`build_business_router`) и **не отвечают никогда**: ни `answer`, ни
+`reply`, ни статуса «печатает» — в бизнес-чат владельца бот не пишет.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +20,8 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramEntityTooLarge, TelegramNetworkError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BusinessConnection,
+    BusinessMessagesDeleted,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -26,8 +35,12 @@ from aiogram.types import (
 from aiohttp import ClientConnectionError, ClientPayloadError
 
 from solomon import texts
+from solomon.config import Settings
+from solomon.db.chats import ChatKind, Platform
 from solomon.db.tasks import SpeechKind
+from solomon.services import chats as chats_module
 from solomon.services import edits
+from solomon.services.chats import ChatService, Incoming
 from solomon.services.reminders import ReminderService
 from solomon.services.search import SearchService
 from solomon.services.tasks import Button, PressOutcome, RecordOutcome, Swipe, TaskService
@@ -732,6 +745,153 @@ async def handle_not_text(message: Message) -> None:
     await message.answer(texts.NOT_TEXT)
 
 
+# --- Личные чаты (`techspec/25-chats.md`) ------------------------------------
+
+TELEGRAM: Platform = "telegram"
+
+
+def _chat_content(message: Message) -> tuple[ChatKind, str, str | None]:
+    """Вид, текст и файл сообщения чата (§25.2): у голосового и кружка текст
+    пуст до расшифровки, у снимка и прочего — подпись, если есть."""
+    if message.text is not None:
+        return "text", message.text, None
+    if message.voice is not None:
+        return "voice", "", message.voice.file_id
+    if message.video_note is not None:
+        return "video_note", "", message.video_note.file_id
+    caption = message.caption or ""
+    if message.photo:
+        return "photo", caption, None
+    return "other", caption, None
+
+
+def chat_message_of(message: Message, owner_telegram_id: int) -> Incoming | None:
+    """Сообщение личного чата владельца в поля приёма — или ничего (§25.2).
+
+    Чат — собеседник: в личном бизнес-чате `chat` всегда он, и у сообщения
+    владельца тоже. `from.id` владельца — `out`, иначе `in`. Написанное
+    другим ботом от имени владельца (`sender_business_bot`) и автоматическое
+    (`is_from_offline`: автоответ, приветствие, отложенное) — пропуск: это
+    не владелец ответил. Без подключения — не бизнес-сообщение.
+    """
+    connection = message.business_connection_id
+    if connection is None or message.sender_business_bot is not None or message.is_from_offline:
+        return None
+    author = message.from_user
+    out = author is not None and author.id == owner_telegram_id
+    kind, text, file_id = _chat_content(message)
+    chat_name = message.chat.full_name
+    return Incoming(
+        platform=TELEGRAM,
+        connection_id=connection,
+        chat_key=str(message.chat.id),
+        chat_name=chat_name,
+        external_id=str(message.message_id),
+        direction="out" if out else "in",
+        sender=author.full_name if author is not None else chat_name,
+        sent_at=message.date,
+        kind=kind,
+        text=text,
+        file_id=file_id,
+    )
+
+
+async def handle_business_connection(
+    connection: BusinessConnection, chats: ChatService | None = None
+) -> None:
+    """Бота подключили к аккаунту или отключили (§25.2): владельца — в базу и
+    вопрос о согласии, чужое — в журнал. Ответа нет никому."""
+    if chats is None:
+        logger.error("Подключение некому принять: бот собран без базы")
+        return
+    await chats.connected(
+        platform=TELEGRAM,
+        connection_id=connection.id,
+        user_id=connection.user.id,
+        enabled=connection.is_enabled,
+    )
+
+
+async def handle_business_message(
+    message: Message, bot: Bot, settings: Settings, chats: ChatService | None = None
+) -> None:
+    """Сообщение личного чата владельца (§25.2): в базу, если подключение —
+    владельца и есть согласие; голосовое — расшифровать. В чат — ничего."""
+    if chats is None:
+        logger.error("Сообщение чата некуда записать: бот собран без базы")
+        return
+    incoming = chat_message_of(message, settings.owner_telegram_id)
+    if incoming is None:
+        return
+    file_id = incoming.file_id
+
+    async def load_audio() -> bytes:
+        if file_id is None:
+            raise ValueError("no file to load")
+        return await load_file(bot, file_id)
+
+    await chats.receive(incoming, load_audio if file_id is not None else None)
+
+
+async def handle_edited_business_message(
+    message: Message, settings: Settings, chats: ChatService | None = None
+) -> None:
+    """Правка в личном чате (§25.1): до разбора меняет текст."""
+    if chats is None:
+        return
+    incoming = chat_message_of(message, settings.owner_telegram_id)
+    if incoming is None:
+        return
+    await chats.edited(incoming)
+
+
+async def handle_deleted_business_messages(
+    deleted: BusinessMessagesDeleted, chats: ChatService | None = None
+) -> None:
+    """Удаление в личном чате (§25.1) стирает текст."""
+    if chats is None:
+        return
+    await chats.deleted(
+        platform=TELEGRAM,
+        connection_id=deleted.business_connection_id,
+        chat_key=str(deleted.chat.id),
+        external_ids=[str(message_id) for message_id in deleted.message_ids],
+    )
+
+
+async def handle_consent(callback: CallbackQuery, chats: ChatService | None = None) -> None:
+    """Нажата «Согласен» или «Не надо» под вопросом о согласии (§25.5).
+
+    Сначала база, потом сообщение: под ним — ответ и кнопка поменять решение.
+    """
+    parsed = chats_module.parse_consent(callback.data or "")
+    if chats is None:
+        logger.error("Кнопку согласия некому обработать: бот собран без базы")
+        await callback.answer(texts.CONSENT_NOT_SAVED)
+        return
+    if parsed is None:
+        logger.warning("Кнопка согласия с непонятными данными: %r", callback.data)
+        await callback.answer(texts.DONE_UNKNOWN)
+        return
+    platform, agreed = parsed
+    await answer_press(callback, await chats.answer_consent(platform, agreed))
+
+
+def build_business_router() -> Router:
+    """Роутер бизнес-обновлений (§25.2) — новая фабрика на каждую сборку.
+
+    Обновления сюда приходят мимо проверки отправителя (`middlewares.py`):
+    собеседник — не владелец, а отбирает их подключение. Обработчики не
+    отвечают ничем.
+    """
+    router = Router(name="business")
+    router.business_connection.register(handle_business_connection)
+    router.business_message.register(handle_business_message)
+    router.edited_business_message.register(handle_edited_business_message)
+    router.deleted_business_messages.register(handle_deleted_business_messages)
+    return router
+
+
 def build_router() -> Router:
     """Новый роутер обработчиков.
 
@@ -753,4 +913,5 @@ def build_router() -> Router:
     router.callback_query.register(handle_reopen, F.data.startswith(edits.REOPEN_PREFIX))
     router.callback_query.register(handle_back, F.data.startswith(edits.BACK_PREFIX))
     router.callback_query.register(handle_apart, F.data.startswith(edits.APART_PREFIX))
+    router.callback_query.register(handle_consent, F.data.startswith(chats_module.CONSENT_PREFIX))
     return router

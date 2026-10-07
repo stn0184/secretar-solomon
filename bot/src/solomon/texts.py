@@ -932,3 +932,57 @@ def more_in_conversation(items: Sequence[str]) -> str:
     """
     listed = ", ".join(f"«{item}»" for item in items)
     return f"В переписке ещё: {listed}. Нужны — напишите или надиктуйте отдельно."
+
+
+# Личные чаты (`techspec/25-chats.md`). Площадка называется в каждом
+# сообщении о чатах: «Из переписки с Игорем (Telegram) записал».
+PLATFORM_NAMES = {"telegram": "Telegram", "instagram": "Instagram", "max": "MAX"}
+
+# Согласие (§25.5): что бот читает, куда отправляет, сколько хранит и что
+# писать в чаты не может. Правила Telegram для ботов (п. 5.4) требуют, чтобы
+# владелец это знал и разрешил отдавать текст сторонним API.
+_CONSENT_TAIL = (
+    "и отправляю текст и голосовые на разбор (Claude через посредника, Deepgram). "
+    "Храню переписку 7 дней, записанные дела — пока не уберёте."
+)
+CONSENT_QUESTIONS = {
+    "telegram": (
+        "Подключено чтение личных чатов Telegram. Я читаю новые сообщения в чатах, "
+        f"которые вы выбрали, {_CONSENT_TAIL} Писать в ваши чаты я не могу. Согласны?"
+    ),
+    "instagram": (
+        "Подключено чтение Direct в Instagram. Я читаю новые сообщения в Direct "
+        f"{_CONSENT_TAIL} Отвечать в Direct я не буду. Согласны?"
+    ),
+    "max": (
+        "Подключено чтение MAX. Я читаю то, что вы пересылаете мне в MAX, и группы, "
+        f"куда вы меня добавили, {_CONSENT_TAIL} В MAX я отвечаю только «Принял». Согласны?"
+    ),
+}
+CONSENT_YES = "Согласен"
+CONSENT_NO = "Не надо"
+# Под ответом «Согласен» — кнопка передумать.
+CONSENT_STOP = "Больше не читать"
+CONSENT_GIVEN = "Договорились. Что записал из переписки и кому вы не ответили — буду писать сюда."
+# Как отключить бота совсем — у каждой площадки своё место.
+CONSENT_REFUSED = {
+    "telegram": (
+        "Хорошо, переписку не храню. Отключить меня совсем — в настройках Telegram, "
+        "«Автоматизация чатов»."
+    ),
+    "instagram": "Хорошо, переписку из Direct не храню.",
+    "max": "Хорошо, пересланное в MAX не храню.",
+}
+CONSENT_NOT_SAVED = "Не смог записать ответ: база не ответила. Попробуйте ещё раз."
+CONSENT_UNKNOWN = "Не нашёл это подключение."
+
+
+def consent_question(platform: str) -> str:
+    """Вопрос о согласии на площадку (§25.5)."""
+    return CONSENT_QUESTIONS[platform]
+
+
+def consent_answered(platform: str, *, agreed: bool) -> str:
+    """Вопрос и под ним — что владелец решил: так сообщение остаётся понятным."""
+    answer = CONSENT_GIVEN if agreed else CONSENT_REFUSED[platform]
+    return f"{consent_question(platform)}\n\n{answer}"
