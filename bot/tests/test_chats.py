@@ -2968,3 +2968,8 @@ def test_dispatcher_carries_the_chats() -> None:
     assert dispatcher["chats"] is service
     assert "business_message" in dispatcher.resolve_used_update_types()
     assert "business_connection" in dispatcher.resolve_used_update_types()
+
+
+def test_help_tells_how_to_connect_the_chats() -> None:
+    assert "Настройки → Автоматизация чатов" in texts.HELP
+    assert "в ваши чаты не пишу" in texts.HELP
