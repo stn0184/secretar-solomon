@@ -68,9 +68,14 @@ def build_searches(
 
 
 def build_chats(
-    settings: Settings, db: Client, bot: Bot, speech: AsyncDeepgramClient
+    settings: Settings,
+    db: Client,
+    bot: Bot,
+    client: AsyncAnthropic,
+    speech: AsyncDeepgramClient,
 ) -> ChatService:
-    """Личные чаты (`techspec/25-chats.md`): база, Deepgram и две связи с Telegram.
+    """Личные чаты (`techspec/25-chats.md`): база, тот же клиент Claude, Deepgram
+    и две связи с Telegram.
 
     Отправка — только владельцу в чат с Соломоном (`chat_id` — его id) и
     без `business_connection_id`: в бизнес-чаты бот не пишет никогда
@@ -90,7 +95,7 @@ def build_chats(
         return Connection(user_id=connection.user.id, is_enabled=connection.is_enabled)
 
     return ChatService.with_database(
-        settings, db, send, lookup, DeepgramTranscriber.with_client(speech)
+        settings, db, client, send, lookup, DeepgramTranscriber.with_client(speech)
     )
 
 
@@ -162,7 +167,7 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     speech = create_deepgram_client(settings)
     tasks = build_tasks(settings, db, client, speech) if db is not None else None
     searches = build_searches(settings, db, bot, client) if db is not None else None
-    chats = build_chats(settings, db, bot, speech) if db is not None else None
+    chats = build_chats(settings, db, bot, client, speech) if db is not None else None
     reminders = build_reminders(settings, db, bot, searches) if db is not None else None
     dispatcher = build_dispatcher(
         settings, db=db, tasks=tasks, reminders=reminders, searches=searches, chats=chats

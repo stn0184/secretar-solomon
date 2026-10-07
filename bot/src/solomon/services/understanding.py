@@ -906,6 +906,12 @@ def _open_task_line(number: int, task: OpenTask, timezone: ZoneInfo) -> str:
     return f"{line} ({'; '.join(details)})" if details else line
 
 
+def open_task_lines(tasks: Sequence[OpenTask], timezone: ZoneInfo) -> list[str]:
+    """Строки открытых задач «N. суть (…)», как в блоке 5 (§5.2): их берёт и
+    разбор личных чатов для дублей (`techspec/25-chats.md` §25.3)."""
+    return [_open_task_line(number, task, timezone) for number, task in enumerate(tasks, start=1)]
+
+
 def last_tasks_line(numbers: Sequence[int]) -> str | None:
     """Строка о последних задачах в разговоре (§12.2, §23.2): одна — «Последняя
     задача в разговоре: №N», несколько — «Последние задачи в разговоре: №A,
@@ -946,10 +952,7 @@ def format_open_tasks(
         return ""
     if not tasks:
         return f"Открытых задач нет.\n{EDIT_RULES}\n{DUPLICATE_RULES}"
-    lines = ["Открытые задачи:"]
-    lines.extend(
-        _open_task_line(number, task, timezone) for number, task in enumerate(tasks, start=1)
-    )
+    lines = ["Открытые задачи:", *open_task_lines(tasks, timezone)]
     if short:
         lines.extend((SHORT_BLOCK_NOTE, DUPLICATE_RULES))
         if photo:

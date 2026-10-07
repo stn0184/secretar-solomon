@@ -153,6 +153,12 @@ def _name(line: Line) -> str:
     return _flat(line.forwarded_from or "")
 
 
+def render_line(line: Line, now: datetime, timezone: tzinfo) -> str:
+    """Строка переписки «время имя: текст» (§18.2) — её же берёт разбор личных
+    чатов (`techspec/25-chats.md` §25.3)."""
+    return f"{time_label(line.sent_at, now, timezone)} {_name(line)}: {_content(line)}"
+
+
 def _header(total: int, shown: int) -> str:
     if shown < total:
         return f"Переписка (сообщений: {total}, показаны последние {shown}):"
@@ -168,10 +174,7 @@ def conversation_text(lines: Sequence[Line], now: datetime, timezone: tzinfo) ->
     длиннее 8000 знаков — выпадают самые старые строки; подпись остаётся.
     """
     forwarded = [line for line in lines if line.forwarded]
-    body = [
-        f"{time_label(line.sent_at, now, timezone)} {_name(line)}: {_content(line)}"
-        for line in forwarded[-FORWARDED_LIMIT:]
-    ]
+    body = [render_line(line, now, timezone) for line in forwarded[-FORWARDED_LIMIT:]]
     own = (_content(line) for line in lines if not line.forwarded)
     caption = " ".join(part for part in own if part)
     tail = [f"{CAPTION_LABEL}: {cut_middle(caption, LINE_LIMIT)}"] if caption else []
