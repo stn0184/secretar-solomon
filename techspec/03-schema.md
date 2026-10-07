@@ -110,6 +110,8 @@ null`.
 | `due_moved_at` | timestamptz, nullable | правка из приложения перенесла срок, бот ещё не написал об этом в чат (§11.4); момент правки |
 | `source_message_id` | uuid, `references messages(id)`, nullable | сообщение, из которого возникла; пусто у задач, заведённых из Mini App |
 | `source_item` | smallint, nullable | номер дела в сообщении (этап 023, §23.2), 1–10: есть ровно у задач с `source_message_id` (`tasks_source_item_check`), уникален в паре `(source_message_id, source_item)` (`tasks_source_item_key`); задачи из сообщений до этапа получили 1 |
+| `chat_analysis_id` | uuid, `references chat_analyses(id)`, nullable | разбор переписки, из которого задача записана (этап 025, §3.14, §25.3); у задачи не бывает и сообщения, и разбора (`tasks_chat_source_check`) |
+| `chat_item` | smallint, nullable | номер дела в разборе, 1–5: есть ровно вместе с `chat_analysis_id` (`tasks_chat_item_check`), уникален в паре (`tasks_chat_item_key`); по нему кнопка «Убрать N» (§25.4) |
 | `created_at` | timestamptz, `default now()` | |
 | `updated_at` | timestamptz, `default now()` | обновляется триггером при любой правке |
 
@@ -851,3 +853,159 @@ created_at) where status = 'pending'` — под тик. RLS — §4.2, та ж�
 text, attempts smallint, answer text, created_at timestamptz,
 request_chat_id bigint, request_message_id bigint`: чат и сообщение
 просьбы из `messages`, им бот отвечает.
+
+### 3.11 `chat_sources` — согласие на площадку
+
+Строка на площадку чтения чатов (`techspec/25-chats.md` §25.5, этап 025):
+подключена ли, каким подключением и согласился ли владелец. Площадки —
+`telegram`, `instagram`, `max` сразу: Instagram (§26) и MAX (§27) идут
+общим путём без своей миграции.
+
+| Колонка | Тип | Что это |
+| --- | --- | --- |
+| `id` | uuid | ключ |
+| `owner_telegram_id` | bigint | владелец (§3.1) |
+| `platform` | text, `check in ('telegram', 'instagram', 'max')` | площадка |
+| `connection_id` | text, nullable | у Telegram — id бизнес-подключения (§25.2); у площадки без подключения пусто |
+| `is_enabled` | boolean, `default true` | подключение действует; `false` — владелец отключил бота, приём стоит |
+| `asked_at` | timestamptz, nullable | вопрос о согласии ушёл; пусто — тик спросит |
+| `consented_at` | timestamptz, nullable | «Согласен»: до него сообщения площадки не хранятся |
+| `declined_at` | timestamptz, nullable | «Не надо» |
+| `created_at` | timestamptz, `default now()` | |
+
+Ограничения: `chat_sources_owner_platform_key unique (owner_telegram_id,
+platform)`; `chat_sources_consent_check` — согласие и отказ вместе не
+бывают.
+
+### 3.12 `chat_threads` — чаты
+
+Чат на площадке — собеседник или группа — и его «ждёт ответа» (§25.1,
+§25.4).
+
+| Колонка | Тип | Что это |
+| --- | --- | --- |
+| `id` | uuid | ключ |
+| `owner_telegram_id` | bigint | владелец (§3.1) |
+| `platform` | text, тот же `check` | площадка |
+| `chat_key` | text, 1–200 знаков | ключ чата на площадке; у Telegram — id чата строкой |
+| `name` | text, `default ''` | имя собеседника или группы, последнее известное |
+| `tracks_waiting` | boolean, `default true` | вести ли «ждёт ответа»; у чатов MAX — `false` (§27.3); ставится при заведении чата |
+| `last_message_at` | timestamptz | когда пришло последнее сообщение: по нему чат «затих» (§25.3) |
+| `last_out_at` | timestamptz, nullable | последнее сообщение владельца, время площадки |
+| `waiting_since` | timestamptz, nullable | «ждёт ответа» с этого времени — время последнего сообщения собеседника в разобранном куске |
+| `waiting_about` | text, nullable | о чём — фраза модели: «он спрашивал, во сколько созвон» |
+| `waiting_to` | text, nullable | кому не ответили — имя в дательном падеже от модели |
+| `waiting_reminded_at` | timestamptz, nullable | напоминание ушло; второго нет |
+| `failures` | smallint, `default 0` | неудачных разборов подряд (§25.3) |
+| `created_at` | timestamptz, `default now()` | |
+
+Ограничения: `chat_threads_key unique (owner_telegram_id, platform,
+chat_key)`; `chat_threads_waiting_check` — время, фраза и «кому» есть
+вместе, напомнено — только у ждущего.
+
+### 3.13 `chat_messages` — сообщения чатов
+
+Сообщение личного чата (§25.1). Не путать с `messages` (§3.2): там то, что
+владелец написал Соломону, здесь — чужая переписка, которая хранится
+семь дней.
+
+| Колонка | Тип | Что это |
+| --- | --- | --- |
+| `id` | uuid | ключ |
+| `owner_telegram_id` | bigint | владелец (§3.1) |
+| `thread_id` | uuid, `references chat_threads(id) on delete cascade` | чат |
+| `external_id` | text, 1–200 знаков | id сообщения на площадке |
+| `direction` | text, `check in ('in', 'out')` | `in` — собеседник, `out` — владелец |
+| `sender` | text, `default ''` | имя отправителя |
+| `sent_at` | timestamptz | время на площадке: от него считается «завтра» в строке |
+| `kind` | text, `check in ('text', 'voice', 'video_note', 'photo', 'other')` | вид |
+| `text` | text, `default ''` | текст, подпись или расшифровка голосового; стёртый — пустой |
+| `analysis_id` | uuid, `references chat_analyses(id)`, nullable | отметка «разобрано» — каким разбором |
+| `erased_at` | timestamptz, nullable | текст стёрт удалением на площадке или сроком |
+| `created_at` | timestamptz, `default now()` | когда пришло: по нему тишина 20 минут, два часа и семь дней — у пересланного в MAX время площадки старое |
+
+Ограничения: `chat_messages_external_key unique (thread_id, external_id)` —
+повторная доставка дубля не даёт; `chat_messages_erased_check` — стёртый
+текст пуст. Индексы: `(thread_id, sent_at)` — под куски разбора;
+частичный `(owner_telegram_id, created_at) where erased_at is null` — под
+стирание.
+
+### 3.14 `chat_analyses` — разборы переписки
+
+Строка на разбор куска переписки (§25.3): какой кусок, сколько дел, след и
+сообщение владельцу.
+
+| Колонка | Тип | Что это |
+| --- | --- | --- |
+| `id` | uuid | ключ |
+| `owner_telegram_id` | bigint | владелец (§3.1) |
+| `thread_id` | uuid, `references chat_threads(id) on delete cascade` | чат |
+| `status` | text, `check in ('done', 'skipped')` | разобран моделью · пропущен (три неудачи подряд или читать нечего) |
+| `messages_count` | integer, ≥ 1 | сколько новых сообщений в куске |
+| `first_sent_at`, `last_sent_at` | timestamptz | от какого до какого времени кусок |
+| `items` | smallint, 0–5, `default 0` | сколько дел записано; у `skipped` — 0 |
+| `chat_with` | text, nullable | с кем переписка — имя в творительном падеже от модели: «Из переписки с Игорем» |
+| `waiting_about` | text, nullable | «ждёт ответа», если разбор его нашёл |
+| `analysis` | jsonb, nullable | ответ модели целиком — след для разбора сбоев |
+| `ai_model`, `input_tokens`, `output_tokens`, `duration_ms` | text, integer, nullable | модель, токены и длительность вызова (§25.3) |
+| `report_message_id` | bigint, nullable | сообщение владельцу в Telegram; пусто у ушедшего — слать было нечего |
+| `reported_at` | timestamptz, nullable | сообщение ушло: «отправить → пометить» |
+| `created_at` | timestamptz, `default now()` | |
+
+Индекс `chat_analyses_unreported_idx (owner_telegram_id, created_at) where
+reported_at is null and items > 0` — под тик.
+
+### 3.15 Функции чатов
+
+RLS на всех четырёх таблицах — §4.2; приложение их не читает. Функции —
+только `service_role` (`public`, `anon`, `authenticated` — `revoke`),
+миграция 025 (`20261007100000_chats.sql`); владелец — явным аргументом:
+
+- `connect_chat_source(owner, platform, connection_id, is_enabled)` →
+  `chat_sources` — заводит или обновляет площадку. Отказ, отключение и
+  новое подключение — отказ снимается, вопрос уйдёт снова; согласие не
+  снимается.
+- `mark_consent_asked(owner, platform)` → boolean — вопрос ушёл; только
+  у площадки без вопроса и без решения.
+- `answer_consent(owner, platform, agreed)` → `chat_sources` — «Согласен»
+  или «Не надо»; решение можно поменять.
+- `store_chat_message(owner, platform, connection_id, chat_key, chat_name,
+  external_id, direction, sender, sent_at, kind, message_text,
+  tracks_waiting)` → `(outcome, message_id)` — **сама проверяет
+  подключение и согласие**: `stored`, `repeat`, `no_source`,
+  `unknown_connection`, `disabled`, `no_consent`. Заводит чат; сообщение
+  владельца двигает `last_out_at` и снимает «ждёт ответа», заданное не
+  позже него.
+- `set_chat_transcript(owner, message_id, transcript)` → boolean —
+  расшифровка голосового, только до разбора.
+- `edit_chat_message(owner, platform, connection_id, chat_key,
+  external_id, message_text)` → boolean — правка до разбора;
+  `erase_chat_messages(…, external_ids)` → integer — удаление стирает
+  текст. Обе сверяют подключение.
+- `chats_to_analyze(owner, quiet_before, stale_before)` → `(thread_id,
+  platform, chat_key, name)` — чаты площадок с согласием, где есть
+  неразобранные и последнее пришло раньше `quiet_before` или первое
+  неразобранное — раньше `stale_before`; старшие первыми.
+- `record_chat_analysis(owner, thread_id, message_ids, analysis, ai_model,
+  input_tokens, output_tokens, duration_ms, chat_with, waiting, tasks)` →
+  uuid — одной транзакцией: разбор, пометка сообщений, задачи с
+  напоминаниями (`tasks` — `[{item, task, reminders}]`, не больше пяти),
+  «ждёт ответа» (`{about, to, since}`), `failures = 0`. Неразобранных из
+  `message_ids` нет — `null`, ничего не пишется.
+- `chat_failed(owner, thread_id)` → integer — неудача подряд плюс один;
+  `skip_chat_messages(owner, thread_id, message_ids)` → uuid — разбор
+  `skipped` без дел, пометка, `failures = 0`.
+- `chat_report(owner, analysis_id)` → `(platform, chat_name, chat_with,
+  item, task_id, title, due_at, due_precision, promise, status)` — дела
+  разбора, какими они стали сейчас; `mark_chat_report_sent(owner,
+  analysis_id, telegram_message_id)` → boolean.
+- `drop_chat_task(owner, analysis_id, item)` → `tasks` — «Убрать»:
+  активная задача уходит в `cancelled`, неотправленные напоминания
+  стираются; не активная — как есть.
+- `chats_waiting(owner, asked_before)` → `(thread_id, platform, name,
+  waiting_since, waiting_about, waiting_to)` — чаты с вопросом не позже
+  `asked_before`, без напоминания, где владелец после вопроса не писал;
+  `mark_waiting_reminded(owner, thread_id, waiting_since)` → boolean —
+  только если вопрос тот же.
+- `erase_old_chat_messages(owner, before)` → integer — стирает текст
+  сообщений, пришедших раньше `before`.
