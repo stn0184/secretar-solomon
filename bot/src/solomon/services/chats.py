@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from datetime import time as dt_time
 from typing import Any, Literal, Protocol, cast, get_args
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from anthropic import (
@@ -533,7 +534,11 @@ def parse_drop(data: str) -> tuple[str, int] | None:
     if not data.startswith(DROP_PREFIX):
         return None
     analysis_id, _, item = data.removeprefix(DROP_PREFIX).partition(":")
-    if not analysis_id or not (item.isascii() and item.isdigit()):
+    if not (item.isascii() and item.isdigit()):
+        return None
+    try:
+        UUID(analysis_id)
+    except ValueError:
         return None
     number = int(item)
     if not 1 <= number <= DEALS_LIMIT:

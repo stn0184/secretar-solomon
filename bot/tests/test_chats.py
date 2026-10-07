@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import httpx2
@@ -854,8 +855,10 @@ class FakeChatStore:
         self._ids = 0
 
     def _id(self, prefix: str) -> str:
+        """Id как у базы — uuid; приставка — только для чтения теста."""
         self._ids += 1
-        return f"{prefix}{self._ids}"
+        kinds = {"t": 1, "m": 2, "a": 3, "k": 4}
+        return str(UUID(int=kinds[prefix] << 64 | self._ids))
 
     def _call(self, name: str) -> None:
         self.calls.append(name)
@@ -2541,7 +2544,14 @@ def test_drop_button_data_goes_both_ways() -> None:
 
 @pytest.mark.parametrize(
     "data",
-    ["drop:", f"drop:{ANALYSIS_ID}", f"drop:{ANALYSIS_ID}:0", f"drop:{ANALYSIS_ID}:6", "drop::1"],
+    [
+        "drop:",
+        f"drop:{ANALYSIS_ID}",
+        f"drop:{ANALYSIS_ID}:0",
+        f"drop:{ANALYSIS_ID}:6",
+        "drop::1",
+        "drop:abc:1",
+    ],
 )
 def test_crooked_drop_data_is_none(data: str) -> None:
     assert chats.parse_drop(data) is None
