@@ -31,6 +31,7 @@ bot/                     Telegram-бот, Python 3.12, long polling
       overdue.py         вопрос о прошедшем деле: окно, свои вопросы, границы отбора для плана и шага, текст вопроса
       search.py          поиск по поручению: вызов с серверным поиском, ответ из текста, очередь поисков, шаг тика
       chats.py           личные чаты: приём, согласие, разбор в фоне, сообщение о разборе и «Убрать», «ждёт ответа», шаг тика
+      instagram.py       Direct в Instagram: клиент httpx, ключ и файл состояния, продление, опрос в общий путь чатов, шаг тика
     db/
       client.py          клиент Supabase на ключе service-role
       rpc.py             общий поход в базу: отдельный поток, DatabaseError
@@ -304,7 +305,20 @@ aiogram, ни про сеть — отправка приходит в него 
 берёт из `services/understanding.py` модель, момент, что известно и строки
 открытых задач, из `services/batches.py` — `render_line`, из
 `services/reminders.py` — планировщик, из `services/tasks.py` — `Button` и
-`PressOutcome`; его самого не импортирует ни один сервис.
+`PressOutcome`; его самого не импортирует ни один сервис, кроме источника
+Instagram.
+
+Instagram Direct (§26, этап 026) — `services/instagram.py`: чистые функции
+ответов Meta (`parse_*`, `attachment_of`, `to_incoming`, `fresh`), ключа и
+файла состояния (`KeyState`, `start_state`, `refresh_due`, `horizon_of`),
+клиент `HttpInstagramApi` поверх httpx за протоколом `InstagramApi`,
+`StateFile` и `InstagramService` — опрос в фоне и шаг тика. Общий путь
+чатов он видит протоколом `ChatSink` (`enable`, `reading`, `receive` у
+`ChatService`) и импортирует из `services/chats.py` `Incoming`,
+`OwnerSender` и `in_window`; `chats.py` о нём не знает. Сборка —
+`runner.build_instagram`: нет `INSTAGRAM_TOKEN` — `None`; отправка
+владельцу — общая `runner.owner_sender`. Шаг тика — `ReminderService`
+(`instagram=`, тот же протокол `ChatTicker`).
 
 Поиск по поручению (§24, этап 024) — `services/search.py`: правила и
 вызов модели с базовыми `web_search` и `web_fetch` (протокол
