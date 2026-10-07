@@ -45,7 +45,11 @@ def test_token_is_hidden_in_the_traceback() -> None:
 
 def test_every_key_from_settings_is_hidden(settings: Settings) -> None:
     """Ключ, заведённый в `Settings`, без правки `secrets_of` не останется."""
-    settings = replace(settings, instagram_token="IGAA-test-instagram-token")
+    settings = replace(
+        settings,
+        instagram_token="IGAA-test-instagram-token",
+        max_bot_token="max-test-bot-token",
+    )
     keys = [
         getattr(settings, field.name)
         for field in fields(settings)
@@ -55,7 +59,7 @@ def test_every_key_from_settings_is_hidden(settings: Settings) -> None:
 
     line = formatter.format(make_record(" ".join(["%s"] * len(keys)), *keys))
 
-    assert len(keys) == 5
+    assert len(keys) == 6
     for key in keys:
         assert key not in line
 

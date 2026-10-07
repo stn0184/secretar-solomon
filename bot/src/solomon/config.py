@@ -56,6 +56,15 @@ class Settings:
     # Долгоживущий ключ Instagram (`techspec/26-instagram.md` §26.1). Пусто —
     # Direct не опрашивается, бот работает как без него.
     instagram_token: str | None = None
+    # Бот в MAX (`techspec/27-max.md` §27.1): его токен и id владельца в MAX.
+    # Нет хотя бы одного — MAX не опрашивается, бот работает как без него.
+    max_bot_token: str | None = None
+    owner_max_id: int | None = None
+
+    @property
+    def max_enabled(self) -> bool:
+        """Источник MAX включён: заданы и токен, и id владельца (§27.1)."""
+        return self.max_bot_token is not None and self.owner_max_id is not None
 
 
 def _required(env: Mapping[str, str], name: str) -> str:
@@ -81,11 +90,22 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     deepgram_key = _required(env, "DEEPGRAM_API_KEY")
     anthropic_base_url = _optional(env, "ANTHROPIC_BASE_URL")
     instagram_token = _optional(env, "INSTAGRAM_TOKEN")
+    max_bot_token = _optional(env, "MAX_BOT_TOKEN")
+    raw_max_owner = _optional(env, "OWNER_MAX_ID")
 
     try:
         owner = int(raw_owner)
     except ValueError as error:
         raise InvalidVariable("OWNER_TELEGRAM_ID", "число — Telegram-id владельца") from error
+
+    # Id владельца в MAX необязателен, но заданный с опечаткой останавливает
+    # запуск: молча выключенный MAX выглядел бы как «бот не видит сообщений».
+    owner_max_id = None
+    if raw_max_owner is not None:
+        try:
+            owner_max_id = int(raw_max_owner)
+        except ValueError as error:
+            raise InvalidVariable("OWNER_MAX_ID", "число — id владельца в MAX") from error
 
     # Пояс владельца — без него «в пятницу» не превратить в дату
     # (`techspec/05-ai.md` §5.1), поэтому непонятное значение останавливает
@@ -107,4 +127,6 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         deepgram_api_key=deepgram_key,
         anthropic_base_url=anthropic_base_url.rstrip("/") if anthropic_base_url else None,
         instagram_token=instagram_token,
+        max_bot_token=max_bot_token,
+        owner_max_id=owner_max_id,
     )

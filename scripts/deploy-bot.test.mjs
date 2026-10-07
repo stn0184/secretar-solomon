@@ -37,13 +37,15 @@ const BOT_KEYS = [
   "ANTHROPIC_BASE_URL",
   "DEEPGRAM_API_KEY",
   "INSTAGRAM_TOKEN",
+  "MAX_BOT_TOKEN",
+  "OWNER_MAX_ID",
 ];
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
 
-/** Значения выдуманные; ANTHROPIC_BASE_URL и INSTAGRAM_TOKEN нет нарочно —
- * обе необязательные. */
+/** Значения выдуманные; ANTHROPIC_BASE_URL, INSTAGRAM_TOKEN и переменных MAX
+ * нет нарочно — все необязательные. */
 const SECRETS = {
   TELEGRAM_BOT_TOKEN: "123456789:AAFakeTokenForTestsOnly_abcdefghijk",
   OWNER_TELEGRAM_ID: "555000111",
@@ -203,7 +205,12 @@ test(".env для сервера: только переменные из спи�
   assert.deepEqual(names, Object.keys(SECRETS));
   for (const name of Object.keys(FOREIGN)) assert.equal(env.content.includes(name), false, name);
   assert.deepEqual(env.names, Object.keys(SECRETS));
-  assert.deepEqual(env.missing, ["ANTHROPIC_BASE_URL", "INSTAGRAM_TOKEN"]);
+  assert.deepEqual(env.missing, [
+    "ANTHROPIC_BASE_URL",
+    "INSTAGRAM_TOKEN",
+    "MAX_BOT_TOKEN",
+    "OWNER_MAX_ID",
+  ]);
   assert.match(env.content, /^TELEGRAM_BOT_TOKEN=123456789:AAFakeTokenForTestsOnly_abcdefghijk$/m);
 });
 

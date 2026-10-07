@@ -60,6 +60,7 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
         settings.anthropic_api_key,
         settings.deepgram_api_key,
         settings.instagram_token or "",
+        settings.max_bot_token or "",
     )
 
 

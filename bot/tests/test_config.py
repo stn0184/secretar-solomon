@@ -98,3 +98,36 @@ def test_instagram_token_is_taken_as_given() -> None:
     settings = load_settings({**FULL_ENV, "INSTAGRAM_TOKEN": " IGAA-test-token "})
 
     assert settings.instagram_token == "IGAA-test-token"
+
+
+def test_max_is_off_without_the_token_or_the_owner_id() -> None:
+    """Нет хотя бы одной переменной MAX — источник выключен, бот запускается
+    как раньше (`techspec/27-max.md` §27.1)."""
+    assert not load_settings(FULL_ENV).max_enabled
+    only_token = load_settings({**FULL_ENV, "MAX_BOT_TOKEN": "max-test-token"})
+    only_owner = load_settings({**FULL_ENV, "OWNER_MAX_ID": "4242"})
+    blank = load_settings({**FULL_ENV, "MAX_BOT_TOKEN": "  ", "OWNER_MAX_ID": " "})
+
+    assert (only_token.max_bot_token, only_token.owner_max_id) == ("max-test-token", None)
+    assert (only_owner.max_bot_token, only_owner.owner_max_id) == (None, 4242)
+    assert not only_token.max_enabled
+    assert not only_owner.max_enabled
+    assert (blank.max_bot_token, blank.owner_max_id) == (None, None)
+
+
+def test_max_is_on_with_both_variables() -> None:
+    settings = load_settings(
+        {**FULL_ENV, "MAX_BOT_TOKEN": " max-test-token ", "OWNER_MAX_ID": "4242"}
+    )
+
+    assert settings.max_bot_token == "max-test-token"
+    assert settings.owner_max_id == 4242
+    assert settings.max_enabled
+
+
+def test_owner_max_id_must_be_a_number() -> None:
+    with pytest.raises(InvalidVariable) as caught:
+        load_settings({**FULL_ENV, "MAX_BOT_TOKEN": "max-test-token", "OWNER_MAX_ID": "@tim"})
+
+    assert caught.value.name == "OWNER_MAX_ID"
+    assert "OWNER_MAX_ID" in str(caught.value)
