@@ -2,8 +2,8 @@
 
 Источник правды — `techspec/25-chats.md`. Общая часть для всех площадок:
 Telegram (этап 025) приходит бизнес-обновлениями через `handlers.py`,
-Instagram (026) — опросом `services/instagram.py`, MAX (027) встанет сюда же
-своим приёмом.
+Instagram (026) — опросом `services/instagram.py`, MAX (027) — опросом бота в
+MAX `services/max_bot.py`.
 
 - Приём (§25.1–25.2): сообщение уходит в базу, и база сама сверяет
   подключение и согласие — до «Согласен» ничего не хранится. Незнакомое
@@ -101,6 +101,10 @@ CONSENT_YES = "yes"
 CONSENT_NO = "no"
 PLATFORMS: tuple[Platform, ...] = get_args(Platform)
 SPEECH_KINDS: tuple[ChatKind, ...] = ("voice", "video_note")
+# Ключи чатов, о которых разбор и сообщение владельцу говорят иначе (§27.3):
+# заметки владельца самому себе и группа, где собеседников несколько.
+NOTES_KEY = "notes"
+GROUP_PREFIX = "group:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,7 +198,9 @@ CHAT_RULES = """Вы — Соломон, помощник-секретарь. П
 Отвечайте только полями схемы.
 
 Переписка — строки «время имя: текст» от старых к новым. «Владелец» — его
-собственные сообщения, остальные имена — собеседник. Голосовые — расшифровкой
+собственные сообщения, остальные имена — собеседник. В группе собеседников
+несколько: имя в строке — кто написал. Заметки владельца самому себе — только
+его строки: каждое дело в них — его собственное. Голосовые — расшифровкой
 с пометкой «[голосовое]» или «[кружок]»; «не расслышал» — речь не
 распознана; «[снимок]» и «[вложение]» — с подписью, если она есть.
 
@@ -236,7 +242,9 @@ waiting — собеседник в новых сообщениях спроси
 
 with_whom — имя собеседника в творительном падеже, как после слова «с»:
 «Игорем», «Анной Петровой»; to_whom — в дательном, как после «кому»: «Игорю»,
-«Анне Петровой». Имя латиницей или такое, что не склоняется, — как есть."""
+«Анне Петровой». Имя латиницей или такое, что не склоняется, — как есть. В
+группе — её название: with_whom — «группой «Дача»», to_whom — «группе «Дача»».
+В заметках владельца собеседника нет: with_whom и to_whom — пустые строки."""
 
 OPEN_TASKS_HEAD = "Открытые задачи владельца — уже записаны:"
 OPEN_TASKS_RULE = (
@@ -265,10 +273,27 @@ def message_line(message: ChatMessage, now: datetime, timezone: ZoneInfo) -> str
     return batches.render_line(line, now, timezone)
 
 
-def chat_text(platform: Platform, name: str, earlier: Sequence[str], new: Sequence[str]) -> str:
-    """Сообщение `user` разбора (§25.3): чат, «раньше» и новые строки."""
+def chat_title(platform: Platform, name: str, chat_key: str = "") -> str:
+    """Первая строка разбора: чья переписка. Заметки владельца и группа
+    называются прямо — от этого зависят «чьё дело» и «с кем» (§27.3)."""
+    where = texts.PLATFORM_NAMES[platform]
+    if chat_key == NOTES_KEY:
+        return f"Заметки владельца самому себе в {where}."
     chat = name.strip() or OTHER_SENDER
-    lines = [f"Переписка в {texts.PLATFORM_NAMES[platform]}, чат «{chat}»."]
+    if chat_key.startswith(GROUP_PREFIX):
+        return f"Переписка в {where}, группа «{chat}»."
+    return f"Переписка в {where}, чат «{chat}»."
+
+
+def chat_text(
+    platform: Platform,
+    name: str,
+    earlier: Sequence[str],
+    new: Sequence[str],
+    chat_key: str = "",
+) -> str:
+    """Сообщение `user` разбора (§25.3): чат, «раньше» и новые строки."""
+    lines = [chat_title(platform, name, chat_key)]
     if earlier:
         lines.extend((EARLIER_HEADER, *earlier))
     lines.append(f"Новые сообщения ({len(new)}):")
@@ -282,6 +307,7 @@ def chunk_text(
     earlier: Sequence[str],
     new: Sequence[str],
     limit: int = TEXT_LIMIT,
+    chat_key: str = "",
 ) -> tuple[str, int]:
     """Текст куска в пределе и сколько новых строк в нём (`plan.md`, 6).
 
@@ -292,7 +318,7 @@ def chunk_text(
     kept = list(earlier)
     taken = len(new)
     while True:
-        text = chat_text(platform, name, kept, new[:taken])
+        text = chat_text(platform, name, kept, new[:taken], chat_key)
         if len(text) <= limit:
             return text, taken
         if kept:
@@ -567,7 +593,9 @@ def report_message(
         for line in report.lines
         if line.status == ACTIVE_STATUS
     )
-    return texts.chat_report(whom, report.platform, deals), buttons
+    # Заметки владельца — «из ваших заметок», а не «из переписки с …» (§27.3).
+    notes = report.chat_name == texts.MAX_NOTES
+    return texts.chat_report(whom, report.platform, deals, notes=notes), buttons
 
 
 class ChatStore(Protocol):
@@ -1075,7 +1103,7 @@ class ChatService:
     ) -> None:
         """Расшифровка голосового (§25.2): не вышло — текст пустой, и в
         переписке строка «[голосовое, не расслышал]». Подсказка — имя
-        собеседника — без «@» у Instagram."""
+        собеседника — без «@» у Instagram; у заметок владельца собеседника нет."""
         if self._transcriber is None or load_audio is None:
             return
         try:
@@ -1083,7 +1111,8 @@ class ChatService:
         except Exception as error:  # noqa: BLE001 - не скачалось — «не расслышал»
             logger.warning("Голосовое чата не скачано: %s", type(error).__name__)
             return
-        result = await self._transcriber.transcribe(audio, (incoming.chat_name.lstrip("@"),))
+        name = "" if incoming.chat_key == NOTES_KEY else incoming.chat_name.lstrip("@").strip()
+        result = await self._transcriber.transcribe(audio, (name,) if name else ())
         if not isinstance(result, Transcript):
             return
         try:
@@ -1185,6 +1214,7 @@ class ChatService:
             chat.name,
             [message_line(message, now, timezone) for message in earlier],
             [message_line(message, now, timezone) for message in readable],
+            chat_key=chat.chat_key,
         )
         # Кусок кончается последней вошедшей строкой; стёртые между ними — тоже его.
         covered = new[: new.index(readable[taken - 1]) + 1]

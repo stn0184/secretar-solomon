@@ -18,6 +18,7 @@ from solomon.config import Settings
 from solomon.middlewares import OwnerOnlyMiddleware
 from solomon.services.chats import ChatService, Connection, OwnerSender
 from solomon.services.instagram import InstagramService
+from solomon.services.max_bot import MaxService
 from solomon.services.reminders import ReminderService, mirror_timezone
 from solomon.services.search import SearchService
 from solomon.services.tasks import Button, TaskService
@@ -116,6 +117,17 @@ def build_instagram(settings: Settings, bot: Bot, chats: ChatService) -> Instagr
     return InstagramService.with_client(settings, chats, owner_sender(settings, bot))
 
 
+def build_max(settings: Settings, chats: ChatService) -> MaxService | None:
+    """Бот в MAX (`techspec/27-max.md`): опрос своим токеном в общий путь
+    чатов. Нет `MAX_BOT_TOKEN` или `OWNER_MAX_ID` — `None`, бот работает как
+    без него (§27.1)."""
+    if not settings.max_enabled:
+        if settings.max_bot_token is not None or settings.owner_max_id is not None:
+            logger.warning("MAX выключен: нужны обе переменные — MAX_BOT_TOKEN и OWNER_MAX_ID")
+        return None
+    return MaxService.with_client(settings, chats)
+
+
 def build_reminders(
     settings: Settings,
     db: Client,
@@ -194,6 +206,7 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     searches = build_searches(settings, db, bot, client) if db is not None else None
     chats = build_chats(settings, db, bot, client, speech) if db is not None else None
     instagram = build_instagram(settings, bot, chats) if chats is not None else None
+    max_bot = build_max(settings, chats) if chats is not None else None
     reminders = (
         build_reminders(settings, db, bot, searches, chats, instagram) if db is not None else None
     )
@@ -208,6 +221,9 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     # Цикл напоминаний живёт рядом с polling, в том же процессе
     # (`techspec/06-reminders.md` §6.2): отдельного планировщика нет.
     ticking = asyncio.create_task(reminders.run()) if reminders is not None else None
+    # Опрос MAX — своя задача asyncio рядом с опросом Telegram (§27.2).
+    if max_bot is not None:
+        max_bot.start()
     logger.info(
         "Соломон запущен: long polling, владелец %s, пояс %s, база %s",
         settings.owner_telegram_id,
@@ -230,6 +246,10 @@ async def run(settings: Settings, db: Client | None = None) -> None:
             # Опрос в работе обрывается: курсор не сдвинут, и после запуска
             # опрос прочтёт то же (§26.3).
             await instagram.stop()
+        if max_bot is not None:
+            # Опрос MAX обрывается: отметка стоит на последней записанной
+            # пачке, и после запуска MAX отдаст остальное снова (§27.2).
+            await max_bot.stop()
         if chats is not None:
             # Разбор в работе обрывается: сообщения остаются неразобранными,
             # и после запуска тик разберёт их снова (§25.3).

@@ -943,6 +943,10 @@ def more_in_conversation(items: Sequence[str]) -> str:
 # Личные чаты (`techspec/25-chats.md`). Площадка называется в каждом
 # сообщении о чатах: «Из переписки с Игорем (Telegram) записал».
 PLATFORM_NAMES = {"telegram": "Telegram", "instagram": "Instagram", "max": "MAX"}
+# Чат, куда ложится то, что владелец пишет боту в MAX сам (`techspec/27-max.md`
+# §27.3), и как о нём говорит сообщение о разборе.
+MAX_NOTES = "MAX: заметки"
+NOTES_REPORT_HEAD = "Из ваших заметок в {platform} записал:"
 
 # Согласие (§25.5): что бот читает, куда отправляет, сколько хранит и что
 # писать в чаты не может. Правила Telegram для ботов (п. 5.4) требуют, чтобы
@@ -1057,13 +1061,20 @@ def chat_deal(title: str, due: str | None, promise: str | None, status: str) -> 
     return text
 
 
-def chat_report(whom: str, platform: str, deals: Sequence[tuple[int, str]]) -> str:
-    """«Из переписки с Игорем (Telegram) записал:» и дела по номерам (§25.4).
+def chat_report(
+    whom: str, platform: str, deals: Sequence[tuple[int, str]], *, notes: bool = False
+) -> str:
+    """«Из переписки с Игорем (Telegram) записал:» и дела по номерам (§25.4);
+    у заметок владельца в MAX — «Из ваших заметок в MAX записал:» (§27.3).
 
     Одно дело номер 1 — одной строкой после двоеточия; иначе — список с
     номерами дел: «Убрать 2» под ним убирает строку «2.».
     """
-    head = CHAT_REPORT_HEAD.format(whom=whom, platform=platform_name(platform))
+    head = (
+        NOTES_REPORT_HEAD.format(platform=platform_name(platform))
+        if notes
+        else CHAT_REPORT_HEAD.format(whom=whom, platform=platform_name(platform))
+    )
     if len(deals) == 1 and deals[0][0] == 1:
         return f"{head} {deals[0][1]}"
     lines = [head, *(f"{number}. {_upper_first(text)}" for number, text in deals)]
