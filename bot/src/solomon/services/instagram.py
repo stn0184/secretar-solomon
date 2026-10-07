@@ -79,10 +79,12 @@ TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 # Голосовое Direct — до 25 МБ (предел Meta на аудио).
 AUDIO_LIMIT = 25 * 1024 * 1024
 
-# Коды Meta, после которых ключ уже не поможет: 190 — ключ истёк или отозван,
-# 10 и 200–299 — у ключа нет нужного права (§26.1). Нужен новый ключ.
-KEY_CODES = frozenset({190, 10})
-PERMISSION_CODES = range(200, 300)
+# Коды Meta. 190 и 102 — ключ истёк, отозван или испорчен: нужен новый
+# (§26.2). 10 и 200–299 — доступа к Direct нет: у ключа нет права или в
+# Instagram выключено «Разрешить доступ к сообщениям» (#200). Новый ключ тут
+# может и не понадобиться — опрос продолжается и возобновится сам.
+KEY_CODES = frozenset({102, 190})
+ACCESS_CODES = frozenset({10, *range(200, 300)})
 
 
 class InstagramError(Exception):
@@ -95,7 +97,12 @@ class InstagramError(Exception):
 
 
 class KeyRejected(InstagramError):
-    """Ключ отвергнут — истёк, отозван или без нужного права (§26.2)."""
+    """Ключ отвергнут — истёк или отозван (§26.2)."""
+
+
+class AccessDenied(InstagramError):
+    """Ключ принят, но Direct читать нельзя: нет права у ключа или доступ к
+    сообщениям выключен в настройках Instagram."""
 
 
 def _int(value: Any) -> int | None:
@@ -103,16 +110,19 @@ def _int(value: Any) -> int | None:
 
 
 def meta_error(status: int, payload: Any) -> InstagramError:
-    """Ошибка из ответа Meta: отказ ключа — `KeyRejected`, остальное (лимит,
-    сбой сервера, кривой запрос) — `InstagramError`, следующий опрос."""
+    """Ошибка из ответа Meta: отказ ключа — `KeyRejected`, нет доступа к
+    Direct — `AccessDenied`, остальное (лимит, сбой сервера, кривой запрос) —
+    `InstagramError`, следующий опрос."""
     error = payload.get("error") if isinstance(payload, Mapping) else None
     code = _int(error.get("code")) if isinstance(error, Mapping) else None
     if code is None:
         return InstagramError(f"Meta ответила {status}")
     subcode = _int(error.get("error_subcode")) if isinstance(error, Mapping) else None
     reason = f"Meta ответила {status}, код {code}" + (f"/{subcode}" if subcode else "")
-    if code in KEY_CODES or code in PERMISSION_CODES:
+    if code in KEY_CODES:
         return KeyRejected(reason)
+    if code in ACCESS_CODES:
+        return AccessDenied(reason)
     return InstagramError(reason)
 
 
@@ -620,6 +630,10 @@ class InstagramService:
         self._refresh_tried_at: datetime | None = None
         self._launched_at: datetime | None = None
         self._worker: asyncio.Task[None] | None = None
+        # Нет доступа к Direct: опрос идёт дальше, владельцу — один раз за
+        # процесс, пока доступ не вернётся.
+        self._denied = False
+        self._denied_told = False
 
     def _now(self) -> datetime:
         return datetime.now(self._settings.owner_timezone)
@@ -661,6 +675,7 @@ class InstagramService:
         moment = now or self._clock()
         state = self._current()
         sent = await self._report_rejection(state, moment)
+        sent += await self._report_no_access(moment)
         if state.rejected_at is None and self._due(moment):
             self.launch(moment)
         return sent
@@ -713,6 +728,21 @@ class InstagramService:
         self._save(replace(state, reported_at=moment))
         return 1
 
+    async def _report_no_access(self, moment: datetime) -> int:
+        """«Instagram не пускает к сообщениям…» — один раз за процесс, с 08:00
+        до 22:00; опрос тем временем идёт и сам увидит, что доступ вернулся."""
+        if not self._denied or self._denied_told:
+            return 0
+        if not in_window(moment, self._settings.owner_timezone):
+            return 0
+        try:
+            await self._send(text=texts.INSTAGRAM_NO_ACCESS)
+        except Exception as error:  # noqa: BLE001 - отказ Telegram: следующий тик пришлёт
+            logger.warning("Сообщение о доступе к Direct не ушло: %s", type(error).__name__)
+            return 0
+        self._denied_told = True
+        return 1
+
     # --- Опрос ---------------------------------------------------------------------
 
     async def poll(self, now: datetime | None = None) -> int:
@@ -736,7 +766,15 @@ class InstagramService:
                 # начнёт с последних суток (§25.5).
                 self._forget_cursor()
                 return 0
-            return await self._read(token, account, moment)
+            stored = await self._read(token, account, moment)
+        except AccessDenied as error:
+            logger.error(
+                "Instagram не пускает к Direct (%s): права ключа или «Разрешить доступ к "
+                "сообщениям» в Instagram — опрос продолжается",
+                error.reason,
+            )
+            self._denied = True
+            return 0
         except KeyRejected as error:
             logger.error(
                 "Ключ Instagram отвергнут (%s): опрос остановлен до перезапуска с новым ключом",
@@ -747,6 +785,8 @@ class InstagramService:
         except InstagramError as error:
             logger.warning("Опрос Instagram не удался: %s — повторю следующим", error.reason)
             return 0
+        self._denied = self._denied_told = False
+        return stored
 
     async def _token(self, moment: datetime) -> str:
         """Действующий ключ; пора — продлить (§26.2). Не продлился — прежний:

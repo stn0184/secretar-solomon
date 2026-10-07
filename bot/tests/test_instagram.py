@@ -29,6 +29,7 @@ from solomon.runner import build_instagram
 from solomon.services import instagram
 from solomon.services.chats import ChatService
 from solomon.services.instagram import (
+    AccessDenied,
     Account,
     Attachment,
     Conversation,
@@ -148,12 +149,14 @@ def test_expired_or_revoked_key_is_a_rejection() -> None:
     assert "190" in error.reason
 
 
-def test_missing_permission_is_a_rejection_too() -> None:
-    """Ключ без права на сообщения Direct не прочтёт — нужен новый (§26.1)."""
-    denied = {"error": {"message": "Requires permission", "type": "OAuthException", "code": 200}}
+def test_missing_access_to_direct_is_not_a_rejection() -> None:
+    """Код 200 — выключен доступ к сообщениям в Instagram или у ключа нет
+    права: новый ключ может и не понадобиться, опрос не останавливается."""
+    denied = {"error": {"message": "disabled access", "type": "OAuthException", "code": 200}}
 
-    assert isinstance(instagram.meta_error(403, denied), KeyRejected)
-    assert isinstance(instagram.meta_error(400, {"error": {"code": 10}}), KeyRejected)
+    assert type(instagram.meta_error(403, denied)) is AccessDenied
+    assert type(instagram.meta_error(400, {"error": {"code": 10}})) is AccessDenied
+    assert type(instagram.meta_error(400, {"error": {"code": 102}})) is KeyRejected
 
 
 def test_limits_and_server_errors_are_only_retried() -> None:
@@ -1142,6 +1145,23 @@ async def test_unsent_rejection_notice_is_retried(tmp_path: Path) -> None:
     assert await direct_.service.tick(NOW + timedelta(minutes=1)) == 1
 
 
+async def test_no_access_to_direct_is_told_once_and_polling_goes_on(tmp_path: Path) -> None:
+    direct_ = Direct(tmp_path, store=consented())
+    direct_.meta.say(raw_message(message_id="m_1"))
+    denied = AccessDenied("Meta ответила 403, код 200")
+    direct_.meta.failures["conversations"] = [denied, denied]
+
+    assert await direct_.service.poll(NOW) == 0
+    assert await direct_.service.tick(NOW) == 1
+    await direct_.service.wait()
+    assert await direct_.service.tick(NOW + timedelta(minutes=5)) == 0
+    await direct_.service.wait()
+
+    assert direct_.sender.texts == [texts.INSTAGRAM_NO_ACCESS]
+    assert direct_.state().rejected_at is None, "ключ не отвергнут"
+    assert [row["external_id"] for row in direct_.store.messages] == ["m_1"], "доступ вернулся"
+
+
 # --------------------------------------- приёмка 6: сбой Meta и базы не теряет
 
 
@@ -1244,6 +1264,11 @@ async def test_reminder_tick_survives_a_broken_instagram_step(
 
     assert await reminder_service(step).tick(SATURDAY_NOON) == 0
     assert "Шаг Instagram" in caplog.text
+
+
+def test_help_mentions_instagram_direct() -> None:
+    assert "Direct бизнес-аккаунта в Instagram" in texts.HELP
+    assert "В Direct не отвечаю" in texts.HELP
 
 
 async def test_stop_closes_the_client(tmp_path: Path) -> None:
