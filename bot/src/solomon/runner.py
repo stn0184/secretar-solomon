@@ -100,7 +100,11 @@ def build_chats(
 
 
 def build_reminders(
-    settings: Settings, db: Client, bot: Bot, searches: SearchService | None = None
+    settings: Settings,
+    db: Client,
+    bot: Bot,
+    searches: SearchService | None = None,
+    chats: ChatService | None = None,
 ) -> ReminderService:
     """Цикл напоминаний: база своя, отправка — через этого бота.
 
@@ -109,7 +113,8 @@ def build_reminders(
     её нажатие (`handlers.py`). Чат — личный чат владельца: его id совпадает
     с id пользователя, других чатов у помощника нет. Строка «Перенёс»
     (`techspec/11-edit.md` §11.4) уходит своим замыканием — без кнопки:
-    это не напоминание. Шаг тика о поисках (§24.3) — `searches`.
+    это не напоминание. Шаг тика о поисках (§24.3) — `searches`, о личных
+    чатах (§25) — `chats`.
     """
 
     async def notify(*, text: str, task_id: str, occurrence: int | None = None) -> int:
@@ -124,7 +129,9 @@ def build_reminders(
         message = await bot.send_message(chat_id=settings.owner_telegram_id, text=text)
         return message.message_id
 
-    return ReminderService.with_database(settings, db, notify, announce, searches=searches)
+    return ReminderService.with_database(
+        settings, db, notify, announce, searches=searches, chats=chats
+    )
 
 
 def build_dispatcher(
@@ -168,7 +175,7 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     tasks = build_tasks(settings, db, client, speech) if db is not None else None
     searches = build_searches(settings, db, bot, client) if db is not None else None
     chats = build_chats(settings, db, bot, client, speech) if db is not None else None
-    reminders = build_reminders(settings, db, bot, searches) if db is not None else None
+    reminders = build_reminders(settings, db, bot, searches, chats) if db is not None else None
     dispatcher = build_dispatcher(
         settings, db=db, tasks=tasks, reminders=reminders, searches=searches, chats=chats
     )
@@ -198,6 +205,10 @@ async def run(settings: Settings, db: Client | None = None) -> None:
             # Поиски в работе обрываются: строка остаётся начатой, и после
             # запуска тик возьмёт её через десять минут (§24.3).
             await searches.stop()
+        if chats is not None:
+            # Разбор в работе обрывается: сообщения остаются неразобранными,
+            # и после запуска тик разберёт их снова (§25.3).
+            await chats.stop()
         await client.close()
         await bot.session.close()
         logger.info("Соломон остановлен.")

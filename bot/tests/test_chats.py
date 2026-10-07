@@ -62,6 +62,7 @@ from solomon.services.chats import (
     Incoming,
     OwnerSender,
 )
+from solomon.services.reminders import ReminderService
 from solomon.services.tasks import Button
 from solomon.services.transcription import NotTranscribed, Transcript
 from solomon.services.understanding import OpenTask
@@ -75,7 +76,17 @@ from tests.conftest import (
     make_details,
     make_settings,
 )
-from tests.test_reminders import FakeRpcClient
+from tests.test_reminders import (
+    SATURDAY_NOON,
+    FakeAnnouncer,
+    FakeClearMoved,
+    FakeCloser,
+    FakeDue,
+    FakeMarks,
+    FakeMoved,
+    FakeNotifier,
+    FakeRpcClient,
+)
 from tests.test_tasks_db import FakeClient, as_client
 
 TZ = ZoneInfo(OWNER_TIMEZONE)
@@ -2808,3 +2819,152 @@ async def test_chat_without_waiting_never_reminds() -> None:
     assert store.thread("family", "max")["tracks_waiting"] is False
     assert reminded == 0
     assert sender.sent == []
+
+
+# -------------------------------------------------------------- шаг тика (§6.2)
+
+
+async def test_tick_in_the_day_analyzes_then_reports_on_the_next_tick() -> None:
+    store = FakeChatStore()
+    sender = FakeSender()
+    await igor_said(store, ("in", "Пришлёшь расчёт до пятницы?"), ("out", "Да, в пятницу"))
+    service = analyzing_service(store, sender=sender)
+
+    assert await service.tick(QUIET_LATER) == 0
+    await service.wait()
+    assert len(store.analyses) == 1, "разбор — в фоне, тик его не ждёт"
+    assert await service.tick(QUIET_LATER + timedelta(minutes=1)) == 1
+
+    assert sender.texts[0].startswith("Из переписки с Игорем (Telegram) записал:")
+
+
+async def test_night_report_waits_for_eight_in_the_morning() -> None:
+    """Приёмка 10: разговор затих ночью — дела записаны сразу, сообщение — в 08:00."""
+    store = FakeChatStore(now=datetime(2026, 10, 7, 23, 0, tzinfo=TZ))
+    sender = FakeSender()
+    await igor_said(store, ("in", "Пришлёшь расчёт до пятницы?"), ("out", "Да, в пятницу"))
+    night = datetime(2026, 10, 7, 23, 30, tzinfo=TZ)
+    service = analyzing_service(store, sender=sender, at=night)
+
+    assert await service.tick(night) == 0
+    await service.wait()
+    assert len(store.tasks) == 1, "дело записано ночью"
+    assert await service.tick(datetime(2026, 10, 8, 7, 59, tzinfo=TZ)) == 0
+    assert await service.tick(datetime(2026, 10, 8, 8, 0, tzinfo=TZ)) == 1
+
+    assert len(sender.sent) == 1
+
+
+async def test_night_waiting_reminder_waits_for_the_morning() -> None:
+    store = FakeChatStore(now=datetime(2026, 10, 7, 20, 0, tzinfo=TZ))
+    sender = FakeSender()
+    store.consent()
+    await chat_service(store).receive(
+        incoming("Во сколько завтра созвон?", sent_at=datetime(2026, 10, 7, 20, 0, tzinfo=TZ))
+    )
+    call = FakeChatCall(make_answer(deals=[], waiting="он спрашивал, во сколько завтра созвон"))
+    await analyzing_service(store, call, at=datetime(2026, 10, 7, 20, 30, tzinfo=TZ)).analyze_due()
+    service = analyzing_service(store, sender=sender)
+
+    assert await service.tick(datetime(2026, 10, 7, 23, 0, tzinfo=TZ)) == 0
+    assert await service.tick(datetime(2026, 10, 8, 8, 0, tzinfo=TZ)) == 1
+
+    assert sender.texts == [
+        "Вы не ответили Игорю (Telegram) — он спрашивал, во сколько завтра созвон."
+    ]
+
+
+async def test_tick_asks_the_consent_that_did_not_go_out() -> None:
+    store = FakeChatStore()
+    sender = FakeSender()
+    sender.broken = True
+    service = analyzing_service(store, sender=sender)
+    await connect_owner(service)
+    sender.broken = False
+
+    assert await service.tick(datetime(2026, 10, 7, 23, 0, tzinfo=TZ)) == 1
+
+    assert sender.texts == [texts.consent_question("telegram")]
+
+
+async def test_tick_erases_text_older_than_seven_days_once_an_hour() -> None:
+    """Приёмка 12: текст сообщения старше семи дней стирается."""
+    store = FakeChatStore(now=NOW - timedelta(days=8))
+    await igor_said(store, ("in", "Пришлёшь расчёт?"))
+    store.now = NOW
+    await chat_service(store).receive(incoming("Свежее", external_id="900"))
+    service = analyzing_service(store, call=FakeChatCall(make_answer(deals=[])))
+
+    await service.tick(NOW)
+    await service.tick(NOW + timedelta(minutes=30))
+    await service.wait()
+
+    assert [message["text"] for message in store.messages] == ["", "Свежее"]
+    assert store.calls.count("erase_old") == 1
+    await service.tick(NOW + timedelta(hours=1))
+    assert store.calls.count("erase_old") == 2
+
+
+async def test_erase_failure_is_retried_on_the_next_tick() -> None:
+    store = FakeChatStore()
+    store.broken.add("erase_old")
+    service = analyzing_service(store)
+
+    await service.tick(NOW)
+    store.broken.discard("erase_old")
+    await service.tick(NOW + timedelta(minutes=1))
+
+    assert store.calls.count("erase_old") == 2
+
+
+class FakeChatTicker:
+    """Шаг чатов для `ReminderService`: сколько «ушло» и что упало."""
+
+    def __init__(self, sent: int = 0, broken: bool = False) -> None:
+        self.sent = sent
+        self.broken = broken
+        self.moments: list[datetime | None] = []
+
+    async def tick(self, now: datetime | None = None) -> int:
+        self.moments.append(now)
+        if self.broken:
+            raise RuntimeError("шаг чатов упал")
+        return self.sent
+
+
+def reminder_service(chats_step: FakeChatTicker) -> ReminderService:
+    return ReminderService(
+        settings=make_settings(),
+        due=FakeDue([]),
+        mark_sent=FakeMarks(),
+        close_task=FakeCloser(),
+        notify=FakeNotifier(),
+        moved=FakeMoved([]),
+        clear_moved=FakeClearMoved(),
+        announce=FakeAnnouncer(),
+        chats=chats_step,
+    )
+
+
+async def test_reminder_tick_runs_the_chat_step_and_counts_its_messages() -> None:
+    step = FakeChatTicker(sent=2)
+
+    assert await reminder_service(step).tick(SATURDAY_NOON) == 2
+    assert step.moments == [SATURDAY_NOON]
+
+
+async def test_reminder_tick_survives_a_broken_chat_step(caplog: pytest.LogCaptureFixture) -> None:
+    step = FakeChatTicker(broken=True)
+
+    assert await reminder_service(step).tick(SATURDAY_NOON) == 0
+    assert "Шаг личных чатов" in caplog.text
+
+
+def test_dispatcher_carries_the_chats() -> None:
+    service = chat_service()
+
+    dispatcher = build_dispatcher(make_settings(), chats=service)
+
+    assert dispatcher["chats"] is service
+    assert "business_message" in dispatcher.resolve_used_update_types()
+    assert "business_connection" in dispatcher.resolve_used_update_types()

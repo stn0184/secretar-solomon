@@ -510,6 +510,9 @@ WINDOW_START = dt_time(8, 0)
 WINDOW_END = dt_time(22, 0)
 # «Ждёт ответа» — напомнить через три часа после вопроса, один раз.
 WAITING_AFTER = timedelta(hours=3)
+# Срок хранения переписки (§25.1) и как часто тик его проверяет.
+KEEP = timedelta(days=7)
+ERASE_EVERY = timedelta(hours=1)
 # Кнопка «Убрать N» (§25.4): `drop:<разбор>:<номер дела>`.
 DROP_PREFIX = "drop:"
 
@@ -857,6 +860,8 @@ class ChatService:
         self._timer = timer
         self._foreign: set[str] = set()
         self._worker: asyncio.Task[None] | None = None
+        # Когда процесс последний раз стёр старое (§25.1): раз в час, бот один.
+        self._erased_at: datetime | None = None
 
     def _now(self) -> datetime:
         return datetime.now(self._settings.owner_timezone)
@@ -1346,3 +1351,34 @@ class ChatService:
             report, analysis_id, self._clock(), self._settings.owner_timezone
         )
         return PressOutcome(message=text, replace=True, buttons=buttons)
+
+    # --- Шаг тика (§6.2) ----------------------------------------------------------
+
+    async def tick(self, now: datetime | None = None) -> int:
+        """Шаг минутного тика: вопрос о согласии, который ещё не ушёл, стирание
+        текста старше семи дней (раз в час), запуск разбора затихших чатов в
+        фоне и — с 08:00 до 22:00 — сообщения о разборах и «Вы не ответили».
+        Ночное ждёт утра: первый тик после 08:00 пришлёт его. Возвращает,
+        сколько сообщений ушло владельцу."""
+        moment = now or self._clock()
+        sent = await self.ask_consents()
+        await self._erase_old(moment)
+        self.launch()
+        if in_window(moment, self._settings.owner_timezone):
+            sent += await self.send_reports(moment)
+            sent += await self.remind_waiting(moment)
+        return sent
+
+    async def _erase_old(self, now: datetime) -> None:
+        """Стереть текст сообщений, пришедших больше семи дней назад (§25.1).
+        Раз в час; сбой — строка в журнал и попытка следующим тиком."""
+        if self._erased_at is not None and now - self._erased_at < ERASE_EVERY:
+            return
+        try:
+            erased = await self._store.erase_old(now - KEEP)
+        except DatabaseError as error:
+            logger.error("Старая переписка не стёрта: %s", error)
+            return
+        self._erased_at = now
+        if erased:
+            logger.info("Стёрт текст старых сообщений чатов: %s", erased)

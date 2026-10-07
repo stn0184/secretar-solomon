@@ -32,6 +32,10 @@ aiogram, ни про сеть, и тест подставляет свою за�
 Поиски по поручению (`techspec/24-search.md` §24.3) — шаг тика после строк
 «Перенёс»: брошенные перезапуском поиски, записанные и не ушедшие ответы и
 отказы — в `services/search.py`, здесь — только место шага и счёт ушедшего.
+
+Личные чаты (`techspec/25-chats.md`) — шаг сразу после поисков: согласие,
+разбор в фоне, сообщения о разборах, «Вы не ответили» и стирание старой
+переписки — в `services/chats.py`, здесь — место шага и счёт ушедшего.
 """
 
 from __future__ import annotations
@@ -258,6 +262,13 @@ class SearchResumer(Protocol):
     async def resume(self, now: datetime | None = None) -> int: ...
 
 
+class ChatTicker(Protocol):
+    """Шаг тика о личных чатах (`techspec/25-chats.md`): возвращает, сколько
+    сообщений ушло владельцу; разбор — фоновый, тик его не ждёт."""
+
+    async def tick(self, now: datetime | None = None) -> int: ...
+
+
 class PlanChecker(Protocol):
     """Был ли у владельца утренний план за этот день (§20.4)."""
 
@@ -316,6 +327,7 @@ class ReminderService:
         overdue_task: OverdueFinder | None = None,
         record_overdue: OverdueRecorder | None = None,
         searches: SearchResumer | None = None,
+        chats: ChatTicker | None = None,
     ) -> None:
         self._settings = settings
         self._due = due
@@ -353,6 +365,8 @@ class ReminderService:
         self._overdue_stuck = False
         # Без него тик поисков не подхватывает — как до этапа 024 (§24.3).
         self._searches = searches
+        # Без него о чатах тик молчит — как до этапа 025.
+        self._chats = chats
         self._clock = clock or self._now
 
     def _now(self) -> datetime:
@@ -366,9 +380,10 @@ class ReminderService:
         notify: Notifier,
         announce: Announcer,
         searches: SearchResumer | None = None,
+        chats: ChatTicker | None = None,
     ) -> ReminderService:
         """Обычная сборка: настоящая база и настоящая отправка в Telegram;
-        `searches` — шаг тика о поисках (§24.3)."""
+        `searches` — шаг тика о поисках (§24.3), `chats` — о личных чатах (§25)."""
 
         async def due(*, owner_telegram_id: int, now: datetime) -> list[DueReminder]:
             return await db_reminders.due_reminders(
@@ -492,11 +507,12 @@ class ReminderService:
             overdue_task=overdue_task,
             record_overdue=record_overdue,
             searches=searches,
+            chats=chats,
         )
 
     async def tick(self, now: datetime | None = None) -> int:
         """Один заход: перекатывание (§13.4), утренний план (§20.2), созревшее
-        (§6.2), строки «Перенёс» (§11.4), поиски (§24.3), затем вопрос о
+        (§6.2), строки «Перенёс» (§11.4), поиски (§24.3), чаты (§25), затем вопрос о
         прошедшем деле (§22.2) и последним — вопрос о деле без срока (§19.2):
         каждый из двух вопросов — только если до него в этом тике ничего не
         ушло; ответ или отказ поиска — тоже ушедшее сообщение.
@@ -522,6 +538,7 @@ class ReminderService:
             if await self._announce_one(task, moment):
                 sent += 1
         sent += await self._resume_searches(moment)
+        sent += await self._chats_step(moment)
         # В этом тике уже ушли план, напоминание или «Перенёс» — тишины нет
         # (§19.2, §20.2, §22.2). Пока идут вопросы о прошедших делах, вопрос о
         # деле без срока ждёт: ушедший вопрос — тоже не тишина.
@@ -540,6 +557,17 @@ class ReminderService:
             return await self._searches.resume(now)
         except Exception:  # шаг поисков не роняет тик: напоминания важнее
             logger.exception("Шаг поисков в тике не удался")
+            return 0
+
+    async def _chats_step(self, now: datetime) -> int:
+        """Шаг личных чатов (§25): сколько сообщений ушло. Сбой шага — строка в
+        журнал, напоминания и вопросы тика идут как обычно."""
+        if self._chats is None:
+            return 0
+        try:
+            return await self._chats.tick(now)
+        except Exception:  # шаг чатов не роняет тик: напоминания важнее
+            logger.exception("Шаг личных чатов в тике не удался")
             return 0
 
     async def _send_plan(self, now: datetime) -> bool:
