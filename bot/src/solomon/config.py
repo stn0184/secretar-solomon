@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -60,11 +61,27 @@ class Settings:
     # Нет хотя бы одного — MAX не опрашивается, бот работает как без него.
     max_bot_token: str | None = None
     owner_max_id: int | None = None
+    # Переписка от Partner Assistant (`techspec/28-relay.md` §28.2): ключ
+    # передачи — в базу уходит только его хэш — и имя бота Partner Assistant
+    # для кнопки в `/chats`. Нет хотя бы одного — приём выключен.
+    chat_relay_key: str | None = None
+    partner_bot_username: str | None = None
 
     @property
     def max_enabled(self) -> bool:
         """Источник MAX включён: заданы и токен, и id владельца (§27.1)."""
         return self.max_bot_token is not None and self.owner_max_id is not None
+
+    @property
+    def relay_enabled(self) -> bool:
+        """Приём от Partner Assistant включён: заданы и ключ, и имя бота (§28.2)."""
+        return self.chat_relay_key is not None and self.partner_bot_username is not None
+
+
+# Ключ передачи подбирать не должны: короче 32 знаков — опечатка или «123».
+RELAY_KEY_MIN_LENGTH = 32
+# Имя бота в Telegram: 5–32 знака, латиница, цифры и «_», первая — буква.
+USERNAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{4,31}")
 
 
 def _required(env: Mapping[str, str], name: str) -> str:
@@ -92,6 +109,8 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     instagram_token = _optional(env, "INSTAGRAM_TOKEN")
     max_bot_token = _optional(env, "MAX_BOT_TOKEN")
     raw_max_owner = _optional(env, "OWNER_MAX_ID")
+    relay_key = _optional(env, "CHAT_RELAY_KEY")
+    raw_partner = _optional(env, "PARTNER_BOT_USERNAME")
 
     try:
         owner = int(raw_owner)
@@ -106,6 +125,18 @@ def load_settings(env: Mapping[str, str]) -> Settings:
             owner_max_id = int(raw_max_owner)
         except ValueError as error:
             raise InvalidVariable("OWNER_MAX_ID", "число — id владельца в MAX") from error
+
+    # Ключ передачи и имя бота необязательны, но заданные криво останавливают
+    # запуск: молча выключенный приём выглядел бы как «Соломон не видит чатов».
+    if relay_key is not None and len(relay_key) < RELAY_KEY_MIN_LENGTH:
+        raise InvalidVariable(
+            "CHAT_RELAY_KEY", f"длинная случайная строка — не короче {RELAY_KEY_MIN_LENGTH} знаков"
+        )
+    partner = raw_partner.removeprefix("@") if raw_partner is not None else None
+    if partner is not None and USERNAME.fullmatch(partner) is None:
+        raise InvalidVariable(
+            "PARTNER_BOT_USERNAME", "имя бота Partner Assistant, например partner_assistant_bot"
+        )
 
     # Пояс владельца — без него «в пятницу» не превратить в дату
     # (`techspec/05-ai.md` §5.1), поэтому непонятное значение останавливает
@@ -129,4 +160,6 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         instagram_token=instagram_token,
         max_bot_token=max_bot_token,
         owner_max_id=owner_max_id,
+        chat_relay_key=relay_key,
+        partner_bot_username=partner,
     )

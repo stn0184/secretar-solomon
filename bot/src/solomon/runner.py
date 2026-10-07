@@ -19,6 +19,7 @@ from solomon.middlewares import OwnerOnlyMiddleware
 from solomon.services.chats import ChatService, Connection, OwnerSender
 from solomon.services.instagram import InstagramService
 from solomon.services.max_bot import MaxService
+from solomon.services.relay import register_relay
 from solomon.services.reminders import ReminderService, mirror_timezone
 from solomon.services.search import SearchService
 from solomon.services.tasks import Button, TaskService
@@ -218,6 +219,16 @@ async def run(settings: Settings, db: Client | None = None) -> None:
         # приложения берёт его оттуда (`techspec/11-edit.md` §11.3). Сбой —
         # строка в журнале, бот работает дальше.
         await mirror_timezone(settings, db)
+        # Ключ передачи переписки от Partner Assistant — его хэш в базу
+        # (`techspec/28-relay.md` §28.2); нет ключа — прежние отзываются.
+        if not settings.relay_enabled and (
+            settings.chat_relay_key is not None or settings.partner_bot_username is not None
+        ):
+            logger.warning(
+                "Передача от Partner Assistant выключена: нужны обе переменные — "
+                "CHAT_RELAY_KEY и PARTNER_BOT_USERNAME"
+            )
+        await register_relay(settings, db)
     # Цикл напоминаний живёт рядом с polling, в том же процессе
     # (`techspec/06-reminders.md` §6.2): отдельного планировщика нет.
     ticking = asyncio.create_task(reminders.run()) if reminders is not None else None

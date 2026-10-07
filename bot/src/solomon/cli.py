@@ -61,6 +61,7 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
         settings.deepgram_api_key,
         settings.instagram_token or "",
         settings.max_bot_token or "",
+        settings.chat_relay_key or "",
     )
 
 

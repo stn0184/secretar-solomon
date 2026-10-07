@@ -39,13 +39,15 @@ const BOT_KEYS = [
   "INSTAGRAM_TOKEN",
   "MAX_BOT_TOKEN",
   "OWNER_MAX_ID",
+  "CHAT_RELAY_KEY",
+  "PARTNER_BOT_USERNAME",
 ];
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
 
-/** Значения выдуманные; ANTHROPIC_BASE_URL, INSTAGRAM_TOKEN и переменных MAX
- * нет нарочно — все необязательные. */
+/** Значения выдуманные; ANTHROPIC_BASE_URL, INSTAGRAM_TOKEN, переменных MAX и
+ * передачи от Partner Assistant нет нарочно — все необязательные. */
 const SECRETS = {
   TELEGRAM_BOT_TOKEN: "123456789:AAFakeTokenForTestsOnly_abcdefghijk",
   OWNER_TELEGRAM_ID: "555000111",
@@ -210,6 +212,8 @@ test(".env для сервера: только переменные из спи�
     "INSTAGRAM_TOKEN",
     "MAX_BOT_TOKEN",
     "OWNER_MAX_ID",
+    "CHAT_RELAY_KEY",
+    "PARTNER_BOT_USERNAME",
   ]);
   assert.match(env.content, /^TELEGRAM_BOT_TOKEN=123456789:AAFakeTokenForTestsOnly_abcdefghijk$/m);
 });
