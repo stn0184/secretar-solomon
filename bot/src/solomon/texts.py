@@ -977,6 +977,13 @@ CONSENT_QUESTIONS = {
         "«Согласен» перешлите его снова. Согласны?"
     ),
 }
+# Площадку Telegram включил Partner Assistant (`techspec/28-relay.md` §28.1): тот
+# же вопрос с припиской, кто передаёт переписку, и какие чаты — открытые ему.
+CONSENT_RELAY_QUESTION = (
+    "Подключено чтение личных чатов Telegram: переписку передаёт Partner Assistant. Я читаю "
+    f"новые сообщения в чатах, открытых ему в настройках Telegram, {_CONSENT_TAIL} Писать в "
+    "ваши чаты я не могу. Согласны?"
+)
 CONSENT_YES = "Согласен"
 CONSENT_NO = "Не надо"
 # Под ответом «Согласен» — кнопка передумать.
@@ -996,6 +1003,10 @@ CONSENT_REFUSED = {
     "instagram": "Хорошо, переписку из Direct не храню.",
     "max": "Хорошо, пересланное в MAX не храню.",
 }
+# Отказ при передаче через Partner Assistant: остановить её — у него.
+CONSENT_RELAY_REFUSED = (
+    "Хорошо, переписку не храню. Запретить передачу совсем — в Partner Assistant."
+)
 CONSENT_NOT_SAVED = "Не смог записать ответ: база не ответила. Попробуйте ещё раз."
 # Ключ Instagram истёк или отозван (`techspec/26-instagram.md` §26.2): один раз,
 # опрос стоит до перезапуска с новым ключом.
@@ -1014,16 +1025,18 @@ INSTAGRAM_NO_ACCESS = (
 CONSENT_UNKNOWN = "Не нашёл это подключение."
 
 
-def consent_question(platform: str) -> str:
-    """Вопрос о согласии на площадку (§25.5)."""
-    return CONSENT_QUESTIONS[platform]
+def consent_question(platform: str, *, relay: bool = False) -> str:
+    """Вопрос о согласии на площадку (§25.5); `relay` — Telegram передаёт
+    Partner Assistant (`techspec/28-relay.md` §28.1)."""
+    return CONSENT_RELAY_QUESTION if relay else CONSENT_QUESTIONS[platform]
 
 
-def consent_answered(platform: str, *, agreed: bool) -> str:
+def consent_answered(platform: str, *, agreed: bool, relay: bool = False) -> str:
     """Вопрос и под ним — что владелец решил: так сообщение остаётся понятным."""
     given = CONSENT_GIVEN_BY_PLATFORM.get(platform, CONSENT_GIVEN)
-    answer = given if agreed else CONSENT_REFUSED[platform]
-    return f"{consent_question(platform)}\n\n{answer}"
+    refused = CONSENT_RELAY_REFUSED if relay else CONSENT_REFUSED[platform]
+    answer = given if agreed else refused
+    return f"{consent_question(platform, relay=relay)}\n\n{answer}"
 
 
 # Что видит владелец о переписке (§25.4). Сообщение о разборе строится из

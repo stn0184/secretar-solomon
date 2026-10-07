@@ -71,6 +71,7 @@ from solomon.db.chats import (
     Stored,
     WaitingChat,
 )
+from solomon.db.relay import PARTNER_CONNECTION
 from solomon.db.rpc import DatabaseError
 from solomon.db.tasks import ACTIVE_STATUS
 from solomon.services import batches, edits, parts
@@ -155,6 +156,12 @@ def parse_consent(data: str) -> tuple[Platform, bool] | None:
         return None
     found: Platform = next(known for known in PLATFORMS if known == platform)
     return found, answer == CONSENT_YES
+
+
+def relayed(source: ChatSource) -> bool:
+    """Площадку включил Partner Assistant (`techspec/28-relay.md` §28.1):
+    вопрос о согласии и ответ на него говорят, кто передаёт переписку."""
+    return source.connection_id == PARTNER_CONNECTION
 
 
 def consent_buttons(platform: Platform) -> tuple[Button, ...]:
@@ -950,14 +957,34 @@ class ChatService:
         """Telegram: бота подключили к аккаунту или отключили (§25.2).
 
         Чужое подключение — подключить бота может кто угодно — в журнал, и
-        больше ничего: ни записи, ни ответа. Владельца — `enable`.
+        больше ничего: ни записи, ни ответа. Владельца — `enable`. Выключено
+        не то подключение, которым площадка работает сейчас, — площадка не
+        трогается: место Соломона в «Автоматизации чатов» занял Partner
+        Assistant и передаёт переписку сам (§28.1).
         """
         if user_id != self._settings.owner_telegram_id:
             self._foreign.add(connection_id)
             logger.info("Чужое подключение к боту (%s): не храню и не отвечаю", platform)
             return
         self._foreign.discard(connection_id)
+        if not enabled and await self._replaced(platform, connection_id):
+            logger.info("Выключено прежнее подключение %s: площадка работает другим", platform)
+            return
         await self.enable(platform, connection_id, enabled=enabled)
+
+    async def _replaced(self, platform: Platform, connection_id: str) -> bool:
+        """Площадка работает другим подключением, а не этим. База не ответила —
+        `False`: выключение пишется, как раньше."""
+        try:
+            source = await self._store.source(platform)
+        except DatabaseError as error:
+            logger.error("Площадка %s не прочитана: %s", platform, error)
+            return False
+        return (
+            source is not None
+            and source.connection_id is not None
+            and source.connection_id != connection_id
+        )
 
     async def enable(
         self, platform: Platform, connection_id: str | None = None, *, enabled: bool = True
@@ -1001,7 +1028,7 @@ class ChatService:
         for source in sources:
             try:
                 await self._send(
-                    text=texts.consent_question(source.platform),
+                    text=texts.consent_question(source.platform, relay=relayed(source)),
                     buttons=consent_buttons(source.platform),
                 )
             except Exception as error:  # noqa: BLE001 - отказ Telegram не роняет приём
@@ -1039,7 +1066,7 @@ class ChatService:
         else:
             button = Button(texts.CONSENT_YES, consent_data(platform, agreed=True))
         return PressOutcome(
-            message=texts.consent_answered(platform, agreed=agreed),
+            message=texts.consent_answered(platform, agreed=agreed, relay=relayed(source)),
             replace=True,
             buttons=(button,),
         )

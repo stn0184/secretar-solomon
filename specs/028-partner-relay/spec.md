@@ -60,10 +60,10 @@ Partner Assistant — общий вход: он подключён к аккау
   (нет — приём выключен, `/chats` предлагает только прямое
   подключение); хэш ключа в `chat_relays` при запуске; `.env.example`,
   `deploy-bot.mjs`.
-- [ ] `linked` / `unlinked` → площадка `telegram` с подключением
+- [x] `linked` / `unlinked` → площадка `telegram` с подключением
   `relay:partner`, вопрос о согласии с припиской про Partner Assistant;
   отключение.
-- [ ] `message` / `edited` / `deleted` → общее хранилище §25;
+- [x] `message` / `edited` / `deleted` → общее хранилище §25;
   `by_assistant` — `out`; голос — по расшифровке или «[голосовое]».
 - [ ] `/chats` и строка в `/help`; `README.md` — как подключить через
   Partner Assistant.
