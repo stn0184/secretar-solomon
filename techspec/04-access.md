@@ -11,8 +11,18 @@
 | Бот | `SUPABASE_SERVICE_ROLE_KEY` | `service_role` | **ничего** — правила доступа обходятся; фильтр по владельцу пишет код бота (§4.3) |
 | Mini App без токена | `VITE_SUPABASE_ANON_KEY` | `anon` | политик для `anon` нет — не видит ни одной строки |
 | Mini App с токеном `telegram-auth` | тот же anon-ключ + `Authorization: Bearer <JWT>` | `authenticated` | политики §4.2 по клейму `telegram_id` |
+| Partner Assistant (§28) | тот же anon-ключ + ключ передачи в теле вызова | `anon` | зовёт ровно одну функцию — `relay_chat_events` (`security definer`); ключ передачи сверяется по SHA-256 с `chat_relays` |
 
 Ключи между частями не пересекаются (§2.1, инвариант 1).
+
+Роль `anon` в `public` **зовёт только `relay_chat_events`** и не читает ни
+одной таблицы: у всех остальных функций право `anon` забрано (`revoke`
+в каждой миграции; триггерная `set_updated_at()` — миграцией 028), таблицы
+закрыты RLS без политик для `anon`. Это держит тест
+`supabase/tests/relay.test.ts`. Ключ передачи — не секрет базы, а пропуск
+источника: в базе только его хэш, сам ключ — в `.env` бота и Partner
+Assistant (`CHAT_RELAY_KEY`, инвариант 1). Функция строк не отдаёт —
+только итог по каждому событию (§3.16).
 
 ### 4.2 Правила доступа (RLS)
 
@@ -43,7 +53,13 @@ create policy "<t>: owner only"
 - `chat_sources`, `chat_threads`, `chat_messages`, `chat_analyses`
   (§3.11–3.14, этап 025) — та же политика на каждой; приложение их не
   читает, чужую переписку пишет и читает только бот функциями
-  `service_role` (§3.15).
+  `service_role` (§3.15). Переписку от Partner Assistant туда же пишет
+  `relay_chat_events` (§3.16) — от имени владельца функции, а не `anon`.
+- `chat_relays` (§3.16, этап 028) — единственная таблица без
+  `owner_telegram_id`: данных человека в ней нет. RLS включён **без единой
+  политики**, права `anon` и `authenticated` на таблицу забраны вовсе: её
+  читает только `relay_chat_events`, пишет — бот функцией
+  `register_chat_relay`.
 - Правка задачи из приложения идёт только функцией `edit_task` (§3.6,
   `security invoker`, та же политика изнутри). Политика `tasks`
   остаётся `for all`, но прямым `update` приложение задачу не правит:
