@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -65,6 +66,7 @@ from tests.test_reminders import (
     FakeMoved,
     FakeNotifier,
 )
+from tests.test_understanding import live_settings
 
 TZ = ZoneInfo(OWNER_TIMEZONE)
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=TZ)
@@ -1278,3 +1280,36 @@ async def test_stop_closes_the_client(tmp_path: Path) -> None:
     await direct_.service.stop()
 
     assert direct_.meta.closed is True
+
+
+# --------------------------------------------------------------- живой прогон
+
+
+@pytest.mark.live
+async def test_live_direct_is_read_by_the_conversations_api() -> None:
+    """Вживую (§26.3): бизнес-аккаунт, разговоры и сообщения трёх свежих —
+    тем же клиентом, что опрос. Только чтение: ключ не продлевается, в базу
+    ничего не пишется, в вывод — только числа и виды, без текстов и имён.
+    Нужен `INSTAGRAM_TOKEN` в `.env`: `pytest -m live -k instagram -s`."""
+    settings = live_settings()
+    if settings.instagram_token is None:
+        pytest.skip("Живой прогон невозможен: в .env нет INSTAGRAM_TOKEN")
+    token = settings.instagram_token
+    api = HttpInstagramApi.create()
+    try:
+        account = await api.account(token)
+        conversations, after = await api.conversations(token, None)
+        kinds: Counter[str] = Counter()
+        for conversation in conversations[:3]:
+            for message in await api.messages(token, conversation.id):
+                incoming = instagram.to_incoming(message, conversation.id, account)
+                kinds[incoming.kind if incoming is not None else "не читается"] += 1
+                if incoming is not None:
+                    kinds[incoming.direction] += 1
+        print(
+            f"бизнес-аккаунт есть: {bool(account.user_id)}, разговоров на странице "
+            f"{len(conversations)}, следующая страница {'есть' if after else 'нет'}, "
+            f"сообщения по видам {dict(kinds)}"
+        )
+    finally:
+        await api.close()
