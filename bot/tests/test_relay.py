@@ -18,6 +18,8 @@ from typing import Any, cast
 
 import pytest
 from aiogram import Bot
+from aiogram.methods import SendMessage
+from aiogram.types import InlineKeyboardMarkup
 from supabase import Client
 
 from solomon import texts
@@ -32,6 +34,7 @@ from tests.conftest import (
     RecordingSession,
     make_callback_update,
     make_settings,
+    make_update,
 )
 from tests.test_chats import (
     MORNING,
@@ -353,3 +356,42 @@ def test_relayed_voice_reads_by_the_transcript_or_as_unheard() -> None:
     assert chats.message_line(silent, MORNING, TZ).endswith(
         "Игорь Петров: [голосовое, не расслышал]"
     )
+
+
+# --------------------------------------------------------- /chats (§28.1)
+
+
+async def test_chats_command_explains_both_ways_with_a_partner_button(
+    bot: Bot, session: RecordingSession
+) -> None:
+    dispatcher = build_dispatcher(relay_settings())
+
+    await dispatcher.feed_update(bot, make_update("/chats"))
+
+    [sent] = [method for method in session.sent if isinstance(method, SendMessage)]
+    assert sent.text == texts.chats_help(relay=True)
+    assert "подключите меня в «Автоматизации чатов»" in sent.text
+    assert "Partner Assistant" in sent.text
+    markup = sent.reply_markup
+    assert isinstance(markup, InlineKeyboardMarkup)
+    [[button]] = markup.inline_keyboard
+    assert button.text == texts.PARTNER_BUTTON
+    assert button.url == "https://t.me/partner_assistant_bot?start=share_solomon"
+    assert button.callback_data is None
+
+
+async def test_chats_command_without_the_relay_offers_only_the_direct_way(
+    bot: Bot, session: RecordingSession
+) -> None:
+    dispatcher = build_dispatcher(replace(make_settings(), chat_relay_key=RELAY_KEY))
+
+    await dispatcher.feed_update(bot, make_update("/chats"))
+
+    [sent] = [method for method in session.sent if isinstance(method, SendMessage)]
+    assert sent.text == texts.chats_help(relay=False)
+    assert "Partner Assistant" not in sent.text
+    assert sent.reply_markup is None
+
+
+def test_help_names_the_chats_command() -> None:
+    assert "/chats — " in texts.HELP

@@ -41,6 +41,7 @@ from solomon.db.tasks import SpeechKind
 from solomon.services import chats as chats_module
 from solomon.services import edits
 from solomon.services.chats import ChatService, Incoming
+from solomon.services.relay import partner_link
 from solomon.services.reminders import ReminderService
 from solomon.services.search import SearchService
 from solomon.services.tasks import Button, PressOutcome, RecordOutcome, Swipe, TaskService
@@ -382,6 +383,22 @@ async def handle_help(message: Message) -> None:
     """Короткий список того, что уже работает."""
     logger.info("Команда /help")
     await message.answer(texts.HELP)
+
+
+async def handle_chats(message: Message, settings: Settings) -> None:
+    """Как подключить чтение чатов Telegram (`techspec/28-relay.md` §28.1):
+    напрямую — в «Автоматизации чатов», или через Partner Assistant —
+    кнопкой-ссылкой на него, если приём от него включён."""
+    logger.info("Команда /chats")
+    username = settings.partner_bot_username if settings.relay_enabled else None
+    markup = None
+    if username is not None:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=texts.PARTNER_BUTTON, url=partner_link(username))]
+            ]
+        )
+    await message.answer(texts.chats_help(relay=markup is not None), reply_markup=markup)
 
 
 def launch_search(searches: SearchService | None, outcome: RecordOutcome) -> None:
@@ -922,6 +939,7 @@ def build_router() -> Router:
     router = Router(name="basic")
     router.message.register(handle_start, CommandStart())
     router.message.register(handle_help, Command("help"))
+    router.message.register(handle_chats, Command("chats"))
     router.message.register(handle_text, is_plain_text)
     router.message.register(handle_speech, speech_in)
     router.message.register(handle_photo, photo_in)
