@@ -986,3 +986,79 @@ def consent_answered(platform: str, *, agreed: bool) -> str:
     """Вопрос и под ним — что владелец решил: так сообщение остаётся понятным."""
     answer = CONSENT_GIVEN if agreed else CONSENT_REFUSED[platform]
     return f"{consent_question(platform)}\n\n{answer}"
+
+
+# Что видит владелец о переписке (§25.4). Сообщение о разборе строится из
+# задач, какими они стали сейчас: им же оно правится после «Убрать».
+CHAT_REPORT_HEAD = "Из переписки с {whom} ({platform}) записал:"
+# Чьё обещание — без рода собеседника: «обещали вам», а не «обещал».
+PROMISE_WORDS = {"mine": "вы обещали", "to_me": "обещали вам"}
+# Дело уже не в работе: убрано кнопкой или сделано.
+REPORT_MARKS = {"cancelled": "убрано", "done": "сделано"}
+DROP_BUTTON = "Убрать"
+DROP_UNKNOWN = "Не нашёл это дело."
+NOT_DROPPED = "Не смог убрать: база не ответила. Попробуйте ещё раз."
+DROPPED = "Убрал."
+NOT_ANSWERED = "Вы не ответили {whom} ({platform}) — {about}."
+TODAY = "сегодня"
+TOMORROW = "завтра"
+
+
+def platform_name(platform: str) -> str:
+    """Площадка словом: «Telegram», «Instagram», «MAX»."""
+    return PLATFORM_NAMES.get(platform, platform)
+
+
+def chat_due(due_at: datetime, precision: str | None, now: datetime) -> str:
+    """Срок дела из переписки: «сегодня», «завтра, 10:30», «пятница, 9 октября,
+    утром» (§25.4). Час — только когда назван, как у `format_due`; оба
+    момента ждутся в поясе владельца."""
+    days = (due_at.date() - now.date()).days
+    if days not in (0, 1):
+        return format_due(due_at, precision)
+    day = TODAY if days == 0 else TOMORROW
+    if precision == "time":
+        return f"{day}, {format_time(due_at)}"
+    if precision in PART_WORDS:
+        return f"{day} {PART_WORDS[precision]}"
+    return day
+
+
+def chat_deal(title: str, due: str | None, promise: str | None, status: str) -> str:
+    """Дело в сообщении о разборе: суть, срок, чьё обещание и — у убранного или
+    сделанного — пометка."""
+    text = title
+    if due:
+        text = f"{text} — {due}"
+    if promise in PROMISE_WORDS:
+        text = f"{text} ({PROMISE_WORDS[promise]})"
+    mark = REPORT_MARKS.get(status)
+    if mark:
+        text = f"{text} — {mark}"
+    return text
+
+
+def chat_report(whom: str, platform: str, deals: Sequence[tuple[int, str]]) -> str:
+    """«Из переписки с Игорем (Telegram) записал:» и дела по номерам (§25.4).
+
+    Одно дело номер 1 — одной строкой после двоеточия; иначе — список с
+    номерами дел: «Убрать 2» под ним убирает строку «2.».
+    """
+    head = CHAT_REPORT_HEAD.format(whom=whom, platform=platform_name(platform))
+    if len(deals) == 1 and deals[0][0] == 1:
+        return f"{head} {deals[0][1]}"
+    lines = [head, *(f"{number}. {_upper_first(text)}" for number, text in deals)]
+    return "\n".join(lines)
+
+
+def drop_button(item: int, *, single: bool) -> str:
+    """«Убрать» под одним делом, «Убрать 2» — под списком."""
+    return DROP_BUTTON if single else f"{DROP_BUTTON} {item}"
+
+
+def not_answered(whom: str, platform: str, about: str) -> str:
+    """Напоминание о неотвеченном (§25.4): «Вы не ответили Игорю (Telegram) —
+    он спрашивал, во сколько созвон.» Фраза — дословно от модели."""
+    return NOT_ANSWERED.format(
+        whom=whom, platform=platform_name(platform), about=about.rstrip(".!? ")
+    )

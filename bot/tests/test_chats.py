@@ -926,7 +926,7 @@ class FakeChatStore:
     def _thread_by_id(self, thread_id: str) -> dict[str, Any]:
         return next(row for row in self.threads.values() if row["id"] == thread_id)
 
-    async def store(self, incoming: Incoming, tracks_waiting: bool = True) -> Stored:
+    async def store(self, incoming: Incoming) -> Stored:
         self._call("store")
         row = self.sources.get(incoming.platform)
         if row is None:
@@ -945,7 +945,7 @@ class FakeChatStore:
                 "platform": incoming.platform,
                 "chat_key": incoming.chat_key,
                 "name": incoming.chat_name,
-                "tracks_waiting": tracks_waiting,
+                "tracks_waiting": incoming.tracks_waiting,
                 "last_message_at": self.now,
                 "last_out_at": None,
                 "waiting_since": None,
@@ -2426,3 +2426,385 @@ async def test_without_the_model_nothing_is_analyzed() -> None:
 
     assert await chat_service(store).analyze_due() == 0
     assert "to_analyze" not in store.calls
+
+
+# ------------------------------------------ что видит владелец: чистые функции
+
+
+@pytest.mark.parametrize(
+    ("clock", "open_"),
+    [
+        ((7, 59), False),
+        ((8, 0), True),
+        ((13, 0), True),
+        ((21, 59), True),
+        ((22, 0), False),
+        ((3, 0), False),
+    ],
+)
+def test_owner_hears_about_chats_from_8_to_22(clock: tuple[int, int], open_: bool) -> None:
+    moment = datetime(2026, 10, 7, *clock, tzinfo=TZ)
+
+    assert chats.in_window(moment, TZ) is open_
+    assert chats.in_window(moment.astimezone(ZoneInfo("UTC")), TZ) is open_
+
+
+@pytest.mark.parametrize(
+    ("due", "precision", "words"),
+    [
+        (datetime(2026, 10, 7, 18, 0, tzinfo=TZ), "day", "сегодня"),
+        (datetime(2026, 10, 7, 15, 0, tzinfo=TZ), "time", "сегодня, 15:00"),
+        (datetime(2026, 10, 7, 18, 0, tzinfo=TZ), "evening", "сегодня вечером"),
+        (datetime(2026, 10, 8, 18, 0, tzinfo=TZ), "day", "завтра"),
+        (datetime(2026, 10, 8, 10, 30, tzinfo=TZ), "time", "завтра, 10:30"),
+        (datetime(2026, 10, 8, 8, 0, tzinfo=TZ), "morning", "завтра утром"),
+        (datetime(2026, 10, 9, 18, 0, tzinfo=TZ), "day", "пятница, 9 октября"),
+        (datetime(2026, 10, 9, 15, 0, tzinfo=TZ), "time", "пятница, 9 октября, 15:00"),
+        (datetime(2026, 10, 9, 12, 0, tzinfo=TZ), "afternoon", "пятница, 9 октября, днём"),
+    ],
+)
+def test_chat_due_says_today_tomorrow_or_the_day(due: datetime, precision: str, words: str) -> None:
+    assert texts.chat_due(due, precision, NOW) == words
+
+
+def test_chat_deal_names_the_promise_and_the_state() -> None:
+    assert (
+        texts.chat_deal("прислать Игорю расчёт", "пятница, 9 октября", "mine", "active")
+        == "прислать Игорю расчёт — пятница, 9 октября (вы обещали)"
+    )
+    assert (
+        texts.chat_deal("Игорь пришлёт договор", "завтра", "to_me", "active")
+        == "Игорь пришлёт договор — завтра (обещали вам)"
+    )
+    assert texts.chat_deal("вернуть книгу", None, None, "cancelled") == "вернуть книгу — убрано"
+    assert (
+        texts.chat_deal("прислать расчёт", None, "mine", "done")
+        == "прислать расчёт (вы обещали) — сделано"
+    )
+
+
+def test_chat_report_lists_deals_with_numbers() -> None:
+    report = texts.chat_report(
+        "Игорем",
+        "telegram",
+        [
+            (1, "прислать Игорю расчёт — в пятницу (вы обещали)"),
+            (2, "Игорь пришлёт договор — завтра (обещали вам)"),
+        ],
+    )
+
+    assert report == (
+        "Из переписки с Игорем (Telegram) записал:\n"
+        "1. Прислать Игорю расчёт — в пятницу (вы обещали)\n"
+        "2. Игорь пришлёт договор — завтра (обещали вам)"
+    )
+
+
+def test_chat_report_of_one_deal_is_one_line() -> None:
+    report = texts.chat_report("Олегом", "instagram", [(1, "Олег вернёт книгу — в среду")])
+
+    assert report == "Из переписки с Олегом (Instagram) записал: Олег вернёт книгу — в среду"
+
+
+def test_chat_report_keeps_numbers_when_the_first_deal_is_gone() -> None:
+    report = texts.chat_report("Игорем", "telegram", [(2, "Игорь пришлёт договор")])
+
+    assert report.splitlines()[1] == "2. Игорь пришлёт договор"
+
+
+def test_not_answered_names_whom_where_and_what() -> None:
+    assert (
+        texts.not_answered("Игорю", "telegram", "он спрашивал, во сколько созвон")
+        == "Вы не ответили Игорю (Telegram) — он спрашивал, во сколько созвон."
+    )
+
+
+def test_drop_button_data_goes_both_ways() -> None:
+    data = chats.drop_data(ANALYSIS_ID, 2)
+
+    assert data == f"drop:{ANALYSIS_ID}:2"
+    assert len(data.encode()) <= 64
+    assert chats.parse_drop(data) == (ANALYSIS_ID, 2)
+
+
+@pytest.mark.parametrize(
+    "data",
+    ["drop:", f"drop:{ANALYSIS_ID}", f"drop:{ANALYSIS_ID}:0", f"drop:{ANALYSIS_ID}:6", "drop::1"],
+)
+def test_crooked_drop_data_is_none(data: str) -> None:
+    assert chats.parse_drop(data) is None
+
+
+def report_of(*lines: ReportLine, chat_with: str | None = "Игорем") -> ChatReport:
+    return ChatReport(
+        platform="telegram", chat_name="Игорь Петров", chat_with=chat_with, lines=lines
+    )
+
+
+def report_line(item: int = 1, **fields: Any) -> ReportLine:
+    values: dict[str, Any] = {
+        "item": item,
+        "task_id": f"k{item}",
+        "title": "прислать Игорю расчёт",
+        "due_at": datetime(2026, 10, 9, 18, 0, tzinfo=TZ),
+        "due_precision": "day",
+        "promise": "mine",
+        "status": "active",
+    }
+    values.update(fields)
+    return ReportLine(**values)
+
+
+def test_report_message_of_two_deals_has_a_button_per_active_deal() -> None:
+    text, buttons = chats.report_message(
+        report_of(
+            report_line(),
+            report_line(2, title="Игорь пришлёт договор", promise="to_me", due_at=None),
+        ),
+        ANALYSIS_ID,
+        NOW,
+        TZ,
+    )
+
+    assert text == (
+        "Из переписки с Игорем (Telegram) записал:\n"
+        "1. Прислать Игорю расчёт — пятница, 9 октября (вы обещали)\n"
+        "2. Игорь пришлёт договор (обещали вам)"
+    )
+    assert [(button.text, button.data) for button in buttons] == [
+        ("Убрать 1", f"drop:{ANALYSIS_ID}:1"),
+        ("Убрать 2", f"drop:{ANALYSIS_ID}:2"),
+    ]
+
+
+def test_report_message_of_one_deal_has_one_plain_button() -> None:
+    text, buttons = chats.report_message(report_of(report_line()), ANALYSIS_ID, NOW, TZ)
+
+    assert text == (
+        "Из переписки с Игорем (Telegram) записал: "
+        "прислать Игорю расчёт — пятница, 9 октября (вы обещали)"
+    )
+    assert [(button.text, button.data) for button in buttons] == [
+        ("Убрать", f"drop:{ANALYSIS_ID}:1")
+    ]
+
+
+def test_report_message_marks_dropped_deals_and_has_no_button_for_them() -> None:
+    text, buttons = chats.report_message(
+        report_of(report_line(status="cancelled"), report_line(2, title="вернуть книгу")),
+        ANALYSIS_ID,
+        NOW,
+        TZ,
+    )
+
+    assert text.splitlines()[1].endswith("— убрано")
+    assert [button.text for button in buttons] == ["Убрать 2"]
+
+
+def test_report_message_without_a_dative_form_uses_the_chat_name() -> None:
+    text, _ = chats.report_message(report_of(report_line(), chat_with=None), ANALYSIS_ID, NOW, TZ)
+
+    assert text.startswith("Из переписки с Игорь Петров (Telegram) записал:")
+
+
+# ------------------------------------------------- что видит владелец: сервис
+
+
+async def analyzed_with_two_deals(store: FakeChatStore) -> ChatService:
+    """Переписка с Игорем разобрана: два дела, отчёт ещё не ушёл."""
+    await igor_said(store, ("in", "Пришлёшь расчёт до пятницы?"), ("out", "Да, в пятницу"))
+    call = FakeChatCall(
+        make_answer(
+            deals=[
+                make_deal(),
+                make_deal(title="Игорь пришлёт договор", promise="to_me", due_at=None),
+            ]
+        )
+    )
+    service = analyzing_service(store, call)
+    await service.analyze_due()
+    return service
+
+
+async def test_report_goes_once_with_drop_buttons() -> None:
+    store = FakeChatStore()
+    sender = FakeSender()
+    await analyzed_with_two_deals(store)
+    service = analyzing_service(store, sender=sender)
+
+    assert await service.send_reports(QUIET_LATER) == 1
+    assert await service.send_reports(QUIET_LATER) == 0
+
+    [(text, buttons)] = sender.sent
+    assert text == (
+        "Из переписки с Игорем (Telegram) записал:\n"
+        "1. Прислать Игорю расчёт — пятница, 9 октября (вы обещали)\n"
+        "2. Игорь пришлёт договор (обещали вам)"
+    )
+    analysis_id = store.analyses[0]["id"]
+    assert [button.data for button in buttons] == [f"drop:{analysis_id}:1", f"drop:{analysis_id}:2"]
+    assert store.analyses[0]["report_message_id"] == 501
+
+
+async def test_unsent_report_is_sent_by_the_next_tick() -> None:
+    store = FakeChatStore()
+    sender = FakeSender()
+    sender.broken = True
+    await analyzed_with_two_deals(store)
+    service = analyzing_service(store, sender=sender)
+
+    assert await service.send_reports(QUIET_LATER) == 0
+    assert store.analyses[0]["reported_at"] is None
+    sender.broken = False
+    assert await service.send_reports(QUIET_LATER) == 1
+
+
+async def test_report_without_tasks_is_marked_without_a_message() -> None:
+    store = FakeChatStore()
+    sender = FakeSender()
+    await analyzed_with_two_deals(store)
+    store.tasks.clear()
+
+    assert await analyzing_service(store, sender=sender).send_reports(QUIET_LATER) == 0
+
+    assert sender.sent == []
+    assert store.analyses[0]["reported_at"] is not None
+    assert store.analyses[0]["report_message_id"] is None
+
+
+async def test_drop_cancels_the_task_and_marks_the_line() -> None:
+    store = FakeChatStore()
+    service = await analyzed_with_two_deals(store)
+    analysis_id = store.analyses[0]["id"]
+
+    outcome = await service.drop(analysis_id, 1)
+
+    assert store.tasks[0]["status"] == "cancelled"
+    assert outcome.replace is True
+    assert outcome.message.splitlines()[1] == (
+        "1. Прислать Игорю расчёт — пятница, 9 октября (вы обещали) — убрано"
+    )
+    assert [(button.text, button.data) for button in outcome.buttons] == [
+        ("Убрать 2", f"drop:{analysis_id}:2")
+    ]
+
+
+async def test_drop_of_an_unknown_deal_or_without_the_database_is_a_popup() -> None:
+    store = FakeChatStore()
+    service = await analyzed_with_two_deals(store)
+    analysis_id = store.analyses[0]["id"]
+
+    unknown = await service.drop(analysis_id, 5)
+    store.broken.add("drop")
+    broken = await service.drop(analysis_id, 1)
+
+    assert (unknown.message, unknown.replace) == (texts.DROP_UNKNOWN, False)
+    assert (broken.message, broken.replace) == (texts.NOT_DROPPED, False)
+    assert store.tasks[0]["status"] == "active"
+
+
+async def test_waiting_reminder_goes_once_after_three_hours() -> None:
+    store = FakeChatStore()
+    sender = FakeSender()
+    await igor_said(store, ("in", "Во сколько созвон?"))
+    call = FakeChatCall(make_answer(deals=[], waiting="он спрашивал, во сколько созвон"))
+    await analyzing_service(store, call).analyze_due()
+    service = analyzing_service(store, sender=sender)
+
+    assert await service.remind_waiting(MORNING + timedelta(hours=2, minutes=59)) == 0
+    assert await service.remind_waiting(MORNING + timedelta(hours=3)) == 1
+    assert await service.remind_waiting(MORNING + timedelta(hours=5)) == 0
+
+    assert sender.texts == ["Вы не ответили Игорю (Telegram) — он спрашивал, во сколько созвон."]
+
+
+async def test_owner_message_in_the_chat_cancels_the_waiting_reminder() -> None:
+    store = FakeChatStore()
+    sender = FakeSender()
+    await igor_said(store, ("in", "Во сколько созвон?"))
+    call = FakeChatCall(make_answer(deals=[], waiting="он спрашивал, во сколько созвон"))
+    await analyzing_service(store, call).analyze_due()
+    await chat_service(store).receive(
+        incoming("В 15", external_id="300", direction="out", sent_at=MORNING + timedelta(hours=1))
+    )
+
+    assert (
+        await analyzing_service(store, sender=sender).remind_waiting(MORNING + timedelta(hours=4))
+        == 0
+    )
+    assert sender.sent == []
+
+
+async def test_unsent_waiting_reminder_is_not_marked() -> None:
+    store = FakeChatStore()
+    sender = FakeSender()
+    await igor_said(store, ("in", "Во сколько созвон?"))
+    call = FakeChatCall(make_answer(deals=[], waiting="он спрашивал, во сколько созвон"))
+    await analyzing_service(store, call).analyze_due()
+    sender.broken = True
+
+    assert (
+        await analyzing_service(store, sender=sender).remind_waiting(MORNING + timedelta(hours=4))
+        == 0
+    )
+    assert store.thread()["waiting_reminded_at"] is None
+
+
+async def test_drop_button_through_telegram_edits_the_report(
+    bot: Bot, session: RecordingSession
+) -> None:
+    store = FakeChatStore()
+    service = await analyzed_with_two_deals(store)
+    analysis_id = store.analyses[0]["id"]
+    dispatcher = build_dispatcher(make_settings(), chats=service)
+
+    await dispatcher.feed_update(bot, make_callback_update(f"drop:{analysis_id}:2", text="отчёт"))
+
+    assert store.tasks[1]["status"] == "cancelled"
+    [edit] = session.edits
+    assert edit.text is not None and edit.text.splitlines()[2].endswith("— убрано")
+    markup = edit.reply_markup
+    assert isinstance(markup, InlineKeyboardMarkup)
+    assert [row[0].text for row in markup.inline_keyboard] == ["Убрать 1"]
+
+
+async def test_crooked_drop_button_is_a_popup(bot: Bot, session: RecordingSession) -> None:
+    store = FakeChatStore()
+    dispatcher = build_dispatcher(make_settings(), chats=chat_service(store))
+
+    await dispatcher.feed_update(bot, make_callback_update("drop:abc:9"))
+
+    assert session.answers == [texts.DROP_UNKNOWN]
+    assert "drop" not in store.calls
+
+
+async def test_chat_without_waiting_never_reminds() -> None:
+    """Признак чата «не вести „ждёт ответа“» (MAX, §27.3): вопрос в нём не
+    напоминается."""
+    store = FakeChatStore()
+    store.consent("max", connection=None)
+    message = Incoming(
+        platform="max",
+        connection_id=None,
+        chat_key="family",
+        chat_name="Семья",
+        external_id="m1",
+        direction="in",
+        sender="Олег",
+        sent_at=MORNING,
+        kind="text",
+        text="Кто заберёт Мишу?",
+        tracks_waiting=False,
+    )
+    await chat_service(store).receive(message)
+    call = FakeChatCall(make_answer(deals=[], waiting="он спрашивал, кто заберёт Мишу"))
+    await analyzing_service(store, call).analyze_due()
+
+    sender = FakeSender()
+    reminded = await analyzing_service(store, sender=sender).remind_waiting(
+        MORNING + timedelta(hours=4)
+    )
+
+    assert store.thread("family", "max")["tracks_waiting"] is False
+    assert reminded == 0
+    assert sender.sent == []

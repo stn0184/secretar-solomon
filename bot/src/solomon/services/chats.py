@@ -16,6 +16,10 @@ Instagram (026) и MAX (027) встанут сюда же своим приём�
   известно о владельце. Дела — задачи с напоминаниями, «ждёт ответа» и след
   одной записью в базе. Разбор идёт в фоне по одному чату за раз; тик его
   только запускает.
+- Что видит владелец (§25.4): «Из переписки с Игорем (Telegram) записал: …»
+  с кнопками «Убрать N» и «Вы не ответили…» через три часа — только в чате с
+  Соломоном и только с 08:00 до 22:00; сообщение строится из задач, какими
+  они стали, и им же правится после «Убрать».
 
 Сеть трогают только замыкания из сборки: база — через протокол `ChatStore`,
 Telegram — `OwnerSender` и `ConnectionLookup`, Deepgram — `Transcriber`,
@@ -33,6 +37,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from datetime import time as dt_time
 from typing import Any, Literal, Protocol, cast, get_args
 from zoneinfo import ZoneInfo
 
@@ -65,6 +70,7 @@ from solomon.db.chats import (
     WaitingChat,
 )
 from solomon.db.rpc import DatabaseError
+from solomon.db.tasks import ACTIVE_STATUS
 from solomon.services import batches, edits, parts
 from solomon.services.batches import Line
 from solomon.services.reminders import Planner, database_planner
@@ -102,6 +108,8 @@ class Incoming:
     `chat_key` — ключ чата на площадке, `chat_name` — собеседник или группа;
     `direction` — `out` у сообщения владельца. У голосового и кружка `text`
     пуст, а `file_id` — файл, который расшифрует Deepgram (§25.2).
+    `tracks_waiting` — вести ли у чата «ждёт ответа»: у MAX — нет (§27.3);
+    ставится, когда чат заводится.
     """
 
     platform: Platform
@@ -115,6 +123,7 @@ class Incoming:
     kind: ChatKind
     text: str
     file_id: str | None = None
+    tracks_waiting: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,6 +503,64 @@ async def run_chat_analysis(
     )
 
 
+# --- Что видит владелец (§25.4) ----------------------------------------------
+
+# Владельцу о чатах — только с 08:00 до 22:00 по его поясу; ночное ждёт утра.
+WINDOW_START = dt_time(8, 0)
+WINDOW_END = dt_time(22, 0)
+# «Ждёт ответа» — напомнить через три часа после вопроса, один раз.
+WAITING_AFTER = timedelta(hours=3)
+# Кнопка «Убрать N» (§25.4): `drop:<разбор>:<номер дела>`.
+DROP_PREFIX = "drop:"
+
+
+def in_window(now: datetime, timezone: ZoneInfo) -> bool:
+    """Можно ли сейчас писать владельцу о чатах: с 08:00 до 22:00 по его поясу."""
+    clock = now.astimezone(timezone).time()
+    return WINDOW_START <= clock < WINDOW_END
+
+
+def drop_data(analysis_id: str, item: int) -> str:
+    """Callback «Убрать»: разбор и номер дела — в 64 байта влезает."""
+    return f"{DROP_PREFIX}{analysis_id}:{item}"
+
+
+def parse_drop(data: str) -> tuple[str, int] | None:
+    """Разбор и номер из callback «Убрать»; кривой — `None`."""
+    if not data.startswith(DROP_PREFIX):
+        return None
+    analysis_id, _, item = data.removeprefix(DROP_PREFIX).partition(":")
+    if not analysis_id or not (item.isascii() and item.isdigit()):
+        return None
+    number = int(item)
+    if not 1 <= number <= DEALS_LIMIT:
+        return None
+    return analysis_id, number
+
+
+def report_message(
+    report: ChatReport, analysis_id: str, now: datetime, timezone: ZoneInfo
+) -> tuple[str, tuple[Button, ...]]:
+    """Сообщение о разборе и кнопки «Убрать» (§25.4) — из задач, какими они
+    стали сейчас: им же сообщение правится после нажатия. Кнопка — только у
+    дела в работе."""
+    local_now = now.astimezone(timezone)
+    deals: list[tuple[int, str]] = []
+    for line in report.lines:
+        due = None
+        if line.due_at is not None:
+            due = texts.chat_due(line.due_at.astimezone(timezone), line.due_precision, local_now)
+        deals.append((line.item, texts.chat_deal(line.title, due, line.promise, line.status)))
+    whom = report.chat_with or report.chat_name or OTHER_SENDER
+    single = len(report.lines) == 1 and report.lines[0].item == 1
+    buttons = tuple(
+        Button(texts.drop_button(line.item, single=single), drop_data(analysis_id, line.item))
+        for line in report.lines
+        if line.status == ACTIVE_STATUS
+    )
+    return texts.chat_report(whom, report.platform, deals), buttons
+
+
 class ChatStore(Protocol):
     """Чаты владельца в базе (§3.11–3.15), владелец уже подставлен.
 
@@ -511,7 +578,7 @@ class ChatStore(Protocol):
 
     async def answer(self, platform: Platform, agreed: bool) -> ChatSource | None: ...
 
-    async def store(self, incoming: Incoming, tracks_waiting: bool = True) -> Stored: ...
+    async def store(self, incoming: Incoming) -> Stored: ...
 
     async def set_transcript(self, message_id: str, transcript: str) -> bool: ...
 
@@ -594,7 +661,7 @@ class DatabaseChatStore:
             self._db, owner_telegram_id=self._owner, platform=platform, agreed=agreed
         )
 
-    async def store(self, incoming: Incoming, tracks_waiting: bool = True) -> Stored:
+    async def store(self, incoming: Incoming) -> Stored:
         return await db_chats.store_chat_message(
             self._db,
             owner_telegram_id=self._owner,
@@ -608,7 +675,7 @@ class DatabaseChatStore:
             sent_at=incoming.sent_at,
             kind=incoming.kind,
             text=incoming.text,
-            tracks_waiting=tracks_waiting,
+            tracks_waiting=incoming.tracks_waiting,
         )
 
     async def set_transcript(self, message_id: str, transcript: str) -> bool:
@@ -1184,3 +1251,98 @@ class ChatService:
         except DatabaseError as error:
             logger.warning("Открытые задачи не прочитаны, разбор чата без них: %s", error)
             return ()
+
+    # --- Что видит владелец (§25.4) ------------------------------------------------
+
+    async def send_reports(self, now: datetime | None = None) -> int:
+        """Сообщения о разборах с делами, о которых владелец ещё не знает:
+        «отправить → пометить» (§6.2). Не ушло — следующий тик пришлёт снова.
+        Дел уже нет (задачи удалили) — помечается без сообщения. Возвращает,
+        сколько ушло; окно 08:00–22:00 проверяет тик."""
+        moment = now or self._clock()
+        try:
+            pending = await self._store.reports_to_send()
+        except DatabaseError as error:
+            logger.error("Разборы к отправке не прочитаны: %s", error)
+            return 0
+        sent = 0
+        for analysis_id in pending:
+            try:
+                report = await self._store.report(analysis_id)
+            except DatabaseError as error:
+                logger.error("Отчёт разбора %s не прочитан: %s", analysis_id, error)
+                continue
+            message_id = None
+            if report is not None:
+                text, buttons = report_message(
+                    report, analysis_id, moment, self._settings.owner_timezone
+                )
+                try:
+                    message_id = await self._send(text=text, buttons=buttons)
+                except Exception as error:  # noqa: BLE001 - отказ Telegram не роняет тик
+                    logger.warning(
+                        "Отчёт разбора %s не ушёл: %s", analysis_id, type(error).__name__
+                    )
+                    continue
+                sent += 1
+                logger.info("Отчёт разбора %s ушёл: дел %s", analysis_id, len(report.lines))
+            try:
+                await self._store.report_sent(analysis_id, message_id)
+            except DatabaseError as error:
+                logger.error("Отчёт разбора %s ушёл, но не помечен: %s", analysis_id, error)
+        return sent
+
+    async def remind_waiting(self, now: datetime | None = None) -> int:
+        """«Вы не ответили…» — через три часа после вопроса, один раз (§25.4):
+        «отправить → пометить». Владелец написал в чат — база такой чат не
+        отдаёт. Возвращает, сколько ушло; окно проверяет тик."""
+        moment = now or self._clock()
+        try:
+            chats = await self._store.waiting(moment - WAITING_AFTER)
+        except DatabaseError as error:
+            logger.error("Ждущие ответа чаты не прочитаны: %s", error)
+            return 0
+        sent = 0
+        for chat in chats:
+            text = texts.not_answered(chat.to, chat.platform, chat.about)
+            try:
+                await self._send(text=text)
+            except Exception as error:  # noqa: BLE001 - отказ Telegram не роняет тик
+                logger.warning(
+                    "Напоминание о неотвеченном (чат %s) не ушло: %s",
+                    chat.thread_id,
+                    type(error).__name__,
+                )
+                continue
+            sent += 1
+            logger.info("Напоминание о неотвеченном (чат %s) ушло", chat.thread_id)
+            try:
+                await self._store.reminded(chat.thread_id, chat.since)
+            except DatabaseError as error:
+                logger.error(
+                    "Напоминание о неотвеченном (чат %s) ушло, но не помечено: %s",
+                    chat.thread_id,
+                    error,
+                )
+        return sent
+
+    async def drop(self, analysis_id: str, item: int) -> PressOutcome:
+        """«Убрать» (§25.4): сначала база — задача уходит в `cancelled` с
+        напоминаниями, — потом сообщение: у дела пометка «убрано», кнопки
+        остаются у остальных. База не ответила — подсказка, кнопка остаётся."""
+        try:
+            status = await self._store.drop(analysis_id, item)
+            report = None if status is None else await self._store.report(analysis_id)
+        except DatabaseError as error:
+            logger.error("Дело %s разбора %s не убрано: %s", item, analysis_id, error)
+            return PressOutcome(message=texts.NOT_DROPPED, replace=False)
+        if status is None:
+            logger.info("«Убрать» по неизвестному делу %s разбора %s", item, analysis_id)
+            return PressOutcome(message=texts.DROP_UNKNOWN, replace=False)
+        logger.info("Дело %s разбора %s: %s", item, analysis_id, status)
+        if report is None:
+            return PressOutcome(message=texts.DROPPED, replace=False)
+        text, buttons = report_message(
+            report, analysis_id, self._clock(), self._settings.owner_timezone
+        )
+        return PressOutcome(message=text, replace=True, buttons=buttons)

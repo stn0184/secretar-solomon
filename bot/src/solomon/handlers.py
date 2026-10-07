@@ -877,6 +877,25 @@ async def handle_consent(callback: CallbackQuery, chats: ChatService | None = No
     await answer_press(callback, await chats.answer_consent(platform, agreed))
 
 
+async def handle_drop(callback: CallbackQuery, chats: ChatService | None = None) -> None:
+    """Нажата «Убрать» под сообщением о разборе переписки (§25.4).
+
+    Сначала база, потом сообщение: у дела пометка «убрано», кнопки остаются
+    у остальных дел. Отказ — всплывающий ответ, кнопка остаётся.
+    """
+    parsed = chats_module.parse_drop(callback.data or "")
+    if chats is None:
+        logger.error("Кнопку «Убрать» некому обработать: бот собран без базы")
+        await callback.answer(texts.NOT_DROPPED)
+        return
+    if parsed is None:
+        logger.warning("Кнопка «Убрать» с непонятными данными: %r", callback.data)
+        await callback.answer(texts.DROP_UNKNOWN)
+        return
+    analysis_id, item = parsed
+    await answer_press(callback, await chats.drop(analysis_id, item))
+
+
 def build_business_router() -> Router:
     """Роутер бизнес-обновлений (§25.2) — новая фабрика на каждую сборку.
 
@@ -914,4 +933,5 @@ def build_router() -> Router:
     router.callback_query.register(handle_back, F.data.startswith(edits.BACK_PREFIX))
     router.callback_query.register(handle_apart, F.data.startswith(edits.APART_PREFIX))
     router.callback_query.register(handle_consent, F.data.startswith(chats_module.CONSENT_PREFIX))
+    router.callback_query.register(handle_drop, F.data.startswith(chats_module.DROP_PREFIX))
     return router
