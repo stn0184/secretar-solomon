@@ -497,13 +497,14 @@ class HttpMaxApi:
             raise max_error(response.status_code, payload)
         return payload
 
-    async def updates(self, marker: int | None) -> UpdateBatch:
+    async def updates(self, marker: int | None, wait: int = POLL_SECONDS) -> UpdateBatch:
         """`GET /updates`: события после отметки. Отметка, переданная в
         запросе, подтверждает всё до неё — поэтому передаётся только
-        записанная."""
+        записанная; без отметки ничего не подтверждается. `wait` — сколько
+        секунд MAX держит пустой запрос."""
         params: dict[str, str | int] = {
             "limit": POLL_LIMIT,
-            "timeout": POLL_SECONDS,
+            "timeout": wait,
             "types": ",".join(UPDATE_TYPES),
         }
         if marker is not None:

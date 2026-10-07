@@ -1263,9 +1263,11 @@ def test_help_mentions_the_max_bot() -> None:
 
 @pytest.mark.live
 async def test_live_max_answers_through_the_repository_certificate() -> None:
-    """Вживую (§27.2): `GET /me` тем же клиентом, что опрос, — TLS проверяется
-    сертификатом из репозитория, токен уходит заголовком. Только чтение:
-    события не читаются и не подтверждаются, в MAX ничего не пишется. Нужен
+    """Вживую (§27.2): `GET /me` и `GET /updates` тем же клиентом, что опрос, —
+    TLS проверяется сертификатом из репозитория, токен уходит заголовком.
+    Только чтение: события читаются без отметки и не подтверждаются, в MAX
+    ничего не пишется. В вывод — числа: кто писал боту в личку — по id, так
+    владелец узнаёт свой `OWNER_MAX_ID` (README, раздел «MAX»). Нужен
     `MAX_BOT_TOKEN` в `.env`: `pytest -m live -k max -s`."""
     settings = live_settings()
     if settings.max_bot_token is None:
@@ -1273,6 +1275,19 @@ async def test_live_max_answers_through_the_repository_certificate() -> None:
     api = HttpMaxApi.create(settings.max_bot_token)
     try:
         bot = await api.me()
+        batch = await api.updates(None, wait=0)
     finally:
         await api.close()
-    print(f"MAX отвечает через сертификат из репозитория: id бота есть {bool(bot.user_id)}")
+    writers = sorted(
+        {
+            item.message.sender.user_id
+            for item in batch.updates
+            if item.message is not None
+            and item.message.sender is not None
+            and item.message.chat_type == "dialog"
+        }
+    )
+    print(
+        f"MAX отвечает через сертификат из репозитория: id бота есть {bool(bot.user_id)}, "
+        f"событий {len(batch.updates)}, в личку бота писали id: {writers or 'никто'}"
+    )
