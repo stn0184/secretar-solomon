@@ -1091,6 +1091,7 @@ async def test_forwarded_deal_reaches_the_owner_marked_max() -> None:
         "(вы обещали)"
     )
     assert [button.text for button in buttons] == ["Убрать"]
+    assert bot.max.sent == [(OWNER_MAX, "Принял, итог пришлю в Telegram.")], "в MAX — одно «Принял»"
     [(_, prompt)] = call.calls
     assert "Переписка в MAX, чат «Игорь Петров»." in prompt
     assert "Владелец: Да, в пятницу пришлю" in prompt
@@ -1161,6 +1162,103 @@ async def test_note_deal_is_reported_as_from_your_notes() -> None:
     ]
     [(_, prompt)] = call.calls
     assert prompt.startswith("Заметки владельца самому себе в MAX.")
+
+
+# ------------------------------------------- «Принял» в MAX — раз на пачку (§27.3)
+
+ACCEPTED = (OWNER_MAX, "Принял, итог пришлю в Telegram.")
+
+
+async def test_first_batch_after_silence_gets_one_accepted() -> None:
+    bot = MaxBot(store=consented())
+    bot.max.say(
+        from_owner(None, mid="mid.1", link=forward("Пришлёшь расчёт до пятницы?")),
+        from_owner(None, mid="mid.2", link=forward("Да, в пятницу пришлю", sender=OWNER)),
+    )
+    await bot.service.poll()
+    bot.now = NOW + timedelta(minutes=5)
+    bot.max.say(from_owner("И ещё: напомни Олегу про книгу", mid="mid.3"))
+    await bot.service.poll()
+    bot.now = NOW + timedelta(minutes=24)
+    bot.max.say(from_owner("Купить уголь", mid="mid.4"))
+    await bot.service.poll()
+
+    bot.now = NOW + timedelta(minutes=45)
+    bot.max.say(from_owner("Новая пачка", mid="mid.5"))
+    await bot.service.poll()
+
+    assert bot.max.sent == [ACCEPTED, ACCEPTED], "второе — после 20 минут тишины"
+
+
+async def test_nothing_kept_nothing_accepted() -> None:
+    """«Принял» — только о записанном (инвариант 4): до согласия, повтор,
+    группа и чужой — без ответа в MAX."""
+    bot = MaxBot()
+    bot.max.say(from_owner("До согласия", mid="mid.1"))
+    await bot.service.poll()
+    await bot.chats.answer_consent("max", True)
+    bot.max.say(in_group("Кто купит уголь?"))
+    bot.max.say(update(raw_message("Привет, бот", sender=OLEG, chat_id=STRANGER_DIALOG)))
+    await bot.service.poll()
+    await bot.service.poll()
+    assert bot.max.sent == []
+
+    bot.max.say(from_owner("Записать", mid="mid.2"))
+    await bot.service.poll()
+    bot.now = NOW + timedelta(hours=1)
+    bot.max.say(from_owner("Записать", mid="mid.2"))
+    await bot.service.poll()
+
+    assert bot.max.sent == [ACCEPTED], "повтор того же сообщения — без нового «Принял»"
+
+
+async def test_unsent_accepted_is_sent_by_the_next_poll() -> None:
+    bot = MaxBot(store=consented())
+    bot.max.send_errors.append(MaxError("сеть: ConnectError"))
+    bot.max.say(from_owner("Раз", mid="mid.1"))
+
+    await bot.service.poll()
+    assert bot.max.sent == []
+    await bot.service.poll()
+
+    assert bot.max.sent == [ACCEPTED]
+
+
+async def test_accepted_is_dropped_when_the_bot_is_stopped() -> None:
+    bot = MaxBot(store=consented())
+    bot.max.send_errors.append(MaxError("MAX ответил 403, код chat.denied", 403))
+    bot.max.say(from_owner("Раз", mid="mid.1"))
+
+    await bot.service.poll()
+    await bot.service.poll()
+
+    assert bot.max.sent == []
+
+
+def test_max_consent_question_says_what_is_read_and_to_forward_again() -> None:
+    question = texts.consent_question("max")
+
+    assert question == (
+        "Подключено чтение MAX: то, что вы пересылаете и пишете мне в MAX, и группы, куда "
+        "вы меня добавили. Я читаю эти сообщения и отправляю текст и голосовые на разбор "
+        "(Claude через посредника, Deepgram). Храню переписку 7 дней, записанные дела — "
+        "пока не уберёте. В MAX я отвечаю только «Принял» и в группы не пишу. Пересланное "
+        "до согласия я не сохранил — после «Согласен» перешлите его снова. Согласны?"
+    )
+
+
+def test_max_consent_answer_promises_no_unanswered_reminders() -> None:
+    agreed = texts.consent_answered("max", agreed=True)
+
+    assert agreed.endswith(
+        "Договорились. Что записал из MAX — буду писать сюда; «кому вы не ответили» по MAX не веду."
+    )
+    assert "кому вы не ответили — буду" in texts.consent_answered("telegram", agreed=True)
+
+
+def test_help_mentions_the_max_bot() -> None:
+    assert "MAX" in texts.HELP
+    assert "README, раздел «MAX»" in texts.HELP
 
 
 @pytest.mark.live

@@ -16,6 +16,9 @@
   «Ждёт ответа» по MAX не ведётся вовсе.
 - Опрос: отметка (`marker`) двигается только после того, как пачка
   записана; MAX не ответил — та же отметка снова, пропущенное заберётся.
+- Ответ в MAX — только «Принял, итог пришлю в Telegram.» владельцу в личный
+  чат с ботом, раз на пачку и только о записанном (инвариант 4). В группы бот
+  не пишет: у API здесь и метода такого нет.
 
 Сеть — только `HttpMaxApi` (httpx) за протоколом `MaxApi`: тесты подставляют
 свой. Токен не попадает ни в журнал, ни в адрес запроса: в журнал — только
@@ -39,7 +42,7 @@ import httpx
 from solomon import texts
 from solomon.config import Settings
 from solomon.db.chats import ChatKind, Platform, Stored
-from solomon.services.chats import GROUP_PREFIX, NOTES_KEY, AudioLoader, Incoming
+from solomon.services.chats import GROUP_PREFIX, NOTES_KEY, QUIET, AudioLoader, Incoming
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,9 @@ BATCH_ATTEMPTS = 3
 GROUP_CHECK_EVERY = timedelta(hours=1)
 # Голосовое — до 25 МБ.
 AUDIO_LIMIT = 25 * 1024 * 1024
+# «Принял» — раз на пачку: первое записанное сообщение владельца боту после
+# 20 минут тишины в личном чате с ботом (§27.3) — та же тишина, что у разбора.
+ACCEPT_AFTER = QUIET
 # Сколько последних сообщений процесс помнит по чатам — для удаления.
 REMEMBERED = 1000
 # Id сообщения в базе — до 200 знаков (§3.13).
@@ -627,6 +633,10 @@ class MaxService:
         # Сообщение → его чаты: удаление в MAX называет только id.
         self._keys: OrderedDict[str, tuple[str, ...]] = OrderedDict()
         self._task: asyncio.Task[None] | None = None
+        # Когда записано последнее сообщение владельца боту и ждёт ли пачка
+        # своего «Принял».
+        self._wrote_at: datetime | None = None
+        self._accept_due = False
 
     def _now(self) -> datetime:
         return datetime.now(self._settings.owner_timezone)
@@ -714,7 +724,32 @@ class MaxService:
             logger.warning("MAX: пачка событий записана не целиком — прочитаю её снова")
         if stored:
             logger.info("MAX: записано новых сообщений %s", stored)
+        await self._accept()
         return Polled(stored=stored, complete=complete)
+
+    async def _accept(self) -> None:
+        """«Принял, итог пришлю в Telegram.» — владельцу в личный чат с ботом,
+        раз на пачку. Не ушло — следующий опрос пришлёт; бот остановлен (403)
+        — не пришлёт."""
+        if not self._accept_due:
+            return
+        try:
+            await self._api.send_to_user(self._owner, texts.MAX_ACCEPTED)
+        except MaxError as error:
+            logger.warning("MAX: «Принял» не ушло: %s", error.reason)
+            if error.status == 403:
+                self._accept_due = False
+            return
+        self._accept_due = False
+        logger.info("MAX: «Принял» ушло")
+
+    def _owner_wrote(self) -> None:
+        """Записано сообщение владельца боту: после 20 минут тишины — новая
+        пачка, и ей положено «Принял»."""
+        now = self._clock()
+        if self._wrote_at is None or now - self._wrote_at >= ACCEPT_AFTER:
+            self._accept_due = True
+        self._wrote_at = now
 
     # --- События -----------------------------------------------------------------------
 
@@ -740,6 +775,7 @@ class MaxService:
         if not await self._chats.enable(PLATFORM, None, enabled=False):
             return False
         self._enabled = False
+        self._accept_due = False
         return True
 
     async def _enable(self) -> bool:
@@ -781,6 +817,8 @@ class MaxService:
             if result.outcome == "stored":
                 stored += 1
                 self._remember(message.mid, incoming.chat_key)
+                if message.chat_type == "dialog":
+                    self._owner_wrote()
         return stored, True
 
     async def _group(self, message: MaxMessage) -> Group | None:
