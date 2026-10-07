@@ -29,6 +29,7 @@ def test_full_env_gives_settings() -> None:
         anthropic_api_key="sk-ant-test",
         deepgram_api_key="dg-test",
         anthropic_base_url=None,
+        instagram_token=None,
     )
 
 
@@ -85,3 +86,15 @@ def test_anthropic_base_url_is_taken_as_given() -> None:
     settings = load_settings({**FULL_ENV, "ANTHROPIC_BASE_URL": "https://api.agenthello.ai/v1/"})
 
     assert settings.anthropic_base_url == "https://api.agenthello.ai/v1"
+
+
+def test_instagram_token_is_optional() -> None:
+    """Нет ключа — Direct не опрашивается, бот запускается как раньше (§26.1)."""
+    assert load_settings(FULL_ENV).instagram_token is None
+    assert load_settings({**FULL_ENV, "INSTAGRAM_TOKEN": "  "}).instagram_token is None
+
+
+def test_instagram_token_is_taken_as_given() -> None:
+    settings = load_settings({**FULL_ENV, "INSTAGRAM_TOKEN": " IGAA-test-token "})
+
+    assert settings.instagram_token == "IGAA-test-token"

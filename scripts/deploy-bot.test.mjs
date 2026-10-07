@@ -36,12 +36,14 @@ const BOT_KEYS = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_BASE_URL",
   "DEEPGRAM_API_KEY",
+  "INSTAGRAM_TOKEN",
 ];
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
 
-/** Значения выдуманные; ANTHROPIC_BASE_URL нет нарочно. */
+/** Значения выдуманные; ANTHROPIC_BASE_URL и INSTAGRAM_TOKEN нет нарочно —
+ * обе необязательные. */
 const SECRETS = {
   TELEGRAM_BOT_TOKEN: "123456789:AAFakeTokenForTestsOnly_abcdefghijk",
   OWNER_TELEGRAM_ID: "555000111",
@@ -201,7 +203,7 @@ test(".env для сервера: только переменные из спи�
   assert.deepEqual(names, Object.keys(SECRETS));
   for (const name of Object.keys(FOREIGN)) assert.equal(env.content.includes(name), false, name);
   assert.deepEqual(env.names, Object.keys(SECRETS));
-  assert.deepEqual(env.missing, ["ANTHROPIC_BASE_URL"]);
+  assert.deepEqual(env.missing, ["ANTHROPIC_BASE_URL", "INSTAGRAM_TOKEN"]);
   assert.match(env.content, /^TELEGRAM_BOT_TOKEN=123456789:AAFakeTokenForTestsOnly_abcdefghijk$/m);
 });
 
@@ -391,6 +393,15 @@ test("токен бота в журнале не печатается", () => {
   const w = world({ remote: report({ polling: "0", journal: [`GET https://api.telegram.org/bot${token}/getMe`] }) });
   main([], w.deps);
   assert.equal(w.output().includes(token), false);
+});
+
+test("ключ Instagram в адресе запроса в журнале не печатается", () => {
+  const key = "IGAAfakeInstagramKeyForTests_42";
+  const line = `HTTP Request: GET https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${key} "HTTP/1.1 200 OK"`;
+  const w = world({ remote: report({ polling: "0", journal: [line] }) });
+  main([], w.deps);
+  assert.equal(w.output().includes(key), false);
+  assert.match(w.output(), /access_token=<скрыто>/);
 });
 
 test("разбор ответа сервера: поля и журнал", () => {

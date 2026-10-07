@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 from collections.abc import Iterable
 from pathlib import Path
@@ -23,6 +24,10 @@ from solomon.db.health import HealthReport, check_database
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 # Чем в журнале заменяется значение ключа.
 HIDDEN = "<скрыто>"
+# Ключ в адресе запроса: так его передаёт Meta (`refresh_access_token`), и
+# httpx пишет адрес каждого запроса в журнал. Продлённый ключ Instagram
+# появляется после запуска, и в `secrets_of` его нет — его прячет образец.
+TOKEN_IN_URL = re.compile(r"(access_token=)[^&\s\"'<>]+")
 
 
 class HidingFormatter(logging.Formatter):
@@ -32,7 +37,8 @@ class HidingFormatter(logging.Formatter):
     кладёт адрес в текст своих ошибок. Наш код текст таких ошибок в журнал не
     пишет, но строку пишет и aiogram — с трассировкой. Поэтому строка
     собирается целиком, с аргументами и трассировкой, и только потом из неё
-    вырезаются ключи: что бы ни попало в журнал, ключа там не будет.
+    вырезаются ключи: что бы ни попало в журнал, ключа там не будет. Ключ в
+    адресе (`access_token=…`) вырезается по образцу — даже незнакомый.
     """
 
     def __init__(self, fmt: str, secrets: Iterable[str]) -> None:
@@ -43,7 +49,7 @@ class HidingFormatter(logging.Formatter):
         line = super().format(record)
         for secret in self._secrets:
             line = line.replace(secret, HIDDEN)
-        return line
+        return TOKEN_IN_URL.sub(rf"\g<1>{HIDDEN}", line)
 
 
 def secrets_of(settings: Settings) -> tuple[str, ...]:
@@ -53,6 +59,7 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
         settings.supabase_service_role_key,
         settings.anthropic_api_key,
         settings.deepgram_api_key,
+        settings.instagram_token or "",
     )
 
 

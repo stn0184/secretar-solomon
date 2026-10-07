@@ -53,6 +53,9 @@ class Settings:
     # Пусто — ходим в api.anthropic.com; задано — в посредника
     # (`techspec/05-ai.md` §5.1).
     anthropic_base_url: str | None = None
+    # Долгоживущий ключ Instagram (`techspec/26-instagram.md` §26.1). Пусто —
+    # Direct не опрашивается, бот работает как без него.
+    instagram_token: str | None = None
 
 
 def _required(env: Mapping[str, str], name: str) -> str:
@@ -77,6 +80,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     anthropic_key = _required(env, "ANTHROPIC_API_KEY")
     deepgram_key = _required(env, "DEEPGRAM_API_KEY")
     anthropic_base_url = _optional(env, "ANTHROPIC_BASE_URL")
+    instagram_token = _optional(env, "INSTAGRAM_TOKEN")
 
     try:
         owner = int(raw_owner)
@@ -102,4 +106,5 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         anthropic_api_key=anthropic_key,
         deepgram_api_key=deepgram_key,
         anthropic_base_url=anthropic_base_url.rstrip("/") if anthropic_base_url else None,
+        instagram_token=instagram_token,
     )

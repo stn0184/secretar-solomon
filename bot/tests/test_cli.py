@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from dataclasses import fields
+from dataclasses import fields, replace
 
 from solomon.cli import HIDDEN, LOG_FORMAT, HidingFormatter, secrets_of
 from solomon.config import Settings
@@ -45,6 +45,7 @@ def test_token_is_hidden_in_the_traceback() -> None:
 
 def test_every_key_from_settings_is_hidden(settings: Settings) -> None:
     """Ключ, заведённый в `Settings`, без правки `secrets_of` не останется."""
+    settings = replace(settings, instagram_token="IGAA-test-instagram-token")
     keys = [
         getattr(settings, field.name)
         for field in fields(settings)
@@ -54,12 +55,33 @@ def test_every_key_from_settings_is_hidden(settings: Settings) -> None:
 
     line = formatter.format(make_record(" ".join(["%s"] * len(keys)), *keys))
 
-    assert len(keys) == 4
+    assert len(keys) == 5
     for key in keys:
         assert key not in line
 
 
 def test_line_without_keys_is_left_as_is() -> None:
     formatter = HidingFormatter("%(message)s", ["", TEST_TOKEN])
+
+    assert formatter.format(make_record("Команда /start")) == "Команда /start"
+
+
+def test_token_in_a_request_url_is_hidden_even_if_unknown() -> None:
+    """Продлённый ключ Instagram появляется после запуска, а httpx пишет адрес
+    каждого запроса — ключ в адресе вырезается по образцу (§26.2)."""
+    formatter = HidingFormatter(LOG_FORMAT, [TEST_TOKEN])
+    url = (
+        "https://graph.instagram.com/refresh_access_token"
+        "?grant_type=ig_refresh_token&access_token=IGAAfresh-token_42"
+    )
+
+    line = formatter.format(make_record('HTTP Request: GET %s "HTTP/1.1 200 OK"', url))
+
+    assert "IGAAfresh-token_42" not in line
+    assert f"grant_type=ig_refresh_token&access_token={HIDDEN} " in line
+
+
+def test_settings_without_instagram_hide_nothing_extra(settings: Settings) -> None:
+    formatter = HidingFormatter("%(message)s", secrets_of(settings))
 
     assert formatter.format(make_record("Команда /start")) == "Команда /start"

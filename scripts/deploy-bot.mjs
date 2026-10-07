@@ -60,6 +60,8 @@ const ENV_EXAMPLE_KEY = /^([A-Z][A-Z0-9_]*)=/;
 const ENV_LINE_KEY = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/;
 /** Токен бота по форме — тот же, что ищет check-dist.mjs. */
 const BOT_TOKEN = /(?<!\d)\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])/g;
+/** Ключ в адресе запроса — так его передаёт Meta (Instagram, §26.2). */
+const TOKEN_IN_URL = /(access_token=)[^&\s"'<>]+/g;
 const GITHUB_REPO =
   /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
 
@@ -251,9 +253,12 @@ export function parseReport(text) {
   return { values, journal };
 }
 
-/** Токен бота в журнале не печатается, даже если бот его туда записал. */
+/**
+ * Ключи в журнале не печатаются, даже если бот их туда записал: токен бота —
+ * по его форме, ключ Instagram — в адресе запроса (`access_token=…`).
+ */
 function redact(line) {
-  return line.replace(BOT_TOKEN, "<токен бота>");
+  return line.replace(BOT_TOKEN, "<токен бота>").replace(TOKEN_IN_URL, "$1<скрыто>");
 }
 
 function short(sha) {
