@@ -32,6 +32,7 @@ bot/                     Telegram-бот, Python 3.12, long polling
       search.py          поиск по поручению: вызов с серверным поиском, ответ из текста, очередь поисков, шаг тика
       chats.py           личные чаты: приём, согласие, разбор в фоне, сообщение о разборе и «Убрать», «ждёт ответа», шаг тика
       instagram.py       Direct в Instagram: клиент httpx, ключ и файл состояния, продление, опрос в общий путь чатов, шаг тика
+      relay.py           переписка от Partner Assistant (§28): хэш ключа передачи в базу при запуске, ссылка для /chats
     db/
       client.py          клиент Supabase на ключе service-role
       rpc.py             общий поход в базу: отдельный поток, DatabaseError
@@ -42,6 +43,7 @@ bot/                     Telegram-бот, Python 3.12, long polling
       searches.py        поиски: завести, взять в работу, ответ, done, попытка, failed, для тика, прошлый
       chats.py           личные чаты: согласие, сообщения, куски к разбору, запись разбора, отчёт, «Убрать», «ждёт ответа», срок хранения
       facts.py           память о пользователе: известные факты для промпта, тексты для подсказок
+      relay.py           ключ передачи (§28.2): register_chat_relay — единственный модуль db/ без владельца, данных человека в chat_relays нет
   tests/                 pytest; сеть не трогается
     fixtures/            примеры для живого прогона (маркер live)
       photos/            шесть синтетических снимков и draw.py, что их нарисовал (pillow — через uv run --with)
@@ -84,6 +86,8 @@ scripts/gate.mjs         ворота: стековые проверки + со�
 scripts/check-dist.mjs   сборка Mini App без секретов — зовут workflow и ворота
 scripts/deploy-bot.mjs   выкладка бота на сервер по SSH: --env, --status, --setup (§16.4)
 scripts/deploy-bot.test.mjs   её тесты, node --test: ssh подменён, сети нет
+scripts/relay-check.mjs  самопроверка канала от Partner Assistant (§28.2): вызов relay_chat_events по HTTPS с пустой пачкой
+scripts/relay-check.test.mjs  её тесты, сеть подменена; по HTTP против тестовой базы её зовёт supabase/tests/relay.test.ts (allowJs)
 specs/  techspec/  prototype/   документы и очередь работ
 .env.example             один файл на все части, значений нет
 ```
