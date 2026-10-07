@@ -227,6 +227,30 @@ async def test_sources_to_ask_filter_the_owner_and_the_undecided() -> None:
         assert ("is", column, None) in fake.calls
 
 
+async def test_chat_source_is_read_by_owner_and_platform() -> None:
+    fake = FakeClient(
+        tables={"chat_sources": [source_row(platform="instagram", consented_at=NOW.isoformat())]}
+    )
+
+    source = await db_chats.chat_source(
+        as_client(fake), owner_telegram_id=OWNER_ID, platform="instagram"
+    )
+
+    assert source is not None
+    assert (source.platform, source.consented_at) == ("instagram", NOW)
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("eq", "platform", "instagram") in fake.calls
+
+
+async def test_missing_chat_source_is_none() -> None:
+    fake = FakeClient(tables={"chat_sources": []})
+
+    assert (
+        await db_chats.chat_source(as_client(fake), owner_telegram_id=OWNER_ID, platform="max")
+        is None
+    )
+
+
 async def test_store_sends_every_field_and_reads_the_outcome() -> None:
     client = rpc({"store_chat_message": [{"outcome": "stored", "message_id": MESSAGE_ID}]})
 
@@ -916,6 +940,10 @@ class FakeChatStore:
             and row["consented_at"] is None
             and row["declined_at"] is None
         ]
+
+    async def source(self, platform: str) -> ChatSource | None:
+        self._call("source")
+        return self._source(platform) if platform in self.sources else None
 
     async def mark_asked(self, platform: str) -> bool:
         self._call("mark_asked")

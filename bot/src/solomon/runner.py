@@ -16,7 +16,8 @@ from supabase import Client
 from solomon import handlers
 from solomon.config import Settings
 from solomon.middlewares import OwnerOnlyMiddleware
-from solomon.services.chats import ChatService, Connection
+from solomon.services.chats import ChatService, Connection, OwnerSender
+from solomon.services.instagram import InstagramService
 from solomon.services.reminders import ReminderService, mirror_timezone
 from solomon.services.search import SearchService
 from solomon.services.tasks import Button, TaskService
@@ -67,20 +68,10 @@ def build_searches(
     return SearchService.with_database(settings, db, client, reply)
 
 
-def build_chats(
-    settings: Settings,
-    db: Client,
-    bot: Bot,
-    client: AsyncAnthropic,
-    speech: AsyncDeepgramClient,
-) -> ChatService:
-    """Личные чаты (`techspec/25-chats.md`): база, тот же клиент Claude, Deepgram
-    и две связи с Telegram.
-
-    Отправка — только владельцу в чат с Соломоном (`chat_id` — его id) и
-    без `business_connection_id`: в бизнес-чаты бот не пишет никогда
-    (§25.2). Чьё подключение — `getBusinessConnection`.
-    """
+def owner_sender(settings: Settings, bot: Bot) -> OwnerSender:
+    """Сообщение о чатах — только владельцу в чат с Соломоном (`chat_id` — его
+    id) и без `business_connection_id`: в бизнес-чаты и в Direct бот не пишет
+    никогда (§25.2, §26.4)."""
 
     async def send(*, text: str, buttons: Sequence[Button] = ()) -> int:
         message = await bot.send_message(
@@ -90,13 +81,39 @@ def build_chats(
         )
         return message.message_id
 
+    return send
+
+
+def build_chats(
+    settings: Settings,
+    db: Client,
+    bot: Bot,
+    client: AsyncAnthropic,
+    speech: AsyncDeepgramClient,
+) -> ChatService:
+    """Личные чаты (`techspec/25-chats.md`): база, тот же клиент Claude, Deepgram
+    и две связи с Telegram — отправка владельцу (`owner_sender`) и чьё
+    подключение (`getBusinessConnection`).
+    """
+
     async def lookup(connection_id: str) -> Connection:
         connection = await bot.get_business_connection(business_connection_id=connection_id)
         return Connection(user_id=connection.user.id, is_enabled=connection.is_enabled)
 
     return ChatService.with_database(
-        settings, db, client, send, lookup, DeepgramTranscriber.with_client(speech)
+        settings,
+        db,
+        client,
+        owner_sender(settings, bot),
+        lookup,
+        DeepgramTranscriber.with_client(speech),
     )
+
+
+def build_instagram(settings: Settings, bot: Bot, chats: ChatService) -> InstagramService | None:
+    """Direct в Instagram (`techspec/26-instagram.md`): опрос своим ключом в
+    общий путь чатов. Ключа нет — `None`, бот работает как без него."""
+    return InstagramService.with_client(settings, chats, owner_sender(settings, bot))
 
 
 def build_reminders(
@@ -105,6 +122,7 @@ def build_reminders(
     bot: Bot,
     searches: SearchService | None = None,
     chats: ChatService | None = None,
+    instagram: InstagramService | None = None,
 ) -> ReminderService:
     """Цикл напоминаний: база своя, отправка — через этого бота.
 
@@ -114,7 +132,7 @@ def build_reminders(
     с id пользователя, других чатов у помощника нет. Строка «Перенёс»
     (`techspec/11-edit.md` §11.4) уходит своим замыканием — без кнопки:
     это не напоминание. Шаг тика о поисках (§24.3) — `searches`, о личных
-    чатах (§25) — `chats`.
+    чатах (§25) — `chats`, опрос Direct (§26) — `instagram`.
     """
 
     async def notify(*, text: str, task_id: str, occurrence: int | None = None) -> int:
@@ -130,7 +148,7 @@ def build_reminders(
         return message.message_id
 
     return ReminderService.with_database(
-        settings, db, notify, announce, searches=searches, chats=chats
+        settings, db, notify, announce, searches=searches, chats=chats, instagram=instagram
     )
 
 
@@ -175,7 +193,10 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     tasks = build_tasks(settings, db, client, speech) if db is not None else None
     searches = build_searches(settings, db, bot, client) if db is not None else None
     chats = build_chats(settings, db, bot, client, speech) if db is not None else None
-    reminders = build_reminders(settings, db, bot, searches, chats) if db is not None else None
+    instagram = build_instagram(settings, bot, chats) if chats is not None else None
+    reminders = (
+        build_reminders(settings, db, bot, searches, chats, instagram) if db is not None else None
+    )
     dispatcher = build_dispatcher(
         settings, db=db, tasks=tasks, reminders=reminders, searches=searches, chats=chats
     )
@@ -205,6 +226,10 @@ async def run(settings: Settings, db: Client | None = None) -> None:
             # Поиски в работе обрываются: строка остаётся начатой, и после
             # запуска тик возьмёт её через десять минут (§24.3).
             await searches.stop()
+        if instagram is not None:
+            # Опрос в работе обрывается: курсор не сдвинут, и после запуска
+            # опрос прочтёт то же (§26.3).
+            await instagram.stop()
         if chats is not None:
             # Разбор в работе обрывается: сообщения остаются неразобранными,
             # и после запуска тик разберёт их снова (§25.3).

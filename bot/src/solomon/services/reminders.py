@@ -36,6 +36,8 @@ aiogram, ни про сеть, и тест подставляет свою за�
 Личные чаты (`techspec/25-chats.md`) — шаг сразу после поисков: согласие,
 разбор в фоне, сообщения о разборах, «Вы не ответили» и стирание старой
 переписки — в `services/chats.py`, здесь — место шага и счёт ушедшего.
+Перед ним — шаг Instagram (`techspec/26-instagram.md`): опрос Direct раз в 5
+минут в фоне и сообщение об отказе ключа — в `services/instagram.py`.
 """
 
 from __future__ import annotations
@@ -328,6 +330,7 @@ class ReminderService:
         record_overdue: OverdueRecorder | None = None,
         searches: SearchResumer | None = None,
         chats: ChatTicker | None = None,
+        instagram: ChatTicker | None = None,
     ) -> None:
         self._settings = settings
         self._due = due
@@ -367,6 +370,8 @@ class ReminderService:
         self._searches = searches
         # Без него о чатах тик молчит — как до этапа 025.
         self._chats = chats
+        # Без него Direct не опрашивается — ключа Instagram нет (§26.1).
+        self._instagram = instagram
         self._clock = clock or self._now
 
     def _now(self) -> datetime:
@@ -381,9 +386,11 @@ class ReminderService:
         announce: Announcer,
         searches: SearchResumer | None = None,
         chats: ChatTicker | None = None,
+        instagram: ChatTicker | None = None,
     ) -> ReminderService:
         """Обычная сборка: настоящая база и настоящая отправка в Telegram;
-        `searches` — шаг тика о поисках (§24.3), `chats` — о личных чатах (§25)."""
+        `searches` — шаг тика о поисках (§24.3), `chats` — о личных чатах (§25),
+        `instagram` — опрос Direct (§26)."""
 
         async def due(*, owner_telegram_id: int, now: datetime) -> list[DueReminder]:
             return await db_reminders.due_reminders(
@@ -508,14 +515,15 @@ class ReminderService:
             record_overdue=record_overdue,
             searches=searches,
             chats=chats,
+            instagram=instagram,
         )
 
     async def tick(self, now: datetime | None = None) -> int:
         """Один заход: перекатывание (§13.4), утренний план (§20.2), созревшее
-        (§6.2), строки «Перенёс» (§11.4), поиски (§24.3), чаты (§25), затем вопрос о
-        прошедшем деле (§22.2) и последним — вопрос о деле без срока (§19.2):
-        каждый из двух вопросов — только если до него в этом тике ничего не
-        ушло; ответ или отказ поиска — тоже ушедшее сообщение.
+        (§6.2), строки «Перенёс» (§11.4), поиски (§24.3), Instagram (§26), чаты
+        (§25), затем вопрос о прошедшем деле (§22.2) и последним — вопрос о деле
+        без срока (§19.2): каждый из двух вопросов — только если до него в этом
+        тике ничего не ушло; ответ или отказ поиска — тоже ушедшее сообщение.
 
         Порядок нарочно такой: новый раз получает свои ступени до выборки, и
         созревшая уходит этим же тиком; план называет дела уже на сегодняшнем
@@ -538,6 +546,7 @@ class ReminderService:
             if await self._announce_one(task, moment):
                 sent += 1
         sent += await self._resume_searches(moment)
+        sent += await self._instagram_step(moment)
         sent += await self._chats_step(moment)
         # В этом тике уже ушли план, напоминание или «Перенёс» — тишины нет
         # (§19.2, §20.2, §22.2). Пока идут вопросы о прошедших делах, вопрос о
@@ -557,6 +566,17 @@ class ReminderService:
             return await self._searches.resume(now)
         except Exception:  # шаг поисков не роняет тик: напоминания важнее
             logger.exception("Шаг поисков в тике не удался")
+            return 0
+
+    async def _instagram_step(self, now: datetime) -> int:
+        """Шаг Instagram (§26.3): опрос в фоне раз в 5 минут и «Instagram
+        отключился» — сколько сообщений ушло. Сбой шага — строка в журнал."""
+        if self._instagram is None:
+            return 0
+        try:
+            return await self._instagram.tick(now)
+        except Exception:  # шаг Instagram не роняет тик: напоминания важнее
+            logger.exception("Шаг Instagram в тике не удался")
             return 0
 
     async def _chats_step(self, now: datetime) -> int:

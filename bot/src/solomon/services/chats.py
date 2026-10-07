@@ -2,7 +2,8 @@
 
 Источник правды — `techspec/25-chats.md`. Общая часть для всех площадок:
 Telegram (этап 025) приходит бизнес-обновлениями через `handlers.py`,
-Instagram (026) и MAX (027) встанут сюда же своим приёмом.
+Instagram (026) — опросом `services/instagram.py`, MAX (027) встанет сюда же
+своим приёмом.
 
 - Приём (§25.1–25.2): сообщение уходит в базу, и база сама сверяет
   подключение и согласие — до «Согласен» ничего не хранится. Незнакомое
@@ -582,6 +583,8 @@ class ChatStore(Protocol):
 
     async def sources_to_ask(self) -> list[ChatSource]: ...
 
+    async def source(self, platform: Platform) -> ChatSource | None: ...
+
     async def mark_asked(self, platform: Platform) -> bool: ...
 
     async def answer(self, platform: Platform, agreed: bool) -> ChatSource | None: ...
@@ -658,6 +661,11 @@ class DatabaseChatStore:
 
     async def sources_to_ask(self) -> list[ChatSource]:
         return await db_chats.sources_to_ask(self._db, owner_telegram_id=self._owner)
+
+    async def source(self, platform: Platform) -> ChatSource | None:
+        return await db_chats.chat_source(
+            self._db, owner_telegram_id=self._owner, platform=platform
+        )
 
     async def mark_asked(self, platform: Platform) -> bool:
         return await db_chats.mark_consent_asked(
@@ -925,19 +933,32 @@ class ChatService:
 
     async def enable(
         self, platform: Platform, connection_id: str | None = None, *, enabled: bool = True
-    ) -> None:
+    ) -> bool:
         """Площадка владельца включена или выключена — общий вход всех площадок
         (§25.5): Telegram — событие подключения, Instagram — первый опрос с
         ключом, MAX — первое сообщение боту. Включение — вопрос о согласии,
-        если его ещё не было; выключение останавливает приём."""
+        если его ещё не было; выключение останавливает приём. `False` — база
+        не записала подключение."""
         try:
             await self._store.connect(platform, connection_id, enabled)
         except DatabaseError as error:
             logger.error("Подключение %s не записано: %s", platform, error)
-            return
+            return False
         logger.info("Подключение %s: включено %s", platform, enabled)
         if enabled:
             await self.ask_consents()
+        return True
+
+    async def reading(self, platform: Platform) -> bool | None:
+        """Можно ли читать площадку: включена и владелец согласился (§25.5).
+        Instagram спрашивает это до опроса — без согласия Direct не читается
+        вовсе. База не ответила — `None`."""
+        try:
+            source = await self._store.source(platform)
+        except DatabaseError as error:
+            logger.error("Согласие на %s не прочитано: %s", platform, error)
+            return None
+        return source is not None and source.is_enabled and source.consented_at is not None
 
     async def ask_consents(self) -> int:
         """Вопрос о согласии площадкам, о которых ещё не спрашивали (§25.5):
@@ -1002,9 +1023,10 @@ class ChatService:
     ) -> Stored | None:
         """Сообщение чата — в базу; база сама сверяет подключение и согласие.
 
-        Подключение базе незнакомо — Telegram называет его владельца: это
-        владелец — подключение записывается, и сообщение пишется ещё раз;
-        чужое — запоминается, ничего не хранится. Голосовое и кружок
+        Подключение Telegram базе незнакомо — Telegram называет его владельца:
+        это владелец — подключение записывается, и сообщение пишется ещё раз;
+        чужое — запоминается, ничего не хранится. Другие площадки Telegram не
+        спрашивает: их подключение включает свой приём (`enable`). Голосовое и кружок
         расшифровываются после записи. Возвращает итог записи; отказ базы —
         `None` и строка в журнал.
         """
@@ -1012,6 +1034,7 @@ class ChatService:
             stored = await self._store.store(incoming)
             if (
                 stored.outcome in ("no_source", "unknown_connection")
+                and incoming.platform == "telegram"
                 and incoming.connection_id is not None
                 and await self._adopt(incoming.platform, incoming.connection_id)
             ):
@@ -1052,7 +1075,7 @@ class ChatService:
     ) -> None:
         """Расшифровка голосового (§25.2): не вышло — текст пустой, и в
         переписке строка «[голосовое, не расслышал]». Подсказка — имя
-        собеседника."""
+        собеседника — без «@» у Instagram."""
         if self._transcriber is None or load_audio is None:
             return
         try:
@@ -1060,7 +1083,7 @@ class ChatService:
         except Exception as error:  # noqa: BLE001 - не скачалось — «не расслышал»
             logger.warning("Голосовое чата не скачано: %s", type(error).__name__)
             return
-        result = await self._transcriber.transcribe(audio, (incoming.chat_name,))
+        result = await self._transcriber.transcribe(audio, (incoming.chat_name.lstrip("@"),))
         if not isinstance(result, Transcript):
             return
         try:

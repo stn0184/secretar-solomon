@@ -283,6 +283,25 @@ async def sources_to_ask(db: Client, *, owner_telegram_id: int) -> list[ChatSour
     return [source for source in sources if source is not None]
 
 
+async def chat_source(
+    db: Client, *, owner_telegram_id: int, platform: Platform
+) -> ChatSource | None:
+    """Площадка владельца и согласие на неё (§25.5). Нет строки — `None`."""
+    rows = await ask(
+        lambda: (
+            db.table(SOURCES_TABLE)
+            .select(SOURCE_COLUMNS)
+            .eq("owner_telegram_id", owner_telegram_id)
+            .eq("platform", platform)
+            .limit(1)
+            .execute()
+            .data
+        )
+    )
+    found = _rows(rows, "площадка")
+    return _source_from_row(found[0]) if found else None
+
+
 async def mark_consent_asked(db: Client, *, owner_telegram_id: int, platform: Platform) -> bool:
     """Вопрос о согласии ушёл. `False` — уже спрашивали или решение есть."""
     params = {"owner_telegram_id": owner_telegram_id, "platform": platform}
