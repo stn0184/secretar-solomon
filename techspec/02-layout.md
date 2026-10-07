@@ -11,7 +11,7 @@ bot/                     Telegram-бот, Python 3.12, long polling
     cli.py               точки входа: solomon-bot, solomon-health
     config.py            разбор окружения в Settings
     texts.py             тексты для человека, на русском
-    handlers.py          ответы на команды и сообщения
+    handlers.py          ответы на команды и сообщения; роутер бизнес-обновлений личных чатов — без ответов
     middlewares.py       калитка владельца (инвариант 2)
     runner.py            сборка Dispatcher и long polling
     telegram.py          связь с Telegram: ожидание соединения, «печатает…»
@@ -30,6 +30,7 @@ bot/                     Telegram-бот, Python 3.12, long polling
       morning.py         утренний план: окно, день владельца и его границы, строки плана
       overdue.py         вопрос о прошедшем деле: окно, свои вопросы, границы отбора для плана и шага, текст вопроса
       search.py          поиск по поручению: вызов с серверным поиском, ответ из текста, очередь поисков, шаг тика
+      chats.py           личные чаты: приём, согласие, разбор в фоне, сообщение о разборе и «Убрать», «ждёт ответа», шаг тика
     db/
       client.py          клиент Supabase на ключе service-role
       rpc.py             общий поход в базу: отдельный поток, DatabaseError
@@ -38,6 +39,7 @@ bot/                     Telegram-бот, Python 3.12, long polling
       reminders.py       план reminder_plan, пояс владельца, созревшие, «ушло», перенесённые, repeat_next, roll_repeats, дело без срока, прошедшее дело и запись вопросов
       morning.py         утренний план: был ли сегодня, дела дня, запись плана
       searches.py        поиски: завести, взять в работу, ответ, done, попытка, failed, для тика, прошлый
+      chats.py           личные чаты: согласие, сообщения, куски к разбору, запись разбора, отчёт, «Убрать», «ждёт ответа», срок хранения
       facts.py           память о пользователе: известные факты для промпта, тексты для подсказок
   tests/                 pytest; сеть не трогается
     fixtures/            примеры для живого прогона (маркер live)
@@ -290,6 +292,19 @@ aiogram, ни про сеть — отправка приходит в него 
 его зовут `services/understanding.py` (все три пути разбора — до плана
 и записи), `services/edits.py` (перенос на часть) и `services/morning.py`
 (строки плана). Подписи частей («утром», «Утром») — в `texts.py`.
+
+Личные чаты (§25, этап 025) — `services/chats.py`: приём, согласие,
+разбор и что видит владелец. База — протокол `ChatStore`, обычная сборка
+`DatabaseChatStore` поверх `db/chats.py`; Telegram — замыкания из
+`runner.build_chats` (отправка владельцу, `getBusinessConnection`), модель
+— `anthropic_chat_call`, Deepgram — `Transcriber`. Бизнес-обновления
+разбирает `handlers.build_business_router()` чистой `chat_message_of` и
+не отвечает ничем; `middlewares.py` пропускает их без проверки
+отправителя. Шаг тика — `ReminderService` (протокол `ChatTicker`). Модуль
+берёт из `services/understanding.py` модель, момент, что известно и строки
+открытых задач, из `services/batches.py` — `render_line`, из
+`services/reminders.py` — планировщик, из `services/tasks.py` — `Button` и
+`PressOutcome`; его самого не импортирует ни один сервис.
 
 Поиск по поручению (§24, этап 024) — `services/search.py`: правила и
 вызов модели с базовыми `web_search` и `web_fetch` (протокол
