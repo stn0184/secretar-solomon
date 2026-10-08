@@ -65,23 +65,32 @@ test("утро сегодняшнего дня уже прошло — эта с
   });
 });
 
-test("назван час: за час и в срок", async () => {
+test("назван час: за час и за 5 минут до срока, в сам срок — нет", async () => {
   await withDatabase(async (db) => {
     const atThree = "2026-09-25T15:00:00+05:00";
     assert.deepEqual(await stages(db, { dueAt: atThree, precision: "time", now: MONDAY_MORNING }), [
       ["before", utc("2026-09-25T14:00:00+05:00")],
-      ["due", utc(atThree)],
+      ["due", utc("2026-09-25T14:55:00+05:00")],
     ]);
   });
 });
 
-test("час до срока уже прошёл — остаётся только срок, стучаться немедленно не повод", async () => {
+test("час до срока уже прошёл — остаётся только за 5 минут, стучаться немедленно не повод", async () => {
   await withDatabase(async (db) => {
     const atThree = "2026-09-21T15:00:00+05:00";
     const halfPastTwo = "2026-09-21T14:30:00+05:00";
     assert.deepEqual(await stages(db, { dueAt: atThree, precision: "time", now: halfPastTwo }), [
-      ["due", utc(atThree)],
+      ["due", utc("2026-09-21T14:55:00+05:00")],
     ]);
+  });
+});
+
+test("до срока 5 минут и меньше — напоминаний нет: ступень в прошлом не заводится", async () => {
+  await withDatabase(async (db) => {
+    const atThree = "2026-09-21T15:00:00+05:00";
+    for (const now of ["2026-09-21T14:55:00+05:00", "2026-09-21T14:57:00+05:00"]) {
+      assert.deepEqual(await stages(db, { dueAt: atThree, precision: "time", now }), [], now);
+    }
   });
 });
 
@@ -152,11 +161,11 @@ test("срок ровно сейчас — уже не будущее, ниче�
   });
 });
 
-test("«заранее» ровно сейчас — не заводится, остаётся срок", async () => {
+test("«заранее» ровно сейчас — не заводится, остаётся за 5 минут", async () => {
   await withDatabase(async (db) => {
     const atEleven = "2026-09-21T11:00:00+05:00";
     assert.deepEqual(await stages(db, { dueAt: atEleven, precision: "time", now: MONDAY_MORNING }), [
-      ["due", utc(atEleven)],
+      ["due", utc("2026-09-21T10:55:00+05:00")],
     ]);
   });
 });
@@ -246,18 +255,106 @@ test("миграция части дня не трогает задачи и н�
         )
       ).rows,
       reminders: (
-        await db.query("select task_id, stage, fire_at, sent_at from public.reminders order by stage")
+        await db.query<{ task_id: string; stage: string; fire_at: Date; sent_at: Date | null }>(
+          "select task_id, stage, fire_at, sent_at from public.reminders order by stage",
+        )
       ).rows,
     });
     const before = await snapshot();
 
     await migrate();
 
-    assert.deepEqual(await snapshot(), before);
+    // Миграция 020 строк не трогает. `migrate` катит и все следующие, а
+    // миграция 029 переносит неотправленное «в срок» дела с часом на 5 минут
+    // раньше (§6.1) — только этот сдвиг и отличает снимок.
+    const meetingDue = before.reminders.find((row) => row.stage === "due")!;
+    assert.deepEqual(await snapshot(), {
+      ...before,
+      reminders: before.reminders.map((row) =>
+        row === meetingDue ? { ...row, fire_at: new Date(utc("2030-10-04T18:55:00+05:00")) } : row,
+      ),
+    });
     assert.deepEqual(
       (await db.query<{ due_precision: string }>("select due_precision from public.tasks order by title")).rows,
       [{ due_precision: "day" }, { due_precision: "time" }],
     );
+  }));
+
+// --- Встречи: за час и за 5 минут (этап 029, §6.1) -----------------------------
+
+test("миграция встреч: неотправленное «в срок» у живого дела с часом — за 5 минут, остальное как было", () =>
+  withDatabaseBefore("20261008100000_meeting_reminders.sql", async (db, migrate) => {
+    const owner = 777;
+    const { rows: tasks } = await db.query<{ id: string; title: string }>(
+      `insert into public.tasks (owner_telegram_id, title, due_at, due_precision, status, repeat, occurrence_at)
+       values ($1, 'созвон с Игорем', '2030-10-09T15:00:00+05:00', 'time', 'active', null, null),
+              ($1, 'встреча с Олегом', '2030-10-09T12:00:00+05:00', 'time', 'active', null, null),
+              ($1, 'планёрка', '2030-10-09T10:00:00+05:00', 'time', 'active',
+                   '{"every": "day", "interval": 1, "time": "10:00"}', '2030-10-09T10:00:00+05:00'),
+              ($1, 'позвонить Игорю', '2030-10-08T16:00:00+05:00', 'time', 'active', null, null),
+              ($1, 'созвон отменился', '2030-10-09T17:00:00+05:00', 'time', 'cancelled', null, null),
+              ($1, 'купить лампочку', '2030-10-09T18:00:00+05:00', 'day', 'active', null, null),
+              ($1, 'позвонить маме', '2030-10-09T18:00:00+05:00', 'evening', 'active', null, null)
+       returning id, title`,
+      [owner],
+    );
+    const id = (title: string) => tasks.find((task) => task.title === title)!.id;
+    // «Позвонить Игорю» напомнило в срок до миграции, у «встречи с Олегом» ушло
+    // «за час»: ушедшее не переписывается.
+    await db.query(
+      `insert into public.reminders (owner_telegram_id, task_id, stage, fire_at, sent_at)
+       values ($1, $2, 'before', '2030-10-09T14:00:00+05:00', null),
+              ($1, $2, 'due', '2030-10-09T15:00:00+05:00', null),
+              ($1, $3, 'before', '2030-10-09T11:00:00+05:00', '2030-10-09T11:00:05+05:00'),
+              ($1, $3, 'due', '2030-10-09T12:00:00+05:00', null),
+              ($1, $4, 'due', '2030-10-09T10:00:00+05:00', null),
+              ($1, $5, 'due', '2030-10-08T16:00:00+05:00', '2030-10-08T16:00:05+05:00'),
+              ($1, $6, 'due', '2030-10-09T17:00:00+05:00', null),
+              ($1, $7, 'before', '2030-10-09T09:00:00+05:00', null),
+              ($1, $7, 'due', '2030-10-09T18:00:00+05:00', null),
+              ($1, $8, 'due', '2030-10-09T18:00:00+05:00', null)`,
+      [
+        owner,
+        id("созвон с Игорем"),
+        id("встреча с Олегом"),
+        id("планёрка"),
+        id("позвонить Игорю"),
+        id("созвон отменился"),
+        id("купить лампочку"),
+        id("позвонить маме"),
+      ],
+    );
+    const plan = async () =>
+      (
+        await db.query<{ title: string; stage: string; fire_at: Date; sent: boolean }>(
+          `select t.title, r.stage, r.fire_at, r.sent_at is not null as sent
+             from public.reminders r join public.tasks t on t.id = r.task_id
+            order by t.title, r.stage`,
+        )
+      ).rows.map((row): [string, string, string, boolean] => [
+        row.title,
+        row.stage,
+        row.fire_at.toISOString(),
+        row.sent,
+      ]);
+    const tasksBefore = (await db.query("select * from public.tasks order by title")).rows;
+
+    await migrate();
+
+    assert.deepEqual(await plan(), [
+      ["встреча с Олегом", "before", utc("2030-10-09T11:00:00+05:00"), true],
+      ["встреча с Олегом", "due", utc("2030-10-09T11:55:00+05:00"), false],
+      ["купить лампочку", "before", utc("2030-10-09T09:00:00+05:00"), false],
+      ["купить лампочку", "due", utc("2030-10-09T18:00:00+05:00"), false],
+      ["планёрка", "due", utc("2030-10-09T09:55:00+05:00"), false],
+      ["позвонить Игорю", "due", utc("2030-10-08T16:00:00+05:00"), true],
+      ["позвонить маме", "due", utc("2030-10-09T18:00:00+05:00"), false],
+      ["созвон отменился", "due", utc("2030-10-09T17:00:00+05:00"), false],
+      ["созвон с Игорем", "before", utc("2030-10-09T14:00:00+05:00"), false],
+      ["созвон с Игорем", "due", utc("2030-10-09T14:55:00+05:00"), false],
+    ]);
+    // Задачи не тронуты: ни срок, ни `updated_at`.
+    assert.deepEqual((await db.query("select * from public.tasks order by title")).rows, tasksBefore);
   }));
 
 test("точность — пять значений: часть дня ложится, другое — отказ", async () => {

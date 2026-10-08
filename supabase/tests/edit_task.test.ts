@@ -235,7 +235,7 @@ test("день без часа — 18:00 в поясе владельца, на�
   });
 });
 
-test("день с часом — момент со смещением, точность time, за час и в срок", async () => {
+test("день с часом — момент со смещением, точность time, за час и за 5 минут", async () => {
   await withDatabase(async (db) => {
     await saveZone(db);
     const id = await seedTask(db);
@@ -246,7 +246,7 @@ test("день с часом — момент со смещением, точн�
     assert.equal(saved?.due_precision, "time");
     assert.deepEqual(schedule(await remindersOf(db, id)), [
       ["before", "2030-10-04T09:00:00.000Z", false],
-      ["due", "2030-10-04T10:00:00.000Z", false],
+      ["due", "2030-10-04T09:55:00.000Z", false],
     ]);
   });
 });
@@ -378,7 +378,7 @@ test("тот же день у задачи с частью — тоже дело
   });
 });
 
-test("час у задачи с частью — срок со временем, за час и в срок", async () => {
+test("час у задачи с частью — срок со временем, за час и за 5 минут", async () => {
   await withDatabase(async (db) => {
     await saveZone(db);
     const id = await seedTask(db, { dueAt: FRIDAY_EARLY, precision: "morning" });
@@ -389,7 +389,7 @@ test("час у задачи с частью — срок со временем,
     assert.equal(saved?.due_precision, "time");
     assert.deepEqual(schedule(await remindersOf(db, id)), [
       ["before", "2030-10-04T04:30:00.000Z", false],
-      ["due", "2030-10-04T05:30:00.000Z", false],
+      ["due", "2030-10-04T05:25:00.000Z", false],
     ]);
   });
 });

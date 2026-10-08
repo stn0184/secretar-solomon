@@ -215,7 +215,8 @@ test("строка «Напомню» берёт ближайшее из нео�
     await move(db, id, { due_at: "2030-10-04T18:00:00+05:00" });
     assert.equal(only(await moved(db)).next_fire_at?.toISOString(), "2030-10-04T12:00:00.000Z");
 
+    // «За час» ушло — ближайшее «за 5 минут» до срока (этап 029, §6.1).
     await db.query("update public.reminders set sent_at = now() where task_id = $1 and stage = 'before'", [id]);
-    assert.equal(only(await moved(db)).next_fire_at?.toISOString(), FRIDAY_DUE);
+    assert.equal(only(await moved(db)).next_fire_at?.toISOString(), "2030-10-04T12:55:00.000Z");
   });
 });

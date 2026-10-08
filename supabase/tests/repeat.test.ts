@@ -492,9 +492,10 @@ test("чтения бота: созревшие напоминания и «Пе
 
 // --- «Сделано»: кнопка ------------------------------------------------------------
 
+// У раза с часом — за час и за 5 минут до него (этап 029, §6.1).
 const NEXT_MONDAY_SCHEDULE: [string, string, boolean][] = [
   ["before", utc("2030-10-14T09:00:00+05:00"), false],
-  ["due", utc(NEXT_MONDAY_TEN), false],
+  ["due", utc("2030-10-14T09:55:00+05:00"), false],
 ];
 
 test("кнопка со своим разом: задача на следующем разе, ступени взведены заново, пометка и вопрос на месте", () =>
@@ -663,7 +664,7 @@ test("ядро под токеном: готовый следующий раз �
 
 const NEXT_PLAN: Json[] = [
   { stage: "before", fire_at: utc("2030-10-14T09:00:00+05:00") },
-  { stage: "due", fire_at: utc(NEXT_MONDAY_TEN) },
+  { stage: "due", fire_at: utc("2030-10-14T09:55:00+05:00") },
 ];
 
 test("словом: done и skip по повторяющейся — переход с готовым разом и планом бота", () =>
@@ -876,7 +877,7 @@ test("перекатывание после простоя — сразу на �
     assert.deepEqual(occurrenceOf(await taskOf(db, id)), [friday, friday, "time"]);
     assert.deepEqual(schedule(await remindersOf(db, id)), [
       ["before", utc("2030-10-04T09:00:00+05:00"), false],
-      ["due", friday, false],
+      ["due", utc("2030-10-04T09:55:00+05:00"), false],
     ]);
     const { rows: due } = await db.query<{ task_id: string }>(
       "select task_id from public.due_reminders($1, $2::timestamptz)",
@@ -898,7 +899,7 @@ test("перекатывание: «каждый день в 00:30» начин�
     assert.deepEqual(occurrenceOf(await taskOf(db, id)), [night, night, "time"]);
     assert.deepEqual(schedule(await remindersOf(db, id)), [
       ["before", utc("2030-10-04T23:30:00+05:00"), false],
-      ["due", night, false],
+      ["due", utc("2030-10-05T00:25:00+05:00"), false],
     ]);
   }));
 
