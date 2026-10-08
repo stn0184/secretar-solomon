@@ -892,6 +892,7 @@ platform)`; `chat_sources_consent_check` — согласие и отказ вм
 | `platform` | text, тот же `check` | площадка |
 | `chat_key` | text, 1–200 знаков | ключ чата на площадке; у Telegram — id чата строкой |
 | `name` | text, `default ''` | имя собеседника или группы, последнее известное |
+| `username` | text, nullable | имя пользователя собеседника без «@» — для кнопки «Открыть чат» (§25.4); у Telegram и Instagram, обновляется с каждым сообщением; `null` — имени нет или площадка его не знает (MAX, Partner Assistant) |
 | `tracks_waiting` | boolean, `default true` | вести ли «ждёт ответа»; у чатов MAX — `false` (§27.3); ставится при заведении чата |
 | `last_message_at` | timestamptz | когда пришло последнее сообщение: по нему чат «затих» (§25.3) |
 | `last_out_at` | timestamptz, nullable | последнее сообщение владельца, время площадки |
@@ -904,7 +905,10 @@ platform)`; `chat_sources_consent_check` — согласие и отказ вм
 
 Ограничения: `chat_threads_key unique (owner_telegram_id, platform,
 chat_key)`; `chat_threads_waiting_check` — время, фраза и «кому» есть
-вместе, напомнено — только у ждущего.
+вместе, напомнено — только у ждущего; `chat_threads_username_check` — имя
+пользователя только из латиницы, цифр, `_` и `.`, до 64 знаков: его
+вставляют в ссылку. Колонка `username` — миграция 030
+(`20261008200000_chat_link.sql`).
 
 ### 3.13 `chat_messages` — сообщения чатов
 
@@ -962,7 +966,9 @@ reported_at is null and items > 0` — под тик.
 
 RLS на всех четырёх таблицах — §4.2; приложение их не читает. Функции —
 только `service_role` (`public`, `anon`, `authenticated` — `revoke`),
-миграция 025 (`20261007100000_chats.sql`); владелец — явным аргументом:
+миграция 025 (`20261007100000_chats.sql`; `store_chat_message`,
+`chat_report` и `chats_waiting` пересозданы миграцией 030
+`20261008200000_chat_link.sql`); владелец — явным аргументом:
 
 - `connect_chat_source(owner, platform, connection_id, is_enabled)` →
   `chat_sources` — заводит или обновляет площадку. Отказ, отключение и
@@ -974,11 +980,14 @@ RLS на всех четырёх таблицах — §4.2; приложени�
   или «Не надо»; решение можно поменять.
 - `store_chat_message(owner, platform, connection_id, chat_key, chat_name,
   external_id, direction, sender, sent_at, kind, message_text,
-  tracks_waiting)` → `(outcome, message_id)` — **сама проверяет
+  tracks_waiting, username)` → `(outcome, message_id)` — **сама проверяет
   подключение и согласие**: `stored`, `repeat`, `no_source`,
   `unknown_connection`, `disabled`, `no_consent`. Заводит чат; сообщение
   владельца двигает `last_out_at` и снимает «ждёт ответа», заданное не
-  позже него.
+  позже него. `username` (необязательный, миграция 030) — имя
+  пользователя собеседника: `null` — площадка его не знает, в чате
+  остаётся прежнее; пустое — имени больше нет; иначе — новое, «@»
+  снимается; негодное для ссылки — как пустое, сообщение сохраняется.
 - `set_chat_transcript(owner, message_id, transcript)` → boolean —
   расшифровка голосового, только до разбора.
 - `edit_chat_message(owner, platform, connection_id, chat_key,
@@ -998,15 +1007,16 @@ RLS на всех четырёх таблицах — §4.2; приложени�
 - `chat_failed(owner, thread_id)` → integer — неудача подряд плюс один;
   `skip_chat_messages(owner, thread_id, message_ids)` → uuid — разбор
   `skipped` без дел, пометка, `failures = 0`.
-- `chat_report(owner, analysis_id)` → `(platform, chat_name, chat_with,
-  item, task_id, title, due_at, due_precision, promise, status)` — дела
-  разбора, какими они стали сейчас; `mark_chat_report_sent(owner,
+- `chat_report(owner, analysis_id)` → `(platform, chat_key, chat_name,
+  username, chat_with, item, task_id, title, due_at, due_precision,
+  promise, status)` — дела разбора, какими они стали сейчас, и чат с
+  нынешним именем пользователя — для «Открыть чат»; `mark_chat_report_sent(owner,
   analysis_id, telegram_message_id)` → boolean.
 - `drop_chat_task(owner, analysis_id, item)` → `tasks` — «Убрать»:
   активная задача уходит в `cancelled`, неотправленные напоминания
   стираются; не активная — как есть.
-- `chats_waiting(owner, asked_before)` → `(thread_id, platform, name,
-  waiting_since, waiting_about, waiting_to)` — чаты с вопросом не позже
+- `chats_waiting(owner, asked_before)` → `(thread_id, platform, chat_key,
+  name, username, waiting_since, waiting_about, waiting_to)` — чаты с вопросом не позже
   `asked_before`, без напоминания, где владелец после вопроса не писал;
   `mark_waiting_reminded(owner, thread_id, waiting_since)` → boolean —
   только если вопрос тот же.

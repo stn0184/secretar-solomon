@@ -24,7 +24,7 @@ const SIGNATURES = [
   "public.connect_chat_source(bigint, text, text, boolean)",
   "public.mark_consent_asked(bigint, text)",
   "public.answer_consent(bigint, text, boolean)",
-  "public.store_chat_message(bigint, text, text, text, text, text, text, text, timestamptz, text, text, boolean)",
+  "public.store_chat_message(bigint, text, text, text, text, text, text, text, timestamptz, text, text, boolean, text)",
   "public.set_chat_transcript(bigint, uuid, text)",
   "public.edit_chat_message(bigint, text, text, text, text, text)",
   "public.erase_chat_messages(bigint, text, text, text, text[])",
@@ -58,6 +58,7 @@ interface Stored {
 interface Thread {
   id: string;
   name: string;
+  username: string | null;
   tracks_waiting: boolean;
   last_out_at: Date | null;
   waiting_since: Date | null;
@@ -141,11 +142,13 @@ interface Incoming {
   platform?: string;
   owner?: number;
   tracksWaiting?: boolean;
+  /** Имя пользователя собеседника; не задано — `null`: площадка его не знает. */
+  username?: string | null;
 }
 
 async function store(db: PGlite, message: Incoming): Promise<Stored> {
   const { rows } = await db.query<Stored>(
-    `select * from public.store_chat_message($1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz, $10, $11, $12)`,
+    `select * from public.store_chat_message($1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz, $10, $11, $12, $13)`,
     [
       message.owner ?? OWNER,
       message.platform ?? "telegram",
@@ -159,6 +162,7 @@ async function store(db: PGlite, message: Incoming): Promise<Stored> {
       message.kind ?? "text",
       message.text ?? "Пришлёшь расчёт?",
       message.tracksWaiting ?? true,
+      message.username ?? null,
     ],
   );
   return only(rows);
@@ -842,7 +846,9 @@ test("удачный разбор обнуляет счёт неудач", async
 
 interface ReportRow {
   platform: string;
+  chat_key: string;
   chat_name: string;
+  username: string | null;
   chat_with: string;
   item: number;
   task_id: string;
@@ -990,6 +996,84 @@ test("напоминание не берётся, если вопрос смен
       chat.id,
     ]);
     assert.equal(only(rows).ok, false);
+  });
+});
+
+// --- Имя пользователя: кнопка «Открыть чат» (этап 030) ------------------------
+
+test("имя пользователя ложится в чат без «@» и меняется со следующим сообщением", async () => {
+  await withDatabase(async (db) => {
+    await consented(db);
+    await store(db, { id: "1", username: "@igor_p" });
+    assert.equal((await thread(db)).username, "igor_p");
+
+    await store(db, { id: "2", direction: "out", username: "igor.petrov" });
+    assert.equal((await thread(db)).username, "igor.petrov", "сменил имя — в чате новое");
+  });
+});
+
+test("площадка без имени его не стирает; пустое имя — имени больше нет", async () => {
+  await withDatabase(async (db) => {
+    await consented(db);
+    await store(db, { id: "1", username: "igor_p" });
+
+    // MAX и Partner Assistant имени не знают: `null` — как было.
+    await store(db, { id: "2" });
+    assert.equal((await thread(db)).username, "igor_p");
+    // Старый вызов без имени (так зовёт `relay_chat_event`) — тот же путь.
+    await db.query(
+      `select * from public.store_chat_message($1, 'telegram', $2, $3, 'Игорь Петров', '3', 'in', 'Игорь Петров',
+                                               now(), 'text', 'Ну что?', true)`,
+      [OWNER, CONNECTION, IGOR],
+    );
+    assert.equal((await thread(db)).username, "igor_p");
+
+    await store(db, { id: "4", username: "" });
+    assert.equal((await thread(db)).username, null, "убрал имя в Telegram — ссылки по нему нет");
+  });
+});
+
+test("имя, негодное для ссылки, не хранится, а сообщение сохраняется", async () => {
+  await withDatabase(async (db) => {
+    await consented(db);
+    const stored = await store(db, { id: "1", username: "igor/../x?y=1" });
+    assert.equal(stored.outcome, "stored");
+    assert.equal((await thread(db)).username, null);
+    await assert.rejects(
+      db.query("update public.chat_threads set username = 'igor p'"),
+      /chat_threads_username_check/,
+    );
+  });
+});
+
+test("отчёт и «ждёт ответа» отдают ключ чата и имя пользователя — для «Открыть чат»", async () => {
+  await withDatabase(async (db) => {
+    await consented(db);
+    const question = await store(db, { id: "1", sentAt: minutesFromNow(-200), username: "igor_p" });
+    const chat = await thread(db);
+    const analysisId = (await record(db, {
+      threadId: chat.id,
+      messageIds: [question.message_id!],
+      tasks: [deal(1, "прислать Игорю расчёт")],
+      waiting: { ...IGOR_ASKED, since: minutesFromNow(-200) },
+    }))!;
+
+    const [line] = await report(db, analysisId);
+    assert.deepEqual([line?.chat_key, line?.username], [IGOR, "igor_p"]);
+
+    // Имя сменилось после разбора — отчёт после «Убрать» берёт новое.
+    await store(db, { id: "2", username: "igor_new", sentAt: minutesFromNow(-190) });
+    const [again] = await report(db, analysisId);
+    assert.equal(again?.username, "igor_new");
+
+    const { rows } = await db.query<{ chat_key: string; username: string | null }>(
+      "select * from public.chats_waiting($1, now() - interval '3 hours')",
+      [OWNER],
+    );
+    assert.deepEqual(
+      rows.map((row) => [row.chat_key, row.username]),
+      [[IGOR, "igor_new"]],
+    );
   });
 });
 
