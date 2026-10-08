@@ -267,6 +267,7 @@ async def test_store_sends_every_field_and_reads_the_outcome() -> None:
         sent_at=NOW,
         kind="text",
         text="Пришлёшь расчёт?",
+        username="igor_p",
     )
 
     assert stored == Stored(outcome="stored", message_id=MESSAGE_ID)
@@ -284,8 +285,43 @@ async def test_store_sends_every_field_and_reads_the_outcome() -> None:
             "kind": "text",
             "message_text": "Пришлёшь расчёт?",
             "tracks_waiting": True,
+            "username": "igor_p",
         }
     ]
+
+
+async def test_store_without_a_username_sends_null_to_keep_the_known_one() -> None:
+    """MAX и Partner Assistant имени не знают: `null` — в чате остаётся прежнее
+    (`techspec/03-schema.md` §3.15)."""
+    client = rpc({"store_chat_message": [{"outcome": "stored", "message_id": MESSAGE_ID}]})
+
+    await db_chats.store_chat_message(
+        cast(Client, client),
+        owner_telegram_id=OWNER_ID,
+        platform="max",
+        connection_id=None,
+        chat_key="notes",
+        chat_name="MAX: заметки",
+        external_id="mid-1",
+        direction="out",
+        sender="Вы",
+        sent_at=NOW,
+        kind="text",
+        text="Позвонить Олегу",
+        tracks_waiting=False,
+    )
+
+    assert client.params[0]["username"] is None
+
+
+async def test_database_store_passes_the_username_of_the_message() -> None:
+    client = rpc({"store_chat_message": [{"outcome": "stored", "message_id": MESSAGE_ID}]})
+    store = chats.DatabaseChatStore(make_settings(), cast(Client, client))
+
+    await store.store(incoming(username="igor_p"))
+
+    assert client.params[0]["username"] == "igor_p"
+    assert client.params[0]["owner_telegram_id"] == OWNER_ID
 
 
 @pytest.mark.parametrize(
@@ -716,8 +752,11 @@ def business_message(
     sticker: bool = False,
     by_bot: bool = False,
     offline: bool | None = None,
+    username: str | None = None,
 ) -> Message:
-    """Сообщение личного чата владельца с Игорем — как его приносит Telegram."""
+    """Сообщение личного чата владельца с Игорем — как его приносит Telegram.
+
+    `username` — имя пользователя Игоря: в личном чате оно у `chat`."""
     author = (
         User(id=OWNER_ID, is_bot=False, first_name="Тим")
         if from_id == OWNER_ID
@@ -726,7 +765,13 @@ def business_message(
     return Message(
         message_id=message_id,
         date=SENT,
-        chat=Chat(id=IGOR_ID, type="private", first_name="Игорь", last_name="Петров"),
+        chat=Chat(
+            id=IGOR_ID,
+            type="private",
+            first_name="Игорь",
+            last_name="Петров",
+            username=username,
+        ),
         from_user=author,
         business_connection_id=connection,
         text=text,
@@ -772,7 +817,20 @@ def test_message_from_the_interlocutor_is_incoming() -> None:
         sent_at=SENT,
         kind="text",
         text="Пришлёшь расчёт в пятницу?",
+        username="",
     )
+
+
+def test_username_of_the_interlocutor_goes_with_every_message() -> None:
+    """Имя пользователя — у `chat`, и у сообщения владельца тоже: им строится
+    «Открыть чат» (§25.4). Нет имени — пустое: ссылки по имени больше нет."""
+    his = handlers.chat_message_of(business_message(username="igor_p"), OWNER_ID)
+    mine = handlers.chat_message_of(
+        business_message("Да", from_id=OWNER_ID, username="igor_p"), OWNER_ID
+    )
+
+    assert his is not None and mine is not None
+    assert (his.username, mine.username) == ("igor_p", "igor_p")
 
 
 def test_message_of_the_owner_is_outgoing_in_the_same_chat() -> None:
@@ -988,6 +1046,7 @@ class FakeChatStore:
                 "platform": incoming.platform,
                 "chat_key": incoming.chat_key,
                 "name": incoming.chat_name,
+                "username": None,
                 "tracks_waiting": incoming.tracks_waiting,
                 "last_message_at": self.now,
                 "last_out_at": None,
@@ -999,6 +1058,9 @@ class FakeChatStore:
             },
         )
         thread["name"] = incoming.chat_name or thread["name"]
+        # Имя пользователя (§3.15): `None` — площадка не знает, пустое — нет.
+        if incoming.username is not None:
+            thread["username"] = incoming.username.lstrip("@") or None
         for message in self.messages:
             if (
                 message["thread_id"] == thread["id"]
@@ -1373,6 +1435,7 @@ def incoming(
     connection: str | None = CONNECTION,
     chat_key: str = IGOR_CHAT,
     name: str = "Игорь Петров",
+    username: str | None = None,
 ) -> Incoming:
     return Incoming(
         platform="telegram",
@@ -1385,6 +1448,7 @@ def incoming(
         sent_at=sent_at,
         kind=cast(Any, kind),
         text=text,
+        username=username,
     )
 
 
@@ -1695,6 +1759,25 @@ async def test_business_message_is_stored_silently(bot: Bot, session: RecordingS
         ("out", "Да, пришлю"),
     ]
     assert session.sent == [], "ни ответа в чат, ни «чужим сюда нельзя»"
+
+
+async def test_new_username_of_the_interlocutor_replaces_the_old_one(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Имя пользователя в Telegram можно сменить: чат помнит последнее (§25.4)."""
+    store = FakeChatStore()
+    store.consent()
+    dispatcher = build_dispatcher(
+        make_settings(), chats=chat_service(store, sender=telegram_sender(bot))
+    )
+
+    await dispatcher.feed_update(bot, business_update(business_message(username="igor_p")))
+    assert store.thread()["username"] == "igor_p"
+    renamed = business_message("Ну что?", message_id=43, username="igor_new")
+    await dispatcher.feed_update(bot, business_update(renamed, 2))
+
+    assert store.thread()["username"] == "igor_new"
+    assert session.sent == []
 
 
 async def test_business_message_before_consent_is_lost_silently(

@@ -312,6 +312,7 @@ def test_forwarded_message_is_a_line_of_the_original_chat() -> None:
     )
     assert line.sent_at == message.sent_at
     assert line.tracks_waiting is False
+    assert line.username is None, "у пересланного нет надёжной ссылки — «Открыть чат» нет"
 
 
 def test_forwarded_own_message_is_your_line_in_the_same_chat() -> None:

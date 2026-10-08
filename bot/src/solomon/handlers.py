@@ -793,6 +793,10 @@ def chat_message_of(message: Message, owner_telegram_id: int) -> Incoming | None
     другим ботом от имени владельца (`sender_business_bot`) и автоматическое
     (`is_from_offline`: автоответ, приветствие, отложенное) — пропуск: это
     не владелец ответил. Без подключения — не бизнес-сообщение.
+
+    Имя пользователя собеседника — тоже у `chat`, с каждым сообщением: его
+    можно сменить или убрать, а по нему строится «Открыть чат» (§25.4).
+    Нет имени — пустое: прежнее в чате стирается.
     """
     connection = message.business_connection_id
     if connection is None or message.sender_business_bot is not None or message.is_from_offline:
@@ -813,6 +817,7 @@ def chat_message_of(message: Message, owner_telegram_id: int) -> Incoming | None
         kind=kind,
         text=text,
         file_id=file_id,
+        username=message.chat.username or "",
     )
 
 

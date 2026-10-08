@@ -116,7 +116,9 @@ class Incoming:
     `direction` — `out` у сообщения владельца. У голосового и кружка `text`
     пуст, а `file_id` — файл, который расшифрует Deepgram (§25.2).
     `tracks_waiting` — вести ли у чата «ждёт ответа»: у MAX — нет (§27.3);
-    ставится, когда чат заводится.
+    ставится, когда чат заводится. `username` — имя пользователя собеседника
+    для «Открыть чат» (§25.4): у Telegram пустое — имени нет; `None` —
+    площадка его не знает (MAX), и в чате остаётся прежнее.
     """
 
     platform: Platform
@@ -131,6 +133,7 @@ class Incoming:
     text: str
     file_id: str | None = None
     tracks_waiting: bool = True
+    username: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -727,6 +730,7 @@ class DatabaseChatStore:
             kind=incoming.kind,
             text=incoming.text,
             tracks_waiting=incoming.tracks_waiting,
+            username=incoming.username,
         )
 
     async def set_transcript(self, message_id: str, transcript: str) -> bool:

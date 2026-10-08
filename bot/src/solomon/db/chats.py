@@ -336,9 +336,14 @@ async def store_chat_message(
     kind: ChatKind,
     text: str,
     tracks_waiting: bool = True,
+    username: str | None = None,
 ) -> Stored:
     """Сообщение чата в базу (§25.1). Подключение и согласие сверяет база:
-    без них ничего не пишется, и ответ говорит почему."""
+    без них ничего не пишется, и ответ говорит почему.
+
+    `username` — имя пользователя собеседника для «Открыть чат» (§3.15):
+    `None` — площадка его не знает, и в чате остаётся прежнее; пустое —
+    имени больше нет."""
     params = {
         "owner_telegram_id": owner_telegram_id,
         "platform": platform,
@@ -352,6 +357,7 @@ async def store_chat_message(
         "kind": kind,
         "message_text": text,
         "tracks_waiting": tracks_waiting,
+        "username": username,
     }
     data = await ask(lambda: db.rpc(STORE_FUNCTION, params).execute().data)
     row = single_row(data)

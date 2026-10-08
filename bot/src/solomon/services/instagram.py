@@ -308,7 +308,10 @@ def _handle(username: str) -> str:
 def to_incoming(message: DirectMessage, conversation_id: str, account: Account) -> Incoming | None:
     """Сообщение Direct в общий путь (§26.3): от бизнес-аккаунта — `out`, иначе
     `in`; чат — разговор, имя — `@username` собеседника. Ответ на историю и
-    групповой разговор — `None`: их Соломон не читает (§26.4)."""
+    групповой разговор — `None`: их Соломон не читает (§26.4).
+
+    `username` без «@» — для «Открыть чат» в Direct (§25.4); Meta его не
+    назвала — `None`: в чате остаётся прежнее."""
     if message.story or len(message.recipients) > 1:
         return None
     mine = message.sender_id == account.user_id or (
@@ -337,6 +340,7 @@ def to_incoming(message: DirectMessage, conversation_id: str, account: Account) 
         kind=kind,
         text=text,
         file_id=attachment.url if attachment is not None and kind == "voice" else None,
+        username=counterpart or None,
     )
 
 

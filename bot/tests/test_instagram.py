@@ -303,6 +303,7 @@ def test_message_of_the_interlocutor_is_in_with_his_username() -> None:
     assert incoming.external_id == "m_1"
     assert incoming.sent_at == NOW - timedelta(minutes=30)
     assert incoming.tracks_waiting is True
+    assert incoming.username == "oleg", "по нему «Открыть чат» ведёт в Direct"
 
 
 def test_message_of_the_business_account_is_out() -> None:
@@ -311,6 +312,18 @@ def test_message_of_the_business_account_is_out() -> None:
     assert incoming is not None
     assert incoming.direction == "out"
     assert incoming.chat_name == "@oleg"
+    assert incoming.username == "oleg"
+
+
+def test_message_without_the_username_of_the_interlocutor_keeps_the_known_one() -> None:
+    """Meta не назвала имя — `None`: площадка его не знает, в чате остаётся
+    прежнее (§3.15), а не стирается."""
+    message = replace(direct(), sender_name="")
+
+    incoming = instagram.to_incoming(message, CONVERSATION, BUSINESS)
+
+    assert incoming is not None
+    assert incoming.username is None
 
 
 def test_owner_is_recognised_by_username_if_the_id_differs() -> None:
