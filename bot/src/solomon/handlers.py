@@ -77,7 +77,10 @@ def parse_done(data: str) -> tuple[str, int | None] | None:
 
 
 def done_keyboard(task_id: str, occurrence: int | None = None) -> InlineKeyboardMarkup:
-    """Одна кнопка «Сделано» под напоминанием."""
+    """Одна кнопка «Сделано» под напоминанием о деле без часа и под вопросом о деле.
+
+    Под напоминанием о встрече с часом её нет — решает сервис (§6.3).
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
