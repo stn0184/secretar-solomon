@@ -371,13 +371,18 @@ class FakeNotifier:
         self.sent: list[tuple[str, str]] = []
         # Раз повторяющейся задачи для кнопки «Сделано» — по отправке (§13.3).
         self.occurrences: list[int | None] = []
+        # Есть ли под сообщением кнопка «Сделано» — по отправке (этап 029, §6.3).
+        self.buttons: list[bool] = []
         self.events = events if events is not None else []
 
-    async def __call__(self, *, text: str, task_id: str, occurrence: int | None = None) -> int:
+    async def __call__(
+        self, *, text: str, task_id: str, occurrence: int | None = None, button: bool = True
+    ) -> int:
         if self.broken:
             raise RuntimeError("Telegram: Bad Gateway")
         self.sent.append((task_id, text))
         self.occurrences.append(occurrence)
+        self.buttons.append(button)
         self.events.append("reminder")
         return 40 + len(self.sent)
 
@@ -493,6 +498,7 @@ async def test_ripe_reminder_is_sent_and_marked() -> None:
     task_id, text = notifier.sent[0]
     assert task_id == "0e2f"
     assert text == "Напоминаю: отправить расчёт\nСрок: сегодня"
+    assert notifier.buttons == [True]
     assert marks.calls == [(OWNER_ID, ["0e2f-due"], 41)]
 
 
@@ -701,6 +707,110 @@ async def test_reminder_goes_to_the_owner_with_the_button(
         "mark_reminders_sent",
         "moved_tasks",
     ]
+
+
+# Встреча — дело с часом — напоминает без кнопки «Сделано»: «это просто
+# напоминание» (этап 029, `techspec/06-reminders.md` §6.3).
+
+MEETING = datetime(2026, 9, 25, 15, 0, tzinfo=TZ)
+
+
+@pytest.mark.parametrize(
+    ("stage", "fire_at"),
+    [("before", MEETING.replace(hour=14)), ("due", MEETING.replace(hour=14, minute=55))],
+    ids=["hour-before", "five-minutes-before"],
+)
+async def test_reminder_of_a_task_with_an_hour_goes_without_the_button(
+    stage: str, fire_at: datetime
+) -> None:
+    """За час и за 5 минут до встречи — текст тот же, кнопки нет."""
+    ripe = [make_due(stage, fire_at, title="созвон с Игорем", due_at=MEETING, due_precision="time")]
+    service, _, marks, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick(fire_at) == 1
+    assert notifier.sent == [("0e2f", "Напоминаю: созвон с Игорем\nСрок: сегодня, 15:00")]
+    assert notifier.buttons == [False]
+    assert marks.calls == [(OWNER_ID, [f"0e2f-{stage}"], 41)]
+
+
+async def test_catch_up_reminder_of_a_meeting_goes_without_the_button() -> None:
+    """Бот лежал: созрели обе ступени встречи — одно сообщение, и тоже без кнопки."""
+    ripe = [
+        make_due("before", MEETING.replace(hour=14), due_at=MEETING, due_precision="time"),
+        make_due("due", MEETING.replace(hour=14, minute=55), due_at=MEETING, due_precision="time"),
+    ]
+    service, _, marks, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick(MEETING.replace(hour=16)) == 1
+    assert notifier.sent == [("0e2f", "Напоминаю: отправить расчёт\nСрок был: сегодня, 15:00")]
+    assert notifier.buttons == [False]
+    assert marks.calls == [(OWNER_ID, ["0e2f-before", "0e2f-due"], 41)]
+
+
+async def test_reminder_of_a_repeated_meeting_goes_without_the_button() -> None:
+    """Повторяющаяся встреча — тоже дело с часом: напоминание без кнопки."""
+    ripe = [
+        make_due(
+            "due",
+            MEETING.replace(hour=14, minute=55),
+            title="планёрка",
+            due_at=MEETING,
+            due_precision="time",
+            repeat={"every": "week", "interval": 1, "weekdays": [5], "time": "15:00"},
+            occurrence_at=MEETING,
+        )
+    ]
+    service, _, _, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick(MEETING.replace(hour=14, minute=55)) == 1
+    assert notifier.buttons == [False]
+
+
+@pytest.mark.parametrize(
+    ("precision", "due_at"),
+    [
+        ("day", FRIDAY_END_OF_DAY),
+        (None, FRIDAY_END_OF_DAY),
+        ("morning", FRIDAY_END_OF_DAY.replace(hour=8)),
+        ("afternoon", FRIDAY_END_OF_DAY.replace(hour=12)),
+        ("evening", FRIDAY_END_OF_DAY),
+    ],
+)
+async def test_reminder_of_a_task_without_an_hour_keeps_the_button(
+    precision: str | None, due_at: datetime
+) -> None:
+    """Дело на день и часть дня — «Сделано», как раньше: «купить лампочку»."""
+    ripe = [
+        make_due("due", due_at, title="купить лампочку", due_at=due_at, due_precision=precision)
+    ]
+    service, _, _, notifier = build_reminders(due=FakeDue(ripe))
+
+    assert await service.tick(due_at) == 1
+    assert notifier.buttons == [True]
+
+
+async def test_meeting_reminder_goes_to_the_owner_without_a_keyboard(
+    bot: Bot, session: RecordingSession
+) -> None:
+    """Сборка из `runner.py`: напоминание о встрече уходит без клавиатуры."""
+    row: dict[str, object] = {
+        "id": "b17c",
+        "task_id": "0e2f",
+        "stage": "due",
+        "fire_at": MEETING.replace(hour=14, minute=55).isoformat(),
+        "title": "созвон с Игорем",
+        "due_at": MEETING.isoformat(),
+        "due_precision": "time",
+    }
+    client = FakeRpcClient({"due_reminders": [row]})
+    service = build_reminders_service(make_settings(), cast(Client, client), bot)
+
+    assert await service.tick(MEETING.replace(hour=14, minute=55)) == 1
+    sent = session.sent[0]
+    assert isinstance(sent, SendMessage)
+    assert sent.chat_id == OWNER_ID
+    assert sent.text == "Напоминаю: созвон с Игорем\nСрок: сегодня, 15:00"
+    assert sent.reply_markup is None
 
 
 async def test_late_reminder_does_not_age_the_due_date() -> None:
@@ -1817,7 +1927,10 @@ async def test_morning_plan_goes_to_the_owner_without_a_button(
     assert plan.text == PLAN_TEXT
     assert plan.reply_markup is None
     assert isinstance(reminder, SendMessage)
-    assert isinstance(reminder.reply_markup, InlineKeyboardMarkup)
+    # Следом — напоминание о встрече за час; у дела с часом оно тоже без
+    # кнопки (этап 029, §6.3).
+    assert reminder.text == "Напоминаю: встреча с Ольгой\nСрок: сегодня, 09:00"
+    assert reminder.reply_markup is None
     # Прошедших дел нет: план без абзаца, записывать вопрос нечего (§22.4).
     assert client.calls == [
         "roll_repeats",
@@ -1967,8 +2080,10 @@ async def test_overdue_question_is_sent_with_the_button_and_then_recorded() -> N
     assert await service.tick(MONDAY_AFTERNOON) == 1
     assert finder.calls == [(OWNER_ID, overdue.step_bounds(MONDAY_AFTERNOON, TZ))]
     assert notifier.sent == [(OVERDUE_ID, QUESTION_YESTERDAY)]
-    # Кнопка «Сделано» — та же, что под напоминанием; задача разовая.
+    # Кнопка «Сделано» — та же, что под напоминанием; задача разовая. Это
+    # вопрос, а не напоминание: кнопка есть и у дела с часом (этап 029).
     assert notifier.occurrences == [None]
+    assert notifier.buttons == [True]
     assert events == ["reminder", "record_overdue"]
     assert recorder.calls == [
         {

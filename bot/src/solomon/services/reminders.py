@@ -157,14 +157,28 @@ def past_due(due_at: datetime, precision: str | None, now: datetime, timezone: t
     return due_at.astimezone(timezone).date() < now.astimezone(timezone).date()
 
 
+def carries_done(precision: str | None) -> bool:
+    """Есть ли под напоминанием кнопка «Сделано» (§6.3, этап 029).
+
+    Только у дела без часа — на день или на часть дня. О встрече с часом
+    напоминание — «это просто напоминание», без кнопки. Пустая точность
+    читается как день (§6.1).
+    """
+    return precision != TIME_PRECISION
+
+
 class Notifier(Protocol):
     """Отправка напоминания владельцу. Возвращает id сообщения в Telegram.
 
     `occurrence` — раз повторяющейся задачи в секундах Unix: он уезжает в
-    кнопку «Сделано» (§13.3); у разовой его нет.
+    кнопку «Сделано» (§13.3); у разовой его нет. `button` — ставить ли эту
+    кнопку: под напоминанием о деле с часом её нет (`carries_done`), под
+    вопросами о деле (§19, §22) — есть всегда.
     """
 
-    async def __call__(self, *, text: str, task_id: str, occurrence: int | None = None) -> int: ...
+    async def __call__(
+        self, *, text: str, task_id: str, occurrence: int | None = None, button: bool = True
+    ) -> int: ...
 
 
 class DueLister(Protocol):
@@ -869,7 +883,9 @@ class ReminderService:
         """Одна задача — одно сообщение, и только потом отметка.
 
         Упало между отправкой и отметкой — следующий тик постучится второй
-        раз: дубль лучше потерянного напоминания (инвариант 5).
+        раз: дубль лучше потерянного напоминания (инвариант 5). Кнопка
+        «Сделано» — только у дела без часа (`carries_done`), и у догнавшего
+        после простоя тоже.
         """
         speaker = latest(group)
         occurrence = None
@@ -877,7 +893,10 @@ class ReminderService:
             occurrence = occurrence_seconds(speaker.occurrence_at)
         try:
             message_id = await self._notify(
-                text=self._text_for(speaker, now), task_id=task_id, occurrence=occurrence
+                text=self._text_for(speaker, now),
+                task_id=task_id,
+                occurrence=occurrence,
+                button=carries_done(speaker.due_precision),
             )
         except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
             # Не ушло — sent_at не ставим, и следующий тик попробует снова.

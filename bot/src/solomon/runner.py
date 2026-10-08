@@ -145,14 +145,18 @@ def build_reminders(
     с id пользователя, других чатов у помощника нет. Строка «Перенёс»
     (`techspec/11-edit.md` §11.4) уходит своим замыканием — без кнопки:
     это не напоминание. Шаг тика о поисках (§24.3) — `searches`, о личных
-    чатах (§25) — `chats`, опрос Direct (§26) — `instagram`.
+    чатах (§25) — `chats`, опрос Direct (§26) — `instagram`. Ставить ли
+    кнопку «Сделано», решает сервис (`button`): о встрече с часом
+    напоминание уходит без неё (§6.3).
     """
 
-    async def notify(*, text: str, task_id: str, occurrence: int | None = None) -> int:
+    async def notify(
+        *, text: str, task_id: str, occurrence: int | None = None, button: bool = True
+    ) -> int:
         message = await bot.send_message(
             chat_id=settings.owner_telegram_id,
             text=text,
-            reply_markup=handlers.done_keyboard(task_id, occurrence),
+            reply_markup=handlers.done_keyboard(task_id, occurrence) if button else None,
         )
         return message.message_id
 
