@@ -147,6 +147,43 @@ async def test_confirmation_says_today_when_the_reminder_is_today() -> None:
     assert [row["stage"] for row in rows] == ["due"]
 
 
+async def test_meeting_confirmation_names_an_hour_before() -> None:
+    """Встреча с часом (этап 029): ближайшее — за час; «за 5 минут» тоже в базе."""
+    meeting = FRIDAY_END_OF_DAY.replace(hour=15)
+    hour_before = meeting.replace(hour=14)
+    five_before = meeting.replace(hour=14, minute=55)
+    message, rows, _ = await record(
+        make_understanding(title="созвон с Игорем", due_at=meeting, due_precision="time"),
+        MONDAY_MORNING,
+        FakePlanner(
+            [
+                Planned(stage="before", fire_at=hour_before),
+                Planned(stage="due", fire_at=five_before),
+            ]
+        ),
+    )
+
+    assert "Напомню: 25 сентября в 14:00" in message
+    assert rows == [
+        {"stage": "before", "fire_at": hour_before.isoformat()},
+        {"stage": "due", "fire_at": five_before.isoformat()},
+    ]
+
+
+async def test_meeting_within_the_hour_names_five_minutes_before() -> None:
+    """«В 15:00» сказано в 14:30: час прошёл — «Напомню» называет 14:55 (§6.4)."""
+    meeting = MONDAY_MORNING.replace(hour=15)
+    five_before = meeting.replace(hour=14, minute=55)
+    message, rows, _ = await record(
+        make_understanding(title="созвон с Игорем", due_at=meeting, due_precision="time"),
+        MONDAY_MORNING.replace(hour=14, minute=30),
+        FakePlanner([Planned(stage="due", fire_at=five_before)]),
+    )
+
+    assert "Напомню: сегодня в 14:55" in message
+    assert rows == [{"stage": "due", "fire_at": five_before.isoformat()}]
+
+
 async def test_moment_from_the_database_is_named_in_the_owner_zone() -> None:
     """База отдаёт момент в UTC — «Напомню» звучит по часам владельца."""
     morning_utc = FRIDAY_END_OF_DAY.replace(hour=9).astimezone(ZoneInfo("UTC"))
