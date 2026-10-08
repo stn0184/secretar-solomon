@@ -869,6 +869,11 @@ async def test_direct_deal_reaches_the_owner_marked_instagram(tmp_path: Path) ->
         "Из переписки с @oleg (Instagram) записал: "
         "прислать Олегу расчёт — пятница, 9 октября (вы обещали)"
     ]
+    [(_, buttons)] = direct_.sender.sent
+    assert [(button.text, button.url) for button in buttons] == [
+        ("Убрать", None),
+        ("Открыть чат", "https://ig.me/m/oleg"),
+    ], "приёмка 4 этапа 030: «Открыть чат» ведёт в Direct с этим человеком"
     assert [message["direction"] for message in direct_.store.messages] == ["in", "out"]
     [(_, text)] = call.calls
     assert "Переписка в Instagram, чат «@oleg»." in text
@@ -890,6 +895,10 @@ async def test_unanswered_direct_question_is_reminded_with_instagram(tmp_path: P
     assert reminded == 1
     assert direct_.sender.texts == [
         "Вы не ответили @oleg (Instagram) — он спрашивал, во сколько созвон."
+    ]
+    [(_, buttons)] = direct_.sender.sent
+    assert [(button.text, button.url) for button in buttons] == [
+        ("Открыть чат", "https://ig.me/m/oleg")
     ]
 
 

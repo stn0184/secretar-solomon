@@ -1091,7 +1091,7 @@ async def test_forwarded_deal_reaches_the_owner_marked_max() -> None:
         "Из переписки с Игорем (MAX) записал: прислать Игорю расчёт — пятница, 9 октября "
         "(вы обещали)"
     )
-    assert [button.text for button in buttons] == ["Убрать"]
+    assert [button.text for button in buttons] == ["Убрать"], "у MAX «Открыть чат» нет"
     assert bot.max.sent == [(OWNER_MAX, "Принял, итог пришлю в Telegram.")], "в MAX — одно «Принял»"
     [(_, prompt)] = call.calls
     assert "Переписка в MAX, чат «Игорь Петров»." in prompt

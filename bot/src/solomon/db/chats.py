@@ -116,21 +116,30 @@ class ReportLine:
 
 @dataclass(frozen=True, slots=True)
 class ChatReport:
-    """Сообщение о разборе: площадка, имя чата, «с кем» и дела по номерам."""
+    """Сообщение о разборе: площадка, чат, «с кем» и дела по номерам.
+
+    `chat_key` и `username` — ключ чата и нынешнее имя пользователя
+    собеседника: из них строится «Открыть чат» (§25.4).
+    """
 
     platform: Platform
+    chat_key: str
     chat_name: str
+    username: str | None
     chat_with: str | None
     lines: tuple[ReportLine, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class WaitingChat:
-    """Чат, где владелец не ответил (§25.4): с какого времени, о чём, кому."""
+    """Чат, где владелец не ответил (§25.4): с какого времени, о чём, кому —
+    и ключ чата с именем пользователя для «Открыть чат»."""
 
     thread_id: str
     platform: Platform
+    chat_key: str
     name: str
+    username: str | None
     since: datetime
     about: str
     to: str
@@ -606,7 +615,9 @@ async def chat_report(db: Client, *, owner_telegram_id: int, analysis_id: str) -
     first = rows[0]
     return ChatReport(
         platform=_platform(first.get("platform")),
+        chat_key=str(first.get("chat_key") or ""),
         chat_name=str(first.get("chat_name") or ""),
+        username=_optional_text(first.get("username")),
         chat_with=_optional_text(first.get("chat_with")),
         lines=tuple(lines),
     )
@@ -657,7 +668,9 @@ async def chats_waiting(
                 WaitingChat(
                     thread_id=str(row["thread_id"]),
                     platform=_platform(row["platform"]),
+                    chat_key=str(row["chat_key"] or ""),
                     name=str(row["name"] or ""),
+                    username=_optional_text(row["username"]),
                     since=moment(row["waiting_since"], "waiting_since"),
                     about=str(about),
                     to=str(to),

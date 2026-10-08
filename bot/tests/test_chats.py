@@ -19,8 +19,8 @@ from zoneinfo import ZoneInfo
 import httpx2
 import pytest
 from aiogram import Bot
-from aiogram.exceptions import TelegramNetworkError
-from aiogram.methods import SendMessage
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
+from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.types import (
     BusinessConnection,
     BusinessMessagesDeleted,
@@ -52,7 +52,7 @@ from solomon.db.chats import (
 from solomon.db.facts import Fact
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
-from solomon.runner import build_dispatcher
+from solomon.runner import build_dispatcher, owner_sender
 from solomon.services import chats
 from solomon.services.batches import Line, render_line
 from solomon.services.chats import (
@@ -70,6 +70,7 @@ from solomon.services.understanding import OpenTask, create_anthropic_client
 from tests.conftest import (
     OWNER_ID,
     OWNER_TIMEZONE,
+    TEST_TOKEN,
     FakePlanner,
     FakeTranscriber,
     RecordingSession,
@@ -138,7 +139,9 @@ def message_row(**changes: object) -> dict[str, object]:
 def report_row(**changes: object) -> dict[str, object]:
     row: dict[str, object] = {
         "platform": "telegram",
+        "chat_key": IGOR_CHAT,
         "chat_name": "Игорь Петров",
+        "username": "igor_p",
         "chat_with": "Игорем",
         "item": 1,
         "task_id": TASK_ID,
@@ -570,7 +573,9 @@ async def test_report_reads_the_lines_and_the_chat() -> None:
 
     assert found == ChatReport(
         platform="telegram",
+        chat_key=IGOR_CHAT,
         chat_name="Игорь Петров",
+        username="igor_p",
         chat_with="Игорем",
         lines=(
             ReportLine(
@@ -593,6 +598,17 @@ async def test_report_reads_the_lines_and_the_chat() -> None:
             ),
         ),
     )
+
+
+async def test_report_of_a_chat_without_a_username_has_none() -> None:
+    client = rpc({"chat_report": [report_row(username=None)]})
+
+    found = await db_chats.chat_report(
+        cast(Client, client), owner_telegram_id=OWNER_ID, analysis_id=ANALYSIS_ID
+    )
+
+    assert found is not None
+    assert (found.chat_key, found.username) == (IGOR_CHAT, None)
 
 
 async def test_report_without_lines_is_none() -> None:
@@ -645,7 +661,9 @@ async def test_waiting_chats_are_read_whole() -> None:
                 {
                     "thread_id": THREAD_ID,
                     "platform": "telegram",
+                    "chat_key": IGOR_CHAT,
                     "name": "Игорь Петров",
+                    "username": "igor_p",
                     "waiting_since": "2026-10-07T05:00:00+00:00",
                     "waiting_about": "он спрашивал, во сколько созвон",
                     "waiting_to": "Игорю",
@@ -662,7 +680,9 @@ async def test_waiting_chats_are_read_whole() -> None:
         WaitingChat(
             thread_id=THREAD_ID,
             platform="telegram",
+            chat_key=IGOR_CHAT,
             name="Игорь Петров",
+            username="igor_p",
             since=datetime(2026, 10, 7, 10, 0, tzinfo=TZ),
             about="он спрашивал, во сколько созвон",
             to="Игорю",
@@ -1315,7 +1335,9 @@ class FakeChatStore:
             return None
         return ChatReport(
             platform=thread["platform"],
+            chat_key=thread["chat_key"],
             chat_name=thread["name"],
+            username=thread["username"],
             chat_with=analysis["chat_with"],
             lines=tuple(lines),
         )
@@ -1343,7 +1365,9 @@ class FakeChatStore:
             WaitingChat(
                 thread_id=thread["id"],
                 platform=thread["platform"],
+                chat_key=thread["chat_key"],
                 name=thread["name"],
+                username=thread["username"],
                 since=thread["waiting_since"],
                 about=thread["waiting_about"],
                 to=thread["waiting_to"],
@@ -1698,16 +1722,9 @@ def connection_update(user_id: int = OWNER_ID, enabled: bool = True, update_id: 
 
 
 def telegram_sender(bot: Bot) -> OwnerSender:
-    """Отправка владельцу через подменённую сессию — как в сборке
+    """Отправка владельцу через подменённую сессию — та же, что в сборке
     (`runner.build_chats`)."""
-
-    async def send(*, text: str, buttons: Sequence[Button] = ()) -> int:
-        message = await bot.send_message(
-            chat_id=OWNER_ID, text=text, reply_markup=handlers.keyboard(buttons)
-        )
-        return message.message_id
-
-    return send
+    return owner_sender(make_settings(), bot)
 
 
 def nothing_to_business_chats(session: RecordingSession) -> None:
@@ -2244,7 +2261,7 @@ def analyzing_service(
     at: datetime = QUIET_LATER,
     planner: FakePlanner | None = None,
     tasks: Sequence[OpenTask] = (),
-    sender: FakeSender | None = None,
+    sender: OwnerSender | None = None,
 ) -> ChatService:
     async def open_tasks() -> Sequence[OpenTask]:
         return tasks
@@ -2272,6 +2289,7 @@ async def igor_said(store: FakeChatStore, *lines: tuple[str, str]) -> None:
                 external_id=str(100 + index),
                 direction=direction,
                 sent_at=MORNING + timedelta(minutes=index),
+                username="igor_p",
             )
         )
 
@@ -2668,10 +2686,63 @@ def test_crooked_drop_data_is_none(data: str) -> None:
     assert chats.parse_drop(data) is None
 
 
-def report_of(*lines: ReportLine, chat_with: str | None = "Игорем") -> ChatReport:
+INSTAGRAM_CHAT = "aWdfZAG06MTpJR01lc3NhZA2VUaHJlYWQ6oleg"
+
+
+@pytest.mark.parametrize(
+    ("platform", "chat_key", "username", "link"),
+    [
+        # Telegram: есть имя — t.me; нет — профиль по id чата (он же id собеседника).
+        ("telegram", IGOR_CHAT, "igor_p", "https://t.me/igor_p"),
+        ("telegram", IGOR_CHAT, None, "tg://user?id=1001"),
+        ("telegram", IGOR_CHAT, "", "tg://user?id=1001"),
+        # Негодное для t.me имя — как будто его нет.
+        ("telegram", IGOR_CHAT, "igor/../x", "tg://user?id=1001"),
+        ("telegram", IGOR_CHAT, "ig.or", "tg://user?id=1001"),
+        # Группа (Partner Assistant передаёт и их) — ссылки нет даже с именем.
+        ("telegram", "-1001234567890", "dacha_chat", None),
+        ("telegram", "", None, None),
+        ("telegram", "Игорь", None, None),
+        # Instagram: Direct по имени; без имени разговор не открыть.
+        ("instagram", INSTAGRAM_CHAT, "oleg", "https://ig.me/m/oleg"),
+        ("instagram", INSTAGRAM_CHAT, "oleg.petrov_1", "https://ig.me/m/oleg.petrov_1"),
+        ("instagram", INSTAGRAM_CHAT, None, None),
+        ("instagram", INSTAGRAM_CHAT, "oleg?x=1", None),
+        # MAX: у пересланного, заметок и групп надёжной ссылки нет.
+        ("max", "from:42", "oleg", None),
+        ("max", "notes", None, None),
+        ("max", "group:7", None, None),
+    ],
+)
+def test_chat_link_is_built_by_platform(
+    platform: str, chat_key: str, username: str | None, link: str | None
+) -> None:
+    assert chats.chat_link(cast(Any, platform), chat_key, username) == link
+
+
+def report_of(
+    *lines: ReportLine,
+    chat_with: str | None = "Игорем",
+    platform: str = "telegram",
+    chat_key: str = IGOR_CHAT,
+    username: str | None = "igor_p",
+) -> ChatReport:
     return ChatReport(
-        platform="telegram", chat_name="Игорь Петров", chat_with=chat_with, lines=lines
+        platform=cast(Any, platform),
+        chat_key=chat_key,
+        chat_name="Игорь Петров",
+        username=username,
+        chat_with=chat_with,
+        lines=lines,
     )
+
+
+def buttons_of(buttons: Sequence[Button]) -> list[tuple[str, str, str | None]]:
+    """Кнопки, как их видит владелец: надпись, callback и ссылка."""
+    return [(button.text, button.data, button.url) for button in buttons]
+
+
+IGOR_LINK = ("Открыть чат", "", "https://t.me/igor_p")
 
 
 def report_line(item: int = 1, **fields: Any) -> ReportLine:
@@ -2704,9 +2775,10 @@ def test_report_message_of_two_deals_has_a_button_per_active_deal() -> None:
         "1. Прислать Игорю расчёт — пятница, 9 октября (вы обещали)\n"
         "2. Игорь пришлёт договор (обещали вам)"
     )
-    assert [(button.text, button.data) for button in buttons] == [
-        ("Убрать 1", f"drop:{ANALYSIS_ID}:1"),
-        ("Убрать 2", f"drop:{ANALYSIS_ID}:2"),
+    assert buttons_of(buttons) == [
+        ("Убрать 1", f"drop:{ANALYSIS_ID}:1", None),
+        ("Убрать 2", f"drop:{ANALYSIS_ID}:2", None),
+        IGOR_LINK,
     ]
 
 
@@ -2717,9 +2789,7 @@ def test_report_message_of_one_deal_has_one_plain_button() -> None:
         "Из переписки с Игорем (Telegram) записал: "
         "прислать Игорю расчёт — пятница, 9 октября (вы обещали)"
     )
-    assert [(button.text, button.data) for button in buttons] == [
-        ("Убрать", f"drop:{ANALYSIS_ID}:1")
-    ]
+    assert buttons_of(buttons) == [("Убрать", f"drop:{ANALYSIS_ID}:1", None), IGOR_LINK]
 
 
 def test_report_message_marks_dropped_deals_and_has_no_button_for_them() -> None:
@@ -2731,7 +2801,40 @@ def test_report_message_marks_dropped_deals_and_has_no_button_for_them() -> None
     )
 
     assert text.splitlines()[1].endswith("— убрано")
-    assert [button.text for button in buttons] == ["Убрать 2"]
+    assert [button.text for button in buttons] == ["Убрать 2", "Открыть чат"]
+
+
+def test_report_message_with_every_deal_gone_keeps_only_the_chat_link() -> None:
+    """Приёмка 3: «Убрать» снимает свою кнопку, «Открыть чат» остаётся."""
+    _, buttons = chats.report_message(
+        report_of(report_line(status="cancelled"), report_line(2, status="done")),
+        ANALYSIS_ID,
+        NOW,
+        TZ,
+    )
+
+    assert buttons_of(buttons) == [IGOR_LINK]
+
+
+@pytest.mark.parametrize(
+    ("report", "link"),
+    [
+        (report_of(report_line(), username=None), "tg://user?id=1001"),
+        (
+            report_of(report_line(), platform="instagram", chat_key="t_1", username="oleg"),
+            "https://ig.me/m/oleg",
+        ),
+        (report_of(report_line(), platform="max", chat_key="from:42", username=None), None),
+        (report_of(report_line(), chat_key="-1001234567890", username="dacha_chat"), None),
+    ],
+)
+def test_report_message_links_the_chat_by_platform(report: ChatReport, link: str | None) -> None:
+    """Приёмки 2, 4 и 5: без имени — профиль по id, Instagram — Direct, у MAX
+    и групп кнопки нет."""
+    _, buttons = chats.report_message(report, ANALYSIS_ID, NOW, TZ)
+
+    assert [button.url for button in buttons if button.url] == ([link] if link else [])
+    assert all(button.data for button in buttons if not button.url)
 
 
 def test_report_message_without_a_dative_form_uses_the_chat_name() -> None:
@@ -2775,7 +2878,11 @@ async def test_report_goes_once_with_drop_buttons() -> None:
         "2. Игорь пришлёт договор (обещали вам)"
     )
     analysis_id = store.analyses[0]["id"]
-    assert [button.data for button in buttons] == [f"drop:{analysis_id}:1", f"drop:{analysis_id}:2"]
+    assert buttons_of(buttons) == [
+        ("Убрать 1", f"drop:{analysis_id}:1", None),
+        ("Убрать 2", f"drop:{analysis_id}:2", None),
+        IGOR_LINK,
+    ]
     assert store.analyses[0]["report_message_id"] == 501
 
 
@@ -2817,9 +2924,7 @@ async def test_drop_cancels_the_task_and_marks_the_line() -> None:
     assert outcome.message.splitlines()[1] == (
         "1. Прислать Игорю расчёт — пятница, 9 октября (вы обещали) — убрано"
     )
-    assert [(button.text, button.data) for button in outcome.buttons] == [
-        ("Убрать 2", f"drop:{analysis_id}:2")
-    ]
+    assert buttons_of(outcome.buttons) == [("Убрать 2", f"drop:{analysis_id}:2", None), IGOR_LINK]
 
 
 async def test_drop_of_an_unknown_deal_or_without_the_database_is_a_popup() -> None:
@@ -2849,6 +2954,8 @@ async def test_waiting_reminder_goes_once_after_three_hours() -> None:
     assert await service.remind_waiting(MORNING + timedelta(hours=5)) == 0
 
     assert sender.texts == ["Вы не ответили Игорю (Telegram) — он спрашивал, во сколько созвон."]
+    [(_, buttons)] = sender.sent
+    assert buttons_of(buttons) == [IGOR_LINK], "приёмка 1: под «Вы не ответили» — «Открыть чат»"
 
 
 async def test_owner_message_in_the_chat_cancels_the_waiting_reminder() -> None:
@@ -2898,7 +3005,167 @@ async def test_drop_button_through_telegram_edits_the_report(
     assert edit.text is not None and edit.text.splitlines()[2].endswith("— убрано")
     markup = edit.reply_markup
     assert isinstance(markup, InlineKeyboardMarkup)
-    assert [row[0].text for row in markup.inline_keyboard] == ["Убрать 1"]
+    assert [(row[0].text, row[0].url) for row in markup.inline_keyboard] == [
+        ("Убрать 1", None),
+        ("Открыть чат", "https://t.me/igor_p"),
+    ]
+
+
+PRIVACY_REFUSAL = "Bad Request: BUTTON_USER_PRIVACY_RESTRICTED"
+
+
+class PrivateSession(RecordingSession):
+    """Telegram, который отвергает запрос с кнопкой-ссылкой на профиль по id:
+    собеседник закрыл это настройками приватности (§25.4). `refusal` — с каким
+    текстом; `every` — отвергать и без такой кнопки."""
+
+    def __init__(self, refusal: str = PRIVACY_REFUSAL, *, every: bool = False) -> None:
+        super().__init__()
+        self.refusal = refusal
+        self.every = every
+        self.refused: list[TelegramMethod[Any]] = []
+
+    async def make_request(
+        self, bot: Bot, method: TelegramMethod[Any], timeout: int | None = None
+    ) -> Any:
+        markup = getattr(method, "reply_markup", None)
+        profile = isinstance(markup, InlineKeyboardMarkup) and any(
+            (button.url or "").startswith("tg://user")
+            for row in markup.inline_keyboard
+            for button in row
+        )
+        if profile or (self.every and markup is not None):
+            self.refused.append(method)
+            raise TelegramBadRequest(method=method, message=self.refusal)
+        return await super().make_request(bot, method, timeout)
+
+
+def test_link_button_is_a_url_button_in_the_keyboard() -> None:
+    markup = handlers.keyboard(
+        (Button("Убрать", "drop:x:1"), Button("Открыть чат", url="https://t.me/igor_p"))
+    )
+
+    assert markup is not None
+    [[drop], [link]] = markup.inline_keyboard
+    assert (drop.callback_data, drop.url) == ("drop:x:1", None)
+    assert (link.callback_data, link.url) == (None, "https://t.me/igor_p")
+
+
+def link_texts(markup: object) -> list[str]:
+    assert isinstance(markup, InlineKeyboardMarkup)
+    return [button.text for row in markup.inline_keyboard for button in row]
+
+
+async def analyzed_without_a_username(store: FakeChatStore) -> ChatService:
+    """Разбор с двумя делами, у Игоря нет имени пользователя: ссылка — по id."""
+    service = await analyzed_with_two_deals(store)
+    store.thread()["username"] = None
+    return service
+
+
+async def test_report_with_a_refused_profile_link_goes_without_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Приёмка 2: Telegram отверг кнопку с id — сообщение всё равно приходит,
+    без неё, а в журнале — только факт."""
+    store = FakeChatStore()
+    await analyzed_without_a_username(store)
+    session = PrivateSession()
+    bot = Bot(token=TEST_TOKEN, session=session)
+    service = analyzing_service(store, sender=owner_sender(make_settings(), bot))
+
+    assert await service.send_reports(QUIET_LATER) == 1
+
+    [refused] = session.refused
+    assert isinstance(refused, SendMessage)
+    assert link_texts(refused.reply_markup) == ["Убрать 1", "Убрать 2", "Открыть чат"]
+    [sent] = session.sent
+    assert isinstance(sent, SendMessage)
+    assert sent.text == refused.text
+    assert link_texts(sent.reply_markup) == ["Убрать 1", "Убрать 2"]
+    assert store.analyses[0]["reported_at"] is not None
+    assert "BUTTON_USER_PRIVACY_RESTRICTED" in caplog.text
+    assert "tg://user" not in caplog.text and str(IGOR_ID) not in caplog.text
+    await bot.session.close()
+
+
+async def test_waiting_reminder_with_a_refused_profile_link_goes_without_buttons() -> None:
+    store = FakeChatStore()
+    await igor_said(store, ("in", "Во сколько созвон?"))
+    call = FakeChatCall(make_answer(deals=[], waiting="он спрашивал, во сколько созвон"))
+    await analyzing_service(store, call).analyze_due()
+    store.thread()["username"] = None
+    session = PrivateSession()
+    bot = Bot(token=TEST_TOKEN, session=session)
+    service = analyzing_service(store, sender=owner_sender(make_settings(), bot))
+
+    assert await service.remind_waiting(MORNING + timedelta(hours=3)) == 1
+
+    [sent] = session.sent
+    assert isinstance(sent, SendMessage)
+    assert sent.text == "Вы не ответили Игорю (Telegram) — он спрашивал, во сколько созвон."
+    assert sent.reply_markup is None
+    assert store.thread()["waiting_reminded_at"] is not None
+    await bot.session.close()
+
+
+async def test_other_refusal_is_not_retried_without_the_link() -> None:
+    """Отказ не из-за ссылки — не повод её снимать: сообщение не ушло, тик
+    пришлёт его снова целиком."""
+    store = FakeChatStore()
+    await analyzed_without_a_username(store)
+    session = PrivateSession("Bad Request: chat not found", every=True)
+    bot = Bot(token=TEST_TOKEN, session=session)
+    service = analyzing_service(store, sender=owner_sender(make_settings(), bot))
+
+    assert await service.send_reports(QUIET_LATER) == 0
+
+    assert len(session.refused) == 1
+    assert session.sent == []
+    assert store.analyses[0]["reported_at"] is None
+    await bot.session.close()
+
+
+async def test_drop_edit_with_a_refused_profile_link_goes_without_it() -> None:
+    """Правка после «Убрать» с кнопкой по id, которую Telegram отверг, — та же
+    правка без неё, а не подсказка «не вышло»."""
+    store = FakeChatStore()
+    service = await analyzed_without_a_username(store)
+    analysis_id = store.analyses[0]["id"]
+    session = PrivateSession()
+    bot = Bot(token=TEST_TOKEN, session=session)
+    dispatcher = build_dispatcher(make_settings(), chats=service)
+
+    await dispatcher.feed_update(bot, make_callback_update(f"drop:{analysis_id}:2", text="отчёт"))
+
+    assert store.tasks[1]["status"] == "cancelled"
+    [refused] = session.refused
+    assert link_texts(getattr(refused, "reply_markup", None)) == ["Убрать 1", "Открыть чат"]
+    [edit] = session.edits
+    assert edit.text is not None and edit.text.splitlines()[2].endswith("— убрано")
+    assert link_texts(edit.reply_markup) == ["Убрать 1"]
+    assert session.answers == [None], "правка удалась — без всплывающей подсказки"
+    await bot.session.close()
+
+
+async def test_unchanged_report_keeps_its_link() -> None:
+    """«Сообщение не изменилось» — не отказ из-за ссылки: кнопка не снимается."""
+    store = FakeChatStore()
+    service = await analyzed_with_two_deals(store)
+    analysis_id = store.analyses[0]["id"]
+    session = PrivateSession("Bad Request: message is not modified", every=True)
+    stubborn = Bot(token=TEST_TOKEN, session=session)
+    dispatcher = build_dispatcher(make_settings(), chats=service)
+
+    await dispatcher.feed_update(
+        stubborn, make_callback_update(f"drop:{analysis_id}:2", text="отчёт")
+    )
+
+    assert len(session.refused) == 1, "правка не повторялась без ссылки"
+    assert session.edits == []
+    [popup] = session.answers
+    assert popup is not None
+    await stubborn.session.close()
 
 
 async def test_crooked_drop_button_is_a_popup(bot: Bot, session: RecordingSession) -> None:

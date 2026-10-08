@@ -173,10 +173,15 @@ def summarize(text: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Button:
-    """Inline-кнопка под ответом: надпись и callback (`techspec/12-chat-edit.md` §12.6)."""
+    """Inline-кнопка под ответом: надпись и callback (`techspec/12-chat-edit.md` §12.6).
+
+    Кнопка-ссылка — `url` вместо callback: «Открыть чат» под сообщениями о
+    переписке (`techspec/25-chats.md` §25.4); `data` у неё пуст.
+    """
 
     text: str
-    data: str
+    data: str = ""
+    url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -96,15 +96,71 @@ def keyboard(buttons: Sequence[Button]) -> InlineKeyboardMarkup | None:
     """Кнопки ответа (`techspec/12-chat-edit.md` §12.6) — по одной в ряд.
 
     Кнопок нет — клавиатуры нет: при правке сообщения это убирает прежние
-    кнопки. Что в кнопке и её callback, решает слой операций.
+    кнопки. Что в кнопке и её callback, решает слой операций; у кнопки со
+    ссылкой (`url`, «Открыть чат» §25.4) callback нет.
     """
     if not buttons:
         return None
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=button.text, callback_data=button.data)]
+            [
+                InlineKeyboardButton(text=button.text, url=button.url)
+                if button.url
+                else InlineKeyboardButton(text=button.text, callback_data=button.data)
+            ]
             for button in buttons
         ]
+    )
+
+
+# Ссылка на профиль собеседника по id (`tg://user?id=…`, «Открыть чат»
+# §25.4). Telegram отвергает запрос с такой кнопкой целиком, если собеседник
+# закрыл это настройками приватности (`BUTTON_USER_PRIVACY_RESTRICTED`) или
+# бот его не знает (`BUTTON_USER_INVALID`). Тогда сообщение уходит без неё, а
+# не теряется; другие отказы кнопку не снимают.
+PROFILE_LINK_PREFIX = "tg://user?"
+PROFILE_LINK_REFUSAL = "BUTTON_USER_"
+
+
+def _profile_link(button: InlineKeyboardButton) -> bool:
+    return (button.url or "").startswith(PROFILE_LINK_PREFIX)
+
+
+def profile_link_refused(error: TelegramBadRequest, markup: InlineKeyboardMarkup | None) -> bool:
+    """Telegram отверг запрос из-за ссылки на профиль по id — и она в нём есть."""
+    return (
+        PROFILE_LINK_REFUSAL in error.message
+        and markup is not None
+        and any(_profile_link(button) for row in markup.inline_keyboard for button in row)
+    )
+
+
+def without_profile_links(markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    """Те же кнопки без ссылок на профиль по id; не осталось — клавиатуры нет."""
+    if markup is None:
+        return None
+    rows = [
+        kept
+        for row in markup.inline_keyboard
+        if (kept := [button for button in row if not _profile_link(button)])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+async def send_with_buttons(
+    bot: Bot, *, chat_id: int, text: str, buttons: Sequence[Button] = ()
+) -> Message:
+    """Сообщение с кнопками. Ссылку на профиль по id Telegram отверг — то же
+    сообщение без неё (§25.4); в журнал — только факт и код отказа."""
+    markup = keyboard(buttons)
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    except TelegramBadRequest as error:
+        if not profile_link_refused(error, markup):
+            raise
+        logger.warning("Ссылка на чат отвергнута Telegram, сообщение — без неё: %s", error.message)
+    return await bot.send_message(
+        chat_id=chat_id, text=text, reply_markup=without_profile_links(markup)
     )
 
 
@@ -707,11 +763,24 @@ async def drop_pressed(message: Message, pressed: str) -> None:
 async def replace_text(
     message: MaybeInaccessibleMessage | None, text: str, markup: InlineKeyboardMarkup | None
 ) -> bool:
-    """Заменить текст и кнопки сообщения бота; `False` — Telegram не дал."""
+    """Заменить текст и кнопки сообщения бота; `False` — Telegram не дал.
+
+    Ссылку на профиль по id Telegram отверг (сообщение о переписке после
+    «Убрать», §25.4) — та же правка без неё.
+    """
     if not isinstance(message, Message):
         return False
     try:
         await message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as error:
+        if not profile_link_refused(error, markup):
+            logger.warning("Сообщение с кнопками не отредактировано: %s", error)
+            return False
+        logger.warning("Ссылка на чат отвергнута Telegram, правка — без неё: %s", error.message)
+    else:
+        return True
+    try:
+        await message.edit_text(text, reply_markup=without_profile_links(markup))
     except TelegramBadRequest as error:
         logger.warning("Сообщение с кнопками не отредактировано: %s", error)
         return False

@@ -312,7 +312,12 @@ async def test_relayed_promise_is_reported_like_a_direct_one() -> None:
 
     [(text, buttons)] = sender.sent
     assert text.startswith("Из переписки с Игорем (Telegram) записал:")
-    assert [button.text for button in buttons] == [texts.drop_button(1, single=True)]
+    # Имени пользователя Partner Assistant не передаёт — «Открыть чат» по id
+    # (этап 030).
+    assert [(button.text, button.url) for button in buttons] == [
+        (texts.drop_button(1, single=True), None),
+        (texts.OPEN_CHAT_BUTTON, "tg://user?id=1001"),
+    ]
 
 
 async def test_reply_by_the_partner_is_the_owner_line_and_the_owner_promise() -> None:

@@ -20,7 +20,8 @@ MAX `services/max_bot.py`.
 - Что видит владелец (§25.4): «Из переписки с Игорем (Telegram) записал: …»
   с кнопками «Убрать N» и «Вы не ответили…» через три часа — только в чате с
   Соломоном и только с 08:00 до 22:00; сообщение строится из задач, какими
-  они стали, и им же правится после «Убрать».
+  они стали, и им же правится после «Убрать». Под обоими — «Открыть чат»,
+  ссылка на чат с собеседником, если площадка её даёт (`chat_link`).
 
 Сеть трогают только замыкания из сборки: база — через протокол `ChatStore`,
 Telegram — `OwnerSender` и `ConnectionLookup`, Deepgram — `Transcriber`,
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -583,12 +585,58 @@ def parse_drop(data: str) -> tuple[str, int] | None:
     return analysis_id, number
 
 
+# «Открыть чат» (§25.4): ссылка на чат с собеседником по площадке. Имя
+# пользователя вставляется в ссылку, поэтому годится только такое, какое
+# площадка вообще даёт: Telegram — латиница, цифры и `_`, 4–32 знака (4 — у
+# коллекционных); Instagram — ещё и точка, до 30 знаков.
+TELEGRAM_USERNAME = re.compile(r"[A-Za-z0-9_]{4,32}")
+INSTAGRAM_USERNAME = re.compile(r"[A-Za-z0-9_.]{1,30}")
+TELEGRAM_BY_NAME = "https://t.me/{username}"
+TELEGRAM_BY_ID = "tg://user?id={user_id}"
+# Direct по имени — ig.me, по документации Meta «Using ig.me Links»
+# (2026-10-08): открывает разговор с этим аккаунтом, новый или прежний; в
+# веб-версии Instagram такие ссылки не работают — только в приложении.
+INSTAGRAM_BY_NAME = "https://ig.me/m/{username}"
+
+
+def chat_link(platform: Platform, chat_key: str, username: str | None) -> str | None:
+    """Ссылка «Открыть чат» на чат с собеседником (§25.4) — или ничего.
+
+    Telegram: личный чат — ключ, это id собеседника; есть имя —
+    `t.me/<имя>`, нет — профиль по id (его Telegram может отвергнуть из-за
+    приватности — тогда сообщение уходит без кнопки, `handlers.py`). Группа —
+    ключ отрицательный — ссылки нет. Instagram: Direct по имени; ключ —
+    разговор API, ссылки из него не построить. MAX: у пересланного, заметок и
+    групп надёжной ссылки нет.
+    """
+    name = username or ""
+    if platform == "telegram":
+        if not (chat_key.isascii() and chat_key.isdigit() and int(chat_key) > 0):
+            return None
+        if TELEGRAM_USERNAME.fullmatch(name):
+            return TELEGRAM_BY_NAME.format(username=name)
+        return TELEGRAM_BY_ID.format(user_id=int(chat_key))
+    if platform == "instagram" and INSTAGRAM_USERNAME.fullmatch(name):
+        return INSTAGRAM_BY_NAME.format(username=name)
+    return None
+
+
+def open_chat_buttons(
+    platform: Platform, chat_key: str, username: str | None
+) -> tuple[Button, ...]:
+    """«Открыть чат» под сообщением о переписке (§25.4) — или ничего, если
+    ссылки на этот чат нет."""
+    link = chat_link(platform, chat_key, username)
+    return () if link is None else (Button(texts.OPEN_CHAT_BUTTON, url=link),)
+
+
 def report_message(
     report: ChatReport, analysis_id: str, now: datetime, timezone: ZoneInfo
 ) -> tuple[str, tuple[Button, ...]]:
     """Сообщение о разборе и кнопки «Убрать» (§25.4) — из задач, какими они
     стали сейчас: им же сообщение правится после нажатия. Кнопка — только у
-    дела в работе."""
+    дела в работе. Последней — «Открыть чат»: она остаётся и тогда, когда
+    убраны все дела."""
     local_now = now.astimezone(timezone)
     deals: list[tuple[int, str]] = []
     for line in report.lines:
@@ -602,7 +650,7 @@ def report_message(
         Button(texts.drop_button(line.item, single=single), drop_data(analysis_id, line.item))
         for line in report.lines
         if line.status == ACTIVE_STATUS
-    )
+    ) + open_chat_buttons(report.platform, report.chat_key, report.username)
     # Заметки владельца — «из ваших заметок», а не «из переписки с …» (§27.3).
     notes = report.chat_name == texts.MAX_NOTES
     return texts.chat_report(whom, report.platform, deals, notes=notes), buttons
@@ -1399,8 +1447,9 @@ class ChatService:
         sent = 0
         for chat in chats:
             text = texts.not_answered(chat.to, chat.platform, chat.about)
+            buttons = open_chat_buttons(chat.platform, chat.chat_key, chat.username)
             try:
-                await self._send(text=text)
+                await self._send(text=text, buttons=buttons)
             except Exception as error:  # noqa: BLE001 - отказ Telegram не роняет тик
                 logger.warning(
                     "Напоминание о неотвеченном (чат %s) не ушло: %s",

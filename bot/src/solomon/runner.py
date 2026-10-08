@@ -73,13 +73,12 @@ def build_searches(
 def owner_sender(settings: Settings, bot: Bot) -> OwnerSender:
     """Сообщение о чатах — только владельцу в чат с Соломоном (`chat_id` — его
     id) и без `business_connection_id`: в бизнес-чаты и в Direct бот не пишет
-    никогда (§25.2, §26.4)."""
+    никогда (§25.2, §26.4). Ссылку «Открыть чат» на профиль по id Telegram
+    может отвергнуть — тогда сообщение уходит без неё (§25.4)."""
 
     async def send(*, text: str, buttons: Sequence[Button] = ()) -> int:
-        message = await bot.send_message(
-            chat_id=settings.owner_telegram_id,
-            text=text,
-            reply_markup=handlers.keyboard(buttons),
+        message = await handlers.send_with_buttons(
+            bot, chat_id=settings.owner_telegram_id, text=text, buttons=buttons
         )
         return message.message_id
 
