@@ -353,8 +353,14 @@ test("миграция встреч: неотправленное «в срок�
       ["созвон с Игорем", "before", utc("2030-10-09T14:00:00+05:00"), false],
       ["созвон с Игорем", "due", utc("2030-10-09T14:55:00+05:00"), false],
     ]);
-    // Задачи не тронуты: ни срок, ни `updated_at`.
-    assert.deepEqual((await db.query("select * from public.tasks order by title")).rows, tasksBefore);
+    // Задачи не тронуты: ни срок, ни `updated_at`. Сверяются колонки, что были
+    // до миграции: следующие миграции добавляют свои (этап 032 — `sphere_id`).
+    const columns = Object.keys(tasksBefore[0] ?? {});
+    const tasksAfter = (await db.query<Record<string, unknown>>("select * from public.tasks order by title")).rows;
+    assert.deepEqual(
+      tasksAfter.map((row) => Object.fromEntries(columns.map((column) => [column, row[column]]))),
+      tasksBefore,
+    );
   }));
 
 test("точность — пять значений: часть дня ложится, другое — отказ", async () => {

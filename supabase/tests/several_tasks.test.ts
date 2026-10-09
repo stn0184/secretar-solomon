@@ -677,7 +677,7 @@ test("у каждой функции одна перегрузка, и зовё�
   withDatabase(async (db) => {
     const bot = { anon: false, authenticated: false, service_role: true };
     const expected: Record<string, RegExp> = {
-      record_understanding: /reply text, tasks jsonb, facts jsonb, .*photo_text text, same_task uuid$/,
+      record_understanding: /reply text, tasks jsonb, facts jsonb, .*photo_text text, same_task uuid, spheres jsonb$/,
       insert_message_task: /reminders jsonb, item smallint$/,
       record_separately: /reply text, item smallint$/,
       append_reply: /^owner_telegram_id bigint, message_id uuid, paragraph text$/,

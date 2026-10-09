@@ -251,7 +251,7 @@ test("у функции одна перегрузка — photo_text и за н�
         where n.nspname = 'public' and p.proname = 'record_understanding'`,
     );
     assert.equal(rows.length, 1);
-    assert.match(rows[0]!.args, /edit jsonb, photo_text text, same_task uuid$/);
+    assert.match(rows[0]!.args, /edit jsonb, photo_text text, same_task uuid, spheres jsonb$/);
 
     for (const [role, allowed] of [
       ["anon", false],

@@ -449,7 +449,7 @@ test("у каждой функции одна перегрузка, и зовё�
         where n.nspname = 'public' and p.proname = 'record_understanding'`,
     );
     const understanding = only(rows);
-    assert.match(understanding.args, /photo_text text, same_task uuid$/);
+    assert.match(understanding.args, /photo_text text, same_task uuid, spheres jsonb$/);
     const granted = await db.query<{ role: string; allowed: boolean }>(
       `select role, has_function_privilege(role, $1::oid, 'execute') as allowed
          from unnest(array['anon', 'authenticated', 'service_role']) as role`,

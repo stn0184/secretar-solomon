@@ -29,7 +29,7 @@ const SIGNATURES = [
   "public.edit_chat_message(bigint, text, text, text, text, text)",
   "public.erase_chat_messages(bigint, text, text, text, text[])",
   "public.chats_to_analyze(bigint, timestamptz, timestamptz)",
-  "public.record_chat_analysis(bigint, uuid, uuid[], jsonb, text, integer, integer, integer, text, jsonb, jsonb)",
+  "public.record_chat_analysis(bigint, uuid, uuid[], jsonb, text, integer, integer, integer, text, jsonb, jsonb, text)",
   "public.chat_failed(bigint, uuid)",
   "public.skip_chat_messages(bigint, uuid, uuid[])",
   "public.chat_report(bigint, uuid)",

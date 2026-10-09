@@ -112,6 +112,7 @@ null`.
 | `source_item` | smallint, nullable | номер дела в сообщении (этап 023, §23.2), 1–10: есть ровно у задач с `source_message_id` (`tasks_source_item_check`), уникален в паре `(source_message_id, source_item)` (`tasks_source_item_key`); задачи из сообщений до этапа получили 1 |
 | `chat_analysis_id` | uuid, `references chat_analyses(id)`, nullable | разбор переписки, из которого задача записана (этап 025, §3.14, §25.3); у задачи не бывает и сообщения, и разбора (`tasks_chat_source_check`) |
 | `chat_item` | smallint, nullable | номер дела в разборе, 1–5: есть ровно вместе с `chat_analysis_id` (`tasks_chat_item_check`), уникален в паре (`tasks_chat_item_key`); по нему кнопка «Убрать N» (§25.4) |
+| `sphere_id` | uuid, nullable | сфера дела (этап 032, §30, §3.17); пусто — без сферы. Ключ составной: `(owner_telegram_id, sphere_id) references spheres (owner_telegram_id, id) on delete set null (sphere_id)` (`tasks_sphere_fkey`) — сфера только своего владельца |
 | `created_at` | timestamptz, `default now()` | |
 | `updated_at` | timestamptz, `default now()` | обновляется триггером при любой правке |
 
@@ -413,6 +414,26 @@ append_reply(owner_telegram_id bigint, message_id uuid,
   ответа — сам абзац); пуст или ответ им уже кончается — сообщение
   как есть; чужое — исключение. Им «Вернуть» и откат переноса под
   ответом о нескольких делах кладут итог в `reply` (§23.5).
+
+**Этап 032** (§30, миграция `20261009100000_spheres.sql`) добавляет
+`record_understanding` последний необязательный аргумент `spheres jsonb
+default null` — прежняя подпись удалена, вызов без него идёт прежним
+путём; права — только `service_role`:
+
+- `spheres` — `{"drop": [названия], "add": [названия], "chat":
+  {"thread_id", "sphere"}}`, всё необязательно. Сначала `drop` —
+  `removed_at = now()` и `sphere_id = null` у задач, записей памяти и
+  чатов этой сферы; потом `add` — `sphere_id_of(…, create)` (§3.17), уже
+  живая не дублируется; потом `chat` — сфера чата и всех задач его
+  разборов (чужой чат — исключение). Всё — после проверки на повтор и до
+  памяти и дел: те находят новые сферы;
+- у записи памяти — ключ `sphere`: знание о сфере, нет её — заводится;
+  конфликт по `unique` (§3.7) ставит сферу, если её не было;
+- у дела (`tasks[].task`) — ключ `sphere`: только живая сфера, по смыслу
+  сферы не заводятся (`insert_message_task`, та же подпись);
+- `edit.action = "sphere"` (`edit_from_chat`, та же подпись) — сфера
+  задачи из `edit.sphere`, пусто — снять; нет такой — заводится. Задача
+  только активная, как у других действий; `pick_task` идёт тем же путём.
 
 Задачу с напоминаниями `record_understanding` (ветка `task`) и
 `record_separately` вставляют одной внутренней функцией
@@ -718,6 +739,7 @@ Mini App ходит в базу под ролью `authenticated` (§4.1), вл�
 | `text` | text | сама запись: «Машина — Toyota Camry» |
 | `status` | text, `check in ('fact','guess')` | сказано прямо или выведено (§8.1) |
 | `source_message_id` | uuid, `references messages(id) on delete set null`, nullable | откуда взялось; сообщение — след, его удаление память не стирает |
+| `sphere_id` | uuid, nullable | знание о сфере (этап 032, §30.1): запись со сферой — «это по VoiceFin: …»; ключ составной, как у `tasks` (`facts_sphere_fkey`) |
 | `created_at` | timestamptz, `default now()` | |
 | `updated_at` | timestamptz, `default now()` | триггер, как у `tasks` |
 
@@ -734,7 +756,9 @@ set status = 'fact', source_message_id = excluded.source_message_id
 where excluded.status = 'fact' and facts.status = 'guess'` — статус
 только растёт (§8.3), а источником становится сообщение, где человек
 сказал это прямо: по нему приложение подписывает запись «с ваших слов».
-Миграция 006 (`..._facts.sql`).
+Миграция 006 (`..._facts.sql`). С этапа 032 (§3.4) запись несёт ключ
+`sphere`, и конфликт ставит ещё `sphere_id = coalesce(новая, прежняя)` —
+и тогда, когда статус не растёт, а сфера новая.
 
 ### 3.8 `owner_settings` — настройки владельца
 
@@ -901,6 +925,7 @@ platform)`; `chat_sources_consent_check` — согласие и отказ вм
 | `waiting_to` | text, nullable | кому не ответили — имя в дательном падеже от модели |
 | `waiting_reminded_at` | timestamptz, nullable | напоминание ушло; второго нет |
 | `failures` | smallint, `default 0` | неудачных разборов подряд (§25.3) |
+| `sphere_id` | uuid, nullable | сфера чата (этап 032, §30.2): ставит разбор, пока её нет, меняет владелец словом; дела чата получают её же. Ключ составной, как у `tasks` (`chat_threads_sphere_fkey`) |
 | `created_at` | timestamptz, `default now()` | |
 
 Ограничения: `chat_threads_key unique (owner_telegram_id, platform,
@@ -968,7 +993,8 @@ RLS на всех четырёх таблицах — §4.2; приложени�
 только `service_role` (`public`, `anon`, `authenticated` — `revoke`),
 миграция 025 (`20261007100000_chats.sql`; `store_chat_message`,
 `chat_report` и `chats_waiting` пересозданы миграцией 030
-`20261008200000_chat_link.sql`); владелец — явным аргументом:
+`20261008200000_chat_link.sql`, `record_chat_analysis` и `chat_report` —
+миграцией 032 `20261009100000_spheres.sql`); владелец — явным аргументом:
 
 - `connect_chat_source(owner, platform, connection_id, is_enabled)` →
   `chat_sources` — заводит или обновляет площадку. Отказ, отключение и
@@ -999,19 +1025,28 @@ RLS на всех четырёх таблицах — §4.2; приложени�
   неразобранные и последнее пришло раньше `quiet_before` или первое
   неразобранное — раньше `stale_before`; старшие первыми.
 - `record_chat_analysis(owner, thread_id, message_ids, analysis, ai_model,
-  input_tokens, output_tokens, duration_ms, chat_with, waiting, tasks)` →
-  uuid — одной транзакцией: разбор, пометка сообщений, задачи с
+  input_tokens, output_tokens, duration_ms, chat_with, waiting, tasks,
+  sphere)` → uuid — одной транзакцией: разбор, пометка сообщений, задачи с
   напоминаниями (`tasks` — `[{item, task, reminders}]`, не больше пяти),
   «ждёт ответа» (`{about, to, since}`), `failures = 0`. Неразобранных из
-  `message_ids` нет — `null`, ничего не пишется.
+  `message_ids` нет — `null`, ничего не пишется. `sphere` (необязательный,
+  этап 032) — название сферы чата: ставится, только пока у чата сферы
+  нет, и только живая (не заводится); задачи разбора получают сферу
+  чата.
 - `chat_failed(owner, thread_id)` → integer — неудача подряд плюс один;
   `skip_chat_messages(owner, thread_id, message_ids)` → uuid — разбор
   `skipped` без дел, пометка, `failures = 0`.
 - `chat_report(owner, analysis_id)` → `(platform, chat_key, chat_name,
   username, chat_with, item, task_id, title, due_at, due_precision,
-  promise, status)` — дела разбора, какими они стали сейчас, и чат с
-  нынешним именем пользователя — для «Открыть чат»; `mark_chat_report_sent(owner,
+  promise, status, sphere)` — дела разбора, какими они стали сейчас, и чат с
+  нынешним именем пользователя — для «Открыть чат» — и нынешней сферой
+  (этап 032); `mark_chat_report_sent(owner,
   analysis_id, telegram_message_id)` → boolean.
+- `reported_chat(owner, telegram_message_id)` → `(thread_id, platform,
+  chat_key, chat_name, chat_with, sphere)` — чат, о разборе которого бот
+  написал этим сообщением (этап 032, §30.2): ответ на отчёт меняет его
+  сферу. Индекс `chat_analyses_report_idx (owner_telegram_id,
+  report_message_id) where report_message_id is not null`.
 - `drop_chat_task(owner, analysis_id, item)` → `tasks` — «Убрать»:
   активная задача уходит в `cancelled`, неотправленные напоминания
   стираются; не активная — как есть.
@@ -1070,3 +1105,32 @@ RLS на всех четырёх таблицах — §4.2; приложени�
 Та же миграция забирает у `anon`, `authenticated` и `public` право на
 триггерную функцию `set_updated_at()` миграции 001: `anon` не зовёт в
 `public` ничего, кроме приёма (§4.1).
+
+### 3.17 `spheres` — сферы жизни
+
+Сфера — название, которое дал владелец (§30.1): бизнес, семья, интерес.
+Миграция 032 (`20261009100000_spheres.sql`).
+
+| Колонка | Тип | Что это |
+| --- | --- | --- |
+| `id` | uuid | ключ |
+| `owner_telegram_id` | bigint | владелец (§3.1) |
+| `name` | text, 1–40 знаков, без пробелов по краям (`spheres_name_check`) | название, как назвал владелец |
+| `created_at` | timestamptz, `default now()` | когда завели |
+| `removed_at` | timestamptz, nullable | когда убрали: «убери сферу» строку не удаляет |
+
+`spheres_name_key unique (owner_telegram_id, lower(name)) where removed_at
+is null` — повторов нет только среди живых: убранную сферу заводят заново
+новой строкой, старая остаётся следом (§30.5). `spheres_owner_id_key
+unique (owner_telegram_id, id)` — под составные ключи `sphere_id` у
+`tasks`, `facts` и `chat_threads` (§3.3, §3.7, §3.12). RLS — §4.2;
+приложение таблицу не читает.
+
+Функция `sphere_id_of(owner, name, create_missing default false)` → uuid —
+живая сфера по названию без учёта регистра; нет — `null`, с
+`create_missing` — заводится. Живых сфер не больше 12 (§30.1):
+тринадцатая — исключение. Пустое название — `null`. Только внутри функций
+бота (`service_role`); заводят сферы `record_understanding` (`spheres.add`,
+знание, сфера чата) и `edit_from_chat` (правка «это по X»), по смыслу —
+`insert_message_task` и `record_chat_analysis` — только находят (§3.4,
+§3.15).
