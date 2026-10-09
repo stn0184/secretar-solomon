@@ -39,6 +39,7 @@ from anthropic import (
 )
 from anthropic.types import ImageBlockParam, OutputConfigParam, TextBlockParam
 from pydantic import BaseModel, Field, ValidationError
+from pydantic.json_schema import SkipJsonSchema
 from supabase import Client
 
 from solomon import texts
@@ -351,6 +352,11 @@ class PhotoUnderstanding(Understanding):
     """Разбор одного снимка владельца: поля разбора сообщения и то, что
     прочитано со снимка."""
 
+    # Длительности встречи у снимка нет (`techspec/31-hours.md` §31.4): с ней
+    # у схемы снимка 40 своих полей, и такую грамматику API не собирает — 400
+    # «The compiled grammar is too large» (живой замер 2026-10-10). Поле не
+    # уходит модели в схеме и всегда пусто: дело со снимка — без длительности.
+    duration: SkipJsonSchema[int | None] = None
     photo_text: str | None
     more_tasks: list[str]
 
@@ -618,7 +624,9 @@ people — только имена, написанные на снимке ил�
 
 facts у снимка — всегда пустой список: со снимка в память ничего не
 пишется. Снимок о самом владельце — about_me. Снимок без поручения
-(пейзаж, мем, чек о покупке) — chat."""
+(пейзаж, мем, чек о покупке) — chat.
+
+Поля duration у снимка нет: длительность встречи со снимка не отдаётся."""
 
 
 # Абзац правил переписки (§18.2): дописывается к блоку 1 только у переписки,

@@ -1141,11 +1141,14 @@ def test_the_first_item_is_the_message_and_the_rest_go_to_also() -> None:
         MessageAnswer(items=[])
 
 
-# Предел грамматики структурированного ответа (§23.2), по живому замеру этапа
-# 023: схема, где своих полей у корня и у всех `$defs` вместе 40, проходит, а
-# 41 — уже 400 «The compiled grammar is too large». Повторная ссылка на то же
-# определение полей не добавляет.
-GRAMMAR_FIELD_LIMIT = 40
+# Предел грамматики структурированного ответа (§23.2). Живой замер этапа 023:
+# схема с 40 своими полями у корня и у всех `$defs` вместе прошла, с 41 — 400
+# «The compiled grammar is too large». Замер этапа 033 (2026-10-10): схема
+# снимка с 40 своими полями — тот же 400 на каждом вызове. Предел — размер
+# грамматики, а не число полей: 40 у снимка недостижимо, поэтому тест держит
+# каждую схему не выше 39 — так, как они прошли вживую. Повторная ссылка на
+# то же определение полей не добавляет.
+GRAMMAR_FIELD_LIMIT = 39
 
 
 def own_fields(schema: dict[str, Any]) -> int:
@@ -1164,8 +1167,9 @@ def test_sphere_is_one_field_and_the_sphere_edit_is_an_action() -> None:
     """Сфера (`techspec/30-spheres.md` §30.2) — одно поле разбора; правка сферы —
     значение `action`, а не поле правки. Длительность встречи
     (`techspec/31-hours.md` §31.1) — тоже одно поле разбора, и правка меняет её
-    тем же верхним полем: своих полей после этапа 033 — 39 у текста и голоса,
-    40 у снимка, 39 у переписки. Снимок — у предела: следующее поле — только
+    тем же верхним полем — у текста, голоса и переписки. У снимка её нет: с
+    ней его схема — 40 своих полей, и API её грамматику не собирает (§31.4).
+    Своих полей после этапа 033 — по 39 у всех трёх: следующее поле — только
     вместо другого."""
     counts = {
         model.__name__: own_fields(model.model_json_schema())
@@ -1176,12 +1180,26 @@ def test_sphere_is_one_field_and_the_sphere_edit_is_an_action() -> None:
     assert "sphere" not in TaskEdit.model_fields
     assert "duration" in Understanding.model_fields
     assert "duration" not in TaskEdit.model_fields
+    assert "duration" not in PhotoUnderstanding.model_json_schema()["properties"]
+    assert "duration" in ConversationUnderstanding.model_json_schema()["properties"]
     assert TaskEdit.model_json_schema()["properties"]["action"]["enum"][-1] == "sphere"
     assert counts == {
         "MessageAnswer": 39,
-        "PhotoUnderstanding": 40,
+        "PhotoUnderstanding": 39,
         "ConversationUnderstanding": 39,
     }
+
+
+def test_photo_answer_without_duration_is_read_as_no_duration() -> None:
+    """Модель снимка длительности не отдаёт: ответ без поля читается, а дело
+    со снимка пишется без длительности."""
+    raw = make_photo_understanding().model_dump()
+    raw.pop("duration")
+
+    parsed = PhotoUnderstanding.model_validate(raw)
+
+    assert parsed.duration is None
+    assert "Поля duration у снимка нет" in PHOTO_RULES
 
 
 def test_an_item_has_the_fields_a_record_needs_and_nothing_else() -> None:
@@ -1540,7 +1558,8 @@ def test_photo_answer_is_the_text_answer_plus_two_fields() -> None:
     assert issubclass(PhotoUnderstanding, Understanding)
     assert fields - set(Understanding.model_fields) == {"photo_text", "more_tasks"}
     # Модель заполняет каждое поле; пределы длины держит бот, не схема (§14.3).
-    assert set(schema["required"]) == fields
+    # Длительности у снимка нет — её поле в схему не уходит (§31.4).
+    assert set(schema["required"]) == fields - {"duration"}
     for name in ("photo_text", "more_tasks"):
         dumped = json.dumps(schema["properties"][name])
         assert "maxLength" not in dumped
