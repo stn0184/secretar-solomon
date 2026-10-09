@@ -1030,6 +1030,8 @@ async def test_known_facts_are_asked_for_this_owner_and_status_only() -> None:
     assert ("table", "facts") in fake.calls
     assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
     assert ("eq", "status", "fact") in fake.calls
+    # Знания сфер — в блоке сфер, а не здесь (`techspec/30-spheres.md` §30.6).
+    assert ("is", "sphere_id", "null") in fake.calls
     assert ("order", "created_at", False) in fake.calls
     assert ("limit", 50) in fake.calls
 

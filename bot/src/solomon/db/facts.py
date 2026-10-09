@@ -70,7 +70,8 @@ async def list_facts(
     По умолчанию — только факты: предположения в промпт не попадают
     (§8.1), пока человек их не подтвердил в приложении. Порядок по
     `created_at` — чтобы список в промпте был одним и тем же от разбора
-    к разбору.
+    к разбору. Знания сфер (запись со сферой) сюда не входят: они уходят
+    в промпт блоком сфер (`techspec/30-spheres.md` §30.6, `db/spheres.py`).
     """
     rows = await ask(
         lambda: (
@@ -78,6 +79,7 @@ async def list_facts(
             .select(FACT_COLUMNS)
             .eq("owner_telegram_id", owner_telegram_id)
             .eq("status", status)
+            .is_("sphere_id", "null")
             .order("created_at", desc=False)
             .limit(limit)
             .execute()
