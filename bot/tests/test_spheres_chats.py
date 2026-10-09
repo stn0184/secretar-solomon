@@ -17,7 +17,7 @@ from solomon import texts
 from solomon.db import chats as db_chats
 from solomon.db.chats import ReportedChat
 from solomon.db.spheres import Sphere
-from solomon.services import chats
+from solomon.services import chats, search
 from solomon.services.chats import ChatService
 from solomon.services.tasks import Swipe
 from solomon.services.understanding import KnownSphere, OpenTask
@@ -45,6 +45,9 @@ from tests.test_chats import (
     rpc,
     ticking,
 )
+from tests.test_search import SEARCH_ID, FakeReplier, FakeTimer, build_searches
+from tests.test_search import FakeStore as FakeSearchStore
+from tests.test_search import row as search_row
 from tests.test_spheres_service import BOOK, sphere_edit, store
 
 THREAD_ID = "6c7d8e9f-0a1b-4c2d-8e3f-4a5b6c7d8e9f"
@@ -303,3 +306,41 @@ async def test_reply_to_another_bot_message_is_not_a_chat() -> None:
 
 def test_spheres_in_the_book_are_spheres() -> None:
     assert all(isinstance(sphere, Sphere) for sphere in BOOK)
+
+
+# --- Поиск ----------------------------------------------------------------------------
+
+
+def test_search_gets_the_knowledge_of_the_spheres() -> None:
+    """Поиск (§24.2, §30.2) получает знания сфер вместе с фактами — без правил
+    сфер: искать по ним, а не заводить."""
+    system = search.build_search_system(NOW, TZ, (), BOOK)
+
+    assert "Сферы владельца и что о них известно:\n- VoiceFin: продаём подписку" in system
+    assert "- семья" in system
+    assert "sphere" not in system
+    assert "Сферы владельца" not in search.build_search_system(NOW, TZ, ())
+
+
+async def test_search_service_reads_the_spheres_for_the_call() -> None:
+    store_ = FakeSearchStore(search_row(attempts=0))
+    _, model, _ = build_searches(store_)
+    sphered = search.SearchService(
+        settings=make_settings(),
+        store=store_,
+        model=model,
+        reply=FakeReplier(),
+        clock=lambda: NOW,
+        timer=FakeTimer(),
+        spheres=read_book,
+    )
+
+    sphered.launch(SEARCH_ID)
+    await sphered.wait()
+
+    system, _ = model.calls[0]
+    assert "- РЕЙВА: в РЕЙВА отвечаю за продажи" in system
+
+
+async def read_book() -> Sequence[KnownSphere]:
+    return BOOK

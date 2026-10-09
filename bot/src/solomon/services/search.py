@@ -25,7 +25,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -47,6 +47,7 @@ from solomon import texts
 from solomon.config import Settings
 from solomon.db import facts as db_facts
 from solomon.db import searches as db_searches
+from solomon.db import spheres as db_spheres
 from solomon.db.rpc import DatabaseError
 from solomon.db.searches import PastSearch, SearchRow, SearchTrace
 from solomon.services.conversation import cut_middle
@@ -56,8 +57,10 @@ from solomon.services.understanding import (
     Clock,
     KnownFact,
     KnownFacts,
+    KnownSphere,
     format_known,
     format_moment,
+    sphere_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -148,10 +151,34 @@ def search_tools(timezone: ZoneInfo) -> list[ToolUnionParam]:
     ]
 
 
-def build_search_system(now: datetime, timezone: ZoneInfo, known: Sequence[KnownFact]) -> str:
-    """`system` поиска (§24.2): правила, момент и что известно о владельце —
-    «живу на Уралмаше» нужно для «рядом с домом». Пустой блок не попадает."""
-    parts = [SEARCH_RULES, format_moment(now, timezone), format_known(known)]
+# Знания сфер в поиске (`techspec/30-spheres.md` §30.2): контекст, без правил
+# сфер — поиск сфер не заводит и не относит к ним.
+SPHERES_HEAD = "Сферы владельца и что о них известно:"
+
+
+def format_sphere_knowledge(spheres: Sequence[KnownSphere]) -> str:
+    """Сферы владельца со знаниями — тем же списком, что у разбора (§30.2);
+    сфер нет — блока нет."""
+    lines = sphere_lines(spheres)
+    return "\n".join((SPHERES_HEAD, *lines)) if lines else ""
+
+
+def build_search_system(
+    now: datetime,
+    timezone: ZoneInfo,
+    known: Sequence[KnownFact],
+    spheres: Sequence[KnownSphere] = (),
+) -> str:
+    """`system` поиска (§24.2): правила, момент, что известно о владельце —
+    «живу на Уралмаше» нужно для «рядом с домом», — и знания его сфер
+    («продаём подписку бухгалтерам» — для «найди конференцию для нас»,
+    §30.2). Пустой блок не попадает."""
+    parts = [
+        SEARCH_RULES,
+        format_moment(now, timezone),
+        format_known(known),
+        format_sphere_knowledge(spheres),
+    ]
     return "\n\n".join(part for part in parts if part)
 
 
@@ -329,6 +356,8 @@ class NotSearched:
 
 SearchOutcome = Searched | NotSearched
 Timer = Callable[[], float]
+# Живые сферы владельца со знаниями (`techspec/30-spheres.md` §30.2).
+SphereBook = Callable[[], Awaitable[Sequence[KnownSphere]]]
 
 
 async def run_search(
@@ -502,6 +531,7 @@ class SearchService:
         known: KnownFacts | None = None,
         clock: Clock | None = None,
         timer: Timer = time.monotonic,
+        spheres: SphereBook | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -509,6 +539,8 @@ class SearchService:
         self._reply = reply
         # Без читателя — поиск без блока «что известно»: так собираются тесты.
         self._known = known
+        # Без читателя — поиск без знаний сфер (§30.2).
+        self._spheres = spheres
         self._clock = clock or self._now
         self._timer = timer
         self._lock = asyncio.Lock()
@@ -527,12 +559,16 @@ class SearchService:
         async def known() -> Sequence[KnownFact]:
             return await db_facts.list_facts(db, owner_telegram_id=settings.owner_telegram_id)
 
+        async def spheres() -> Sequence[KnownSphere]:
+            return await db_spheres.list_spheres(db, owner_telegram_id=settings.owner_telegram_id)
+
         return cls(
             settings=settings,
             store=DatabaseSearchStore(settings, db),
             model=anthropic_search_model(client, settings.owner_timezone),
             reply=reply,
             known=known,
+            spheres=spheres,
         )
 
     async def start(self, *, message_id: str, query: str) -> str:
@@ -636,7 +672,8 @@ class SearchService:
             return
         previous = await self._previous(row)
         known = await self._known_facts()
-        system = build_search_system(now, self._settings.owner_timezone, known)
+        spheres = await self._sphere_book()
+        system = build_search_system(now, self._settings.owner_timezone, known, spheres)
         outcome = await run_search(
             self._model,
             system=system,
@@ -754,6 +791,16 @@ class SearchService:
         except DatabaseError as error:
             logger.warning("Прошлый поиск не прочитан, поиск без него: %s", error)
             return None
+
+    async def _sphere_book(self) -> Sequence[KnownSphere]:
+        """Сферы со знаниями (§30.2) — или ничего, если база не ответила."""
+        if self._spheres is None:
+            return ()
+        try:
+            return await self._spheres()
+        except DatabaseError as error:
+            logger.warning("Сферы не прочитаны, поиск без них: %s", error)
+            return ()
 
     async def _known_facts(self) -> Sequence[KnownFact]:
         """Что известно о владельце — или ничего, если база не ответила."""
