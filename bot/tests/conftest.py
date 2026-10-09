@@ -45,6 +45,7 @@ from aiogram.types import (
 )
 
 from solomon.config import Settings
+from solomon.db.chats import ReportedChat
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.spheres import Sphere
@@ -714,8 +715,13 @@ class FakeEdits:
         recent: Sequence[RecentMessage] = (),
         broken: Iterable[str] = (),
         spheres: Sequence[Sphere] = (),
+        reports: Mapping[int, ReportedChat] | None = None,
     ) -> None:
         self.tasks = {task.id: task for task in tasks}
+        # Отчёты о переписке по сообщению бота (§30.2); их чтения — в
+        # `report_reads`, а не в `calls`.
+        self.reports = dict(reports or {})
+        self.report_reads: list[int] = []
         # Сферы владельца (`techspec/30-spheres.md` §30.2); их чтения — в
         # `sphere_reads`, а не в `calls`: тесты правки их не пересчитывают.
         self.book = list(spheres)
@@ -746,6 +752,12 @@ class FakeEdits:
         self.calls.append((name, *args))
         if name in self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
+
+    async def reported_chat(self, telegram_message_id: int) -> ReportedChat | None:
+        self.report_reads.append(telegram_message_id)
+        if "reported_chat" in self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return self.reports.get(telegram_message_id)
 
     async def spheres(self) -> list[Sphere]:
         self.sphere_reads += 1

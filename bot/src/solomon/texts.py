@@ -1210,6 +1210,8 @@ def consent_answered(platform: str, *, agreed: bool, relay: bool = False) -> str
 # Что видит владелец о переписке (§25.4). Сообщение о разборе строится из
 # задач, какими они стали сейчас: им же оно правится после «Убрать».
 CHAT_REPORT_HEAD = "Из переписки с {whom} ({platform}) записал:"
+# Конец головы отчёта: сфера чата встаёт перед ним (§30.3).
+REPORT_RECORDED = " записал:"
 # Чьё обещание — без рода собеседника: «обещали вам», а не «обещал».
 PROMISE_WORDS = {"mine": "вы обещали", "to_me": "обещали вам"}
 # Дело уже не в работе: убрано кнопкой или сделано.
@@ -1260,10 +1262,17 @@ def chat_deal(title: str, due: str | None, promise: str | None, status: str) -> 
 
 
 def chat_report(
-    whom: str, platform: str, deals: Sequence[tuple[int, str]], *, notes: bool = False
+    whom: str,
+    platform: str,
+    deals: Sequence[tuple[int, str]],
+    *,
+    notes: bool = False,
+    sphere: str | None = None,
 ) -> str:
     """«Из переписки с Игорем (Telegram) записал:» и дела по номерам (§25.4);
     у заметок владельца в MAX — «Из ваших заметок в MAX записал:» (§27.3).
+    Сфера чата — перед «записал»: «… (Telegram) · VoiceFin записал:»
+    (`techspec/30-spheres.md` §30.3).
 
     Одно дело номер 1 — одной строкой после двоеточия; иначе — список с
     номерами дел: «Убрать 2» под ним убирает строку «2.».
@@ -1273,6 +1282,8 @@ def chat_report(
         if notes
         else CHAT_REPORT_HEAD.format(whom=whom, platform=platform_name(platform))
     )
+    if sphere:
+        head = f"{head.removesuffix(REPORT_RECORDED)}{SPHERE_MARK}{sphere}{REPORT_RECORDED}"
     if len(deals) == 1 and deals[0][0] == 1:
         return f"{head} {deals[0][1]}"
     lines = [head, *(f"{number}. {_upper_first(text)}" for number, text in deals)]

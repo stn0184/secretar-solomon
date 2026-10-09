@@ -39,6 +39,7 @@ DROP_FUNCTION = "drop_chat_task"
 WAITING_FUNCTION = "chats_waiting"
 REMINDED_FUNCTION = "mark_waiting_reminded"
 ERASE_OLD_FUNCTION = "erase_old_chat_messages"
+REPORTED_FUNCTION = "reported_chat"
 
 SOURCES_TABLE = "chat_sources"
 MESSAGES_TABLE = "chat_messages"
@@ -119,7 +120,8 @@ class ChatReport:
     """Сообщение о разборе: площадка, чат, «с кем» и дела по номерам.
 
     `chat_key` и `username` — ключ чата и нынешнее имя пользователя
-    собеседника: из них строится «Открыть чат» (§25.4).
+    собеседника: из них строится «Открыть чат» (§25.4). `sphere` — нынешняя
+    сфера чата (`techspec/30-spheres.md` §30.3).
     """
 
     platform: Platform
@@ -128,6 +130,20 @@ class ChatReport:
     username: str | None
     chat_with: str | None
     lines: tuple[ReportLine, ...]
+    sphere: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReportedChat:
+    """Чат, о разборе которого бот написал владельцу этим сообщением
+    (`techspec/30-spheres.md` §30.2): ответ на отчёт меняет сферу чата.
+    `chat_with` — имя в творительном падеже из разбора, у заметок пусто."""
+
+    thread_id: str
+    platform: Platform
+    chat_name: str
+    chat_with: str | None
+    sphere: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,9 +537,12 @@ async def record_chat_analysis(
     chat_with: str | None,
     waiting: Mapping[str, str] | None,
     tasks: Sequence[Mapping[str, Any]],
+    sphere: str | None = None,
 ) -> str | None:
     """Разбор одной транзакцией (§25.3, §3.15): строка разбора, пометка,
-    задачи с напоминаниями и «ждёт ответа». `None` — кусок уже разобран."""
+    задачи с напоминаниями и «ждёт ответа». `None` — кусок уже разобран.
+    `sphere` — сфера чата из списка (`techspec/30-spheres.md` §30.2): уходит,
+    только когда есть, — вызов без неё работает и на базе до миграции 032."""
     params = {
         "owner_telegram_id": owner_telegram_id,
         "thread_id": thread_id,
@@ -537,6 +556,8 @@ async def record_chat_analysis(
         "waiting": None if waiting is None else dict(waiting),
         "tasks": [dict(task) for task in tasks],
     }
+    if sphere is not None:
+        params["sphere"] = sphere
     data = await ask(lambda: db.rpc(RECORD_FUNCTION, params).execute().data)
     return _optional_id(data, "id разбора")
 
@@ -620,6 +641,28 @@ async def chat_report(db: Client, *, owner_telegram_id: int, analysis_id: str) -
         username=_optional_text(first.get("username")),
         chat_with=_optional_text(first.get("chat_with")),
         lines=tuple(lines),
+        sphere=_optional_text(first.get("sphere")),
+    )
+
+
+async def reported_chat(
+    db: Client, *, owner_telegram_id: int, telegram_message_id: int
+) -> ReportedChat | None:
+    """Чат, о разборе которого бот написал сообщением `telegram_message_id`
+    (`techspec/30-spheres.md` §30.2) — или `None`, если это не отчёт."""
+    params = {"owner_telegram_id": owner_telegram_id, "telegram_message_id": telegram_message_id}
+    rows = _rows(await ask(lambda: db.rpc(REPORTED_FUNCTION, params).execute().data), "отчёт")
+    if not rows:
+        return None
+    row = rows[0]
+    if not isinstance(row, Mapping) or not row.get("thread_id"):
+        raise DatabaseError("База вернула чат отчёта без id.")
+    return ReportedChat(
+        thread_id=str(row["thread_id"]),
+        platform=_platform(row.get("platform")),
+        chat_name=str(row.get("chat_name") or ""),
+        chat_with=_optional_text(row.get("chat_with")),
+        sphere=_optional_text(row.get("sphere")),
     )
 
 

@@ -1234,6 +1234,7 @@ class FakeChatStore:
         chat_with: str | None,
         waiting: Mapping[str, str] | None,
         tasks: Sequence[Mapping[str, Any]],
+        sphere: str | None = None,
     ) -> str | None:
         self._call("record")
         if not any(row["id"] in message_ids for row in self._pending(thread_id)):
@@ -1252,6 +1253,7 @@ class FakeChatStore:
                 "trace": trace,
                 "reported_at": None,
                 "report_message_id": None,
+                "sphere": sphere,
             }
         )
         for entry in tasks:
@@ -1267,6 +1269,9 @@ class FakeChatStore:
             )
         thread = self._thread_by_id(thread_id)
         thread["failures"] = 0
+        # Сфера чата липкая, как в базе (§30.2): ставится, пока её нет.
+        if thread.get("sphere") is None:
+            thread["sphere"] = sphere
         if waiting is not None and thread["tracks_waiting"]:
             since = datetime.fromisoformat(waiting["since"])
             last_out = thread["last_out_at"]
@@ -1340,6 +1345,7 @@ class FakeChatStore:
             username=thread["username"],
             chat_with=analysis["chat_with"],
             lines=tuple(lines),
+            sphere=thread.get("sphere"),
         )
 
     async def report_sent(self, analysis_id: str, telegram_message_id: int | None) -> bool:
@@ -2078,6 +2084,7 @@ def make_answer(**fields: Any) -> ChatAnswer:
         "waiting": None,
         "with_whom": "Игорем",
         "to_whom": "Игорю",
+        "sphere": None,
     }
     values.update(fields)
     return ChatAnswer(**values)
@@ -2091,7 +2098,7 @@ def test_chat_schema_is_narrow() -> None:
         len(definition.get("properties", {})) for definition in schema.get("$defs", {}).values()
     )
 
-    assert set(schema["properties"]) == {"deals", "waiting", "with_whom", "to_whom"}
+    assert set(schema["properties"]) == {"deals", "waiting", "with_whom", "to_whom", "sphere"}
     assert set(ChatDeal.model_fields) == {"title", "due_at", "due_precision", "promise", "people"}
     assert own <= 12
 

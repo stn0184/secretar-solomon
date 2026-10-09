@@ -14,9 +14,9 @@ MAX `services/max_bot.py`.
   включении площадки, порядок «отправить → пометить».
 - Разбор (§25.3): затихший чат уходит модели своим вызовом со своей узкой
   схемой `ChatAnswer` — строки переписки, «раньше», открытые задачи, что
-  известно о владельце. Дела — задачи с напоминаниями, «ждёт ответа» и след
-  одной записью в базе. Разбор идёт в фоне по одному чату за раз; тик его
-  только запускает.
+  известно о владельце и его сферы (`techspec/30-spheres.md` §30.2). Дела —
+  задачи с напоминаниями, «ждёт ответа», сфера чата и след одной записью в
+  базе. Разбор идёт в фоне по одному чату за раз; тик его только запускает.
 - Что видит владелец (§25.4): «Из переписки с Игорем (Telegram) записал: …»
   с кнопками «Убрать N» и «Вы не ответили…» через три часа — только в чате с
   Соломоном и только с 08:00 до 22:00; сообщение строится из задач, какими
@@ -60,6 +60,7 @@ from solomon import texts
 from solomon.config import Settings
 from solomon.db import chats as db_chats
 from solomon.db import facts as db_facts
+from solomon.db import spheres as db_spheres
 from solomon.db import tasks as db_tasks
 from solomon.db.chats import (
     ChatKind,
@@ -79,6 +80,8 @@ from solomon.db.tasks import ACTIVE_STATUS
 from solomon.services import batches, edits, parts
 from solomon.services.batches import Line
 from solomon.services.reminders import Planner, database_planner
+from solomon.services.spheres import clean_name
+from solomon.services.spheres import find as find_sphere
 from solomon.services.tasks import Button, PressOutcome
 from solomon.services.transcription import Transcriber, Transcript
 from solomon.services.understanding import MAX_TOKENS as MESSAGE_MAX_TOKENS
@@ -89,9 +92,11 @@ from solomon.services.understanding import (
     DuePrecision,
     KnownFact,
     KnownFacts,
+    KnownSphere,
     OpenTask,
     format_known,
     format_moment,
+    format_spheres,
     open_task_lines,
 )
 from solomon.services.understanding import TIMEOUT_SECONDS as MESSAGE_TIMEOUT_SECONDS
@@ -256,7 +261,17 @@ with_whom — имя собеседника в творительном паде
 «Игорем», «Анной Петровой»; to_whom — в дательном, как после «кому»: «Игорю»,
 «Анне Петровой». Имя латиницей или такое, что не склоняется, — как есть. В
 группе — её название: with_whom — «группой «Дача»», to_whom — «группе «Дача»».
-В заметках владельца собеседника нет: with_whom и to_whom — пустые строки."""
+В заметках владельца собеседника нет: with_whom и to_whom — пустые строки.
+
+sphere — сфера жизни владельца, к которой относится эта переписка, по
+правилам блока «Сферы владельца» ниже; блока нет — sphere = null."""
+
+# Правило сферы чата (`techspec/30-spheres.md` §30.2): за списком сфер, только
+# когда сферы есть. Сферу заводит владелец, а не разбор.
+SPHERE_CHAT_RULES = """sphere — сфера, к которой относится эта переписка и её дела: название из
+этого списка, как оно в нём написано, — по смыслу, по тому, что о сферах
+известно, и по собеседнику. Сфера неочевидна — sphere = null. Новых сфер не
+придумывайте."""
 
 OPEN_TASKS_HEAD = "Открытые задачи владельца — уже записаны:"
 OPEN_TASKS_RULE = (
@@ -363,12 +378,13 @@ class ChatDeal(BaseModel):
 
 class ChatAnswer(BaseModel):
     """Разбор куска личной переписки владельца: договорённости, вопрос без
-    ответа и имя собеседника в двух падежах."""
+    ответа, имя собеседника в двух падежах и сфера переписки."""
 
     deals: list[ChatDeal]
     waiting: str | None
     with_whom: str
     to_whom: str
+    sphere: str | None
 
 
 def _phrase(text: str | None, limit: int) -> str:
@@ -406,6 +422,7 @@ def trim_answer(answer: ChatAnswer, timezone: ZoneInfo) -> ChatAnswer:
             "waiting": _phrase(answer.waiting, WAITING_LIMIT) or None,
             "with_whom": _phrase(answer.with_whom, NAME_LIMIT),
             "to_whom": _phrase(answer.to_whom, NAME_LIMIT),
+            "sphere": clean_name(answer.sphere),
         }
     )
 
@@ -426,18 +443,21 @@ def build_chat_system(
     timezone: ZoneInfo,
     known: Sequence[KnownFact],
     tasks: Sequence[OpenTask],
+    spheres: Sequence[KnownSphere] = (),
 ) -> str:
     """`system` разбора чата (§25.3): правила, момент, что известно о
-    владельце (§8) и открытые задачи коротким блоком — для дублей. Пустые
-    блоки не попадают."""
+    владельце (§8), его сферы с правилом сферы чата (§30.2) и открытые задачи
+    коротким блоком — для дублей, со сферой у задачи. Пустые блоки не
+    попадают."""
     blocks: list[str] = [CHAT_RULES, format_moment(now, timezone)]
     known_block = format_known(known)
     if known_block:
         blocks.append(known_block)
+    if spheres:
+        blocks.append(format_spheres(spheres, SPHERE_CHAT_RULES))
     if tasks:
-        blocks.append(
-            "\n".join((OPEN_TASKS_HEAD, *open_task_lines(tasks, timezone), OPEN_TASKS_RULE))
-        )
+        lines = open_task_lines(tasks, timezone, spheres)
+        blocks.append("\n".join((OPEN_TASKS_HEAD, *lines, OPEN_TASKS_RULE)))
     return "\n\n".join(blocks)
 
 
@@ -652,9 +672,10 @@ def report_message(
         for line in report.lines
         if line.status == ACTIVE_STATUS
     ) + open_chat_buttons(report.platform, report.chat_key, report.username)
-    # Заметки владельца — «из ваших заметок», а не «из переписки с …» (§27.3).
+    # Заметки владельца — «из ваших заметок», а не «из переписки с …» (§27.3);
+    # сфера чата — после площадки (`techspec/30-spheres.md` §30.3).
     notes = report.chat_name == texts.MAX_NOTES
-    text = texts.chat_report(whom, report.platform, deals, notes=notes)
+    text = texts.chat_report(whom, report.platform, deals, notes=notes, sphere=report.sphere)
     return texts.iconed(texts.ICON_CHAT, text), buttons
 
 
@@ -707,6 +728,7 @@ class ChatStore(Protocol):
         chat_with: str | None,
         waiting: Mapping[str, str] | None,
         tasks: Sequence[Mapping[str, Any]],
+        sphere: str | None = None,
     ) -> str | None: ...
 
     async def failed(self, thread_id: str) -> int | None: ...
@@ -843,6 +865,7 @@ class DatabaseChatStore:
         chat_with: str | None,
         waiting: Mapping[str, str] | None,
         tasks: Sequence[Mapping[str, Any]],
+        sphere: str | None = None,
     ) -> str | None:
         return await db_chats.record_chat_analysis(
             self._db,
@@ -853,6 +876,7 @@ class DatabaseChatStore:
             chat_with=chat_with,
             waiting=waiting,
             tasks=tasks,
+            sphere=sphere,
         )
 
     async def failed(self, thread_id: str) -> int | None:
@@ -921,6 +945,8 @@ class ConnectionLookup(Protocol):
 AudioLoader = Callable[[], Awaitable[bytes]]
 # Открытые задачи владельца по номерам — короткий блок промпта для дублей.
 OpenTasks = Callable[[], Awaitable[Sequence[OpenTask]]]
+# Живые сферы владельца со знаниями (`techspec/30-spheres.md` §30.2).
+Spheres = Callable[[], Awaitable[Sequence[KnownSphere]]]
 
 
 class ChatService:
@@ -944,6 +970,7 @@ class ChatService:
         open_tasks: OpenTasks | None = None,
         clock: Clock | None = None,
         timer: Timer = time.monotonic,
+        spheres: Spheres | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -958,6 +985,8 @@ class ChatService:
         self._planner = planner
         self._known = known
         self._open_tasks_reader = open_tasks
+        # Без читателя — разбор без сфер: чат и дела без сферы (§30.2).
+        self._spheres_reader = spheres
         self._clock = clock or self._now
         self._timer = timer
         self._foreign: set[str] = set()
@@ -991,6 +1020,9 @@ class ChatService:
             )
             return edits.number_tasks(found)
 
+        async def spheres() -> Sequence[KnownSphere]:
+            return await db_spheres.list_spheres(db, owner_telegram_id=owner)
+
         return cls(
             settings=settings,
             store=DatabaseChatStore(settings, db),
@@ -1001,6 +1033,7 @@ class ChatService:
             planner=database_planner(settings, db),
             known=known,
             open_tasks=open_tasks,
+            spheres=spheres,
         )
 
     # --- Подключение и согласие (§25.2, §25.5) --------------------------------
@@ -1307,11 +1340,15 @@ class ChatService:
         covered = new[: new.index(readable[taken - 1]) + 1]
         known = await self._known_facts()
         tasks = await self._open_tasks()
-        system = build_chat_system(now, timezone, known, tasks)
+        spheres = await self._spheres()
+        system = build_chat_system(now, timezone, known, tasks, spheres)
         outcome = await run_chat_analysis(call, system=system, text=text, timer=self._timer)
         if isinstance(outcome, NotAnalyzed):
             return await self._failed(chat, covered, outcome.reason)
         answer = trim_answer(outcome.answer, timezone)
+        # Сфера чата — только из списка (§30.2): разбор сфер не заводит.
+        found = find_sphere(spheres, answer.sphere)
+        sphere = found.name if found is not None else None
         entries = [
             {"item": number, "task": deal_task(deal), "reminders": await self._plan(deal, now)}
             for number, deal in enumerate(answer.deals, start=1)
@@ -1338,15 +1375,17 @@ class ChatService:
             answer.with_whom or chat.name,
             waiting,
             entries,
+            sphere,
         )
         # Журнал — только числа (§25.3): ни текста переписки, ни имён, ни дел.
         logger.info(
-            "Чат %s разобран: сообщений %s, дел %s, ждёт ответа %s, %.1f с, токенов %s/%s, "
-            "записан %s",
+            "Чат %s разобран: сообщений %s, дел %s, ждёт ответа %s, сфера %s, %.1f с, "
+            "токенов %s/%s, записан %s",
             chat.thread_id,
             len(covered),
             len(entries),
             "да" if waiting is not None else "нет",
+            "да" if sphere is not None else "нет",
             outcome.duration_ms / 1000,
             outcome.input_tokens,
             outcome.output_tokens,
@@ -1390,6 +1429,16 @@ class ChatService:
             return await self._known()
         except DatabaseError as error:
             logger.warning("Известные факты не прочитаны, разбор чата без них: %s", error)
+            return ()
+
+    async def _spheres(self) -> Sequence[KnownSphere]:
+        """Живые сферы со знаниями (§30.2) — или ничего: разбор важнее сферы."""
+        if self._spheres_reader is None:
+            return ()
+        try:
+            return await self._spheres_reader()
+        except DatabaseError as error:
+            logger.warning("Сферы не прочитаны, разбор чата без них: %s", error)
             return ()
 
     async def _open_tasks(self) -> Sequence[OpenTask]:

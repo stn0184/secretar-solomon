@@ -59,8 +59,12 @@ APART_PREFIX = "apart:"
 # Дел на одно сообщение (§23.3): номер дела в callback — от 1 до этого.
 ITEM_LIMIT = 10
 
-# На что ответили свайпом (§12.2): напоминание, другое сообщение бота, своё.
-SwipeTarget = Literal["reminder", "bot", "own"]
+# На что ответили свайпом (§12.2): напоминание, другое сообщение бота, своё;
+# отчёт о переписке (`techspec/30-spheres.md` §30.2) — сообщение бота, по
+# которому база знает чат.
+SwipeTarget = Literal["reminder", "bot", "own", "chat"]
+# Строка свайпа на отчёт о переписке: по ней модель правит сферу чата.
+CHAT_REPORT_SWIPE = "Ответ на отчёт о переписке"
 
 
 def _newest_first(task: TaskDetails) -> float:
@@ -159,6 +163,8 @@ def swipe_line(target: SwipeTarget, numbers: Sequence[int], text: str | None) ->
         listed = ", ".join(f"№{number}" for number in numbers)
         return f"Ответ на своё сообщение о задачах {listed}"
     quoted = _quoted(text)
+    if target == "chat":
+        return CHAT_REPORT_SWIPE if quoted is None else f"{CHAT_REPORT_SWIPE}: {quoted}"
     if quoted is None:
         return None
     if target == "reminder":

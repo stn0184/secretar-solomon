@@ -79,11 +79,13 @@ from supabase import Client
 
 from solomon import texts
 from solomon.config import Settings
+from solomon.db import chats as db_chats
 from solomon.db import facts as db_facts
 from solomon.db import reminders as db_reminders
 from solomon.db import searches as db_searches
 from solomon.db import spheres as db_spheres
 from solomon.db import tasks as db_tasks
+from solomon.db.chats import ReportedChat
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.spheres import Sphere
@@ -429,7 +431,8 @@ class EditContext:
     дублей (`techspec/15-duplicates.md` §15.2), и их `edit` бот не слушает.
     `recent` — готовый блок 6 (`techspec/17-conversation.md` §17.3); `None` —
     блока нет. `spheres` — живые сферы со знаниями (`techspec/30-spheres.md`
-    §30.2); `None` — не прочитались, и блока сфер нет.
+    §30.2); `None` — не прочитались, и блока сфер нет. `chat` — чат, на отчёт
+    о котором ответили свайпом: правка сферы — его (§30.2).
     """
 
     tasks: list[TaskDetails] | None
@@ -438,6 +441,7 @@ class EditContext:
     edits: bool = True
     recent: str | None = None
     spheres: list[Sphere] | None = None
+    chat: ReportedChat | None = None
 
 
 NO_EDIT = EditContext(tasks=None, last_tasks=(), swipe=None)
@@ -447,12 +451,14 @@ NO_EDIT = EditContext(tasks=None, last_tasks=(), swipe=None)
 class _Swiped:
     """На что ответили свайпом, как это знает база: вид, задачи, текст.
 
-    У напоминания задача одна, у своего сообщения — все его задачи (§23.6).
+    У напоминания задача одна, у своего сообщения — все его задачи (§23.6);
+    у отчёта о переписке задач нет, есть чат (`techspec/30-spheres.md` §30.2).
     """
 
     target: edits.SwipeTarget
     task_ids: tuple[str, ...]
     text: str | None
+    chat: ReportedChat | None = None
 
 
 class EditStore(Protocol):
@@ -469,6 +475,8 @@ class EditStore(Protocol):
     async def last_reminder_event(self, since: datetime) -> TaskEvent | None: ...
 
     async def reminder_task(self, telegram_message_id: int) -> str | None: ...
+
+    async def reported_chat(self, telegram_message_id: int) -> ReportedChat | None: ...
 
     async def message(self, chat_id: int, telegram_message_id: int) -> StoredMessage | None: ...
 
@@ -628,6 +636,11 @@ class DatabaseEditStore:
 
     async def spheres(self) -> list[Sphere]:
         return await db_spheres.list_spheres(self._db, owner_telegram_id=self._owner)
+
+    async def reported_chat(self, telegram_message_id: int) -> ReportedChat | None:
+        return await db_chats.reported_chat(
+            self._db, owner_telegram_id=self._owner, telegram_message_id=telegram_message_id
+        )
 
 
 def rule_of(understanding: Understanding, due_at: datetime | None) -> RuleOutcome:
@@ -2165,6 +2178,10 @@ class TaskService:
         beats = context.edits and edit_beats_answer(understanding.edit, asked, context.tasks)
         if asked is not None and understanding.answers_question and not beats:
             return await self._answer(understanding, asked, now)
+        edit = understanding.edit
+        if edit is not None and edit.action == SPHERE_ACTION and context.chat is not None:
+            # Ответ на отчёт о переписке (§30.2): сфера чата и его дел.
+            return self._chat_sphere_top(understanding, context.chat, context.spheres or [])
         if understanding.edit is not None and context.tasks is not None and context.edits:
             return await self._edit_top(
                 understanding,
@@ -2175,6 +2192,30 @@ class TaskService:
                 context.spheres or [],
             )
         return _Top(first=understanding)
+
+    @staticmethod
+    def _chat_sphere_top(
+        understanding: Understanding, chat: ReportedChat, spheres: Sequence[Sphere]
+    ) -> _Top:
+        """«Это по X» в ответ на отчёт о переписке (§30.2): сфера чата и всех его
+        дел — одной записью (`spheres.chat`). Как у дела: сферы нет —
+        заведётся, кроме тринадцатой; та же — «Так и записано», без записи."""
+        target = understanding.sphere
+        found = find_sphere(spheres, target)
+        if target is not None and found is None and len(spheres) >= SPHERE_LIMIT:
+            return _Top(head=texts.spheres_full([target], SPHERE_LIMIT), icon=texts.ICON_TROUBLE)
+        named = found.name if found is not None else target
+        if named == chat.sphere:
+            same = texts.chat_sphere_fixed(chat.chat_with, named, same=True)
+            return _Top(head=same, icon=texts.ICON_EDIT)
+        head = texts.chat_sphere_fixed(chat.chat_with, named)
+        if named is not None and found is None:
+            head = f"{head}. {texts.spheres_added([named])}"
+        return _Top(
+            head=head,
+            icon=texts.ICON_EDIT,
+            chat_sphere={"thread_id": chat.thread_id, "sphere": named},
+        )
 
     async def _answer(
         self, understanding: Understanding, asked: OpenQuestion, now: datetime
@@ -2621,7 +2662,12 @@ class TaskService:
             line is not None,
         )
         return EditContext(
-            tasks=tasks, last_tasks=last_tasks, swipe=line, recent=recent, spheres=book
+            tasks=tasks,
+            last_tasks=last_tasks,
+            swipe=line,
+            recent=recent,
+            spheres=book,
+            chat=swiped.chat if swiped is not None else None,
         )
 
     async def _recent(self, store: EditStore, since: datetime, before: datetime) -> str | None:
@@ -2761,9 +2807,13 @@ class TaskService:
         try:
             if swipe.from_bot:
                 task_id = await store.reminder_task(swipe.telegram_message_id)
-                if task_id is None:
-                    return _Swiped(target="bot", task_ids=(), text=swipe.text)
-                return _Swiped(target="reminder", task_ids=(task_id,), text=swipe.text)
+                if task_id is not None:
+                    return _Swiped(target="reminder", task_ids=(task_id,), text=swipe.text)
+                # Отчёт о переписке (§30.2): «это по X» в ответ — сфера чата.
+                chat = await store.reported_chat(swipe.telegram_message_id)
+                if chat is not None:
+                    return _Swiped(target="chat", task_ids=(), text=swipe.text, chat=chat)
+                return _Swiped(target="bot", task_ids=(), text=swipe.text)
             stored = await store.message(chat_id, swipe.telegram_message_id)
         except DatabaseError as error:
             logger.warning("Свайп не прочитан: %s", error)
