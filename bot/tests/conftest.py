@@ -45,11 +45,12 @@ from aiogram.types import (
 )
 
 from solomon.config import Settings
-from solomon.db.chats import ReportedChat
+from solomon.db.chats import ChatStamp, ReportedChat
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.spheres import Sphere
 from solomon.db.tasks import (
+    Meeting,
     MessageKind,
     OpenQuestion,
     PickedMessage,
@@ -459,6 +460,7 @@ def make_understanding(**fields: Any) -> Understanding:
         "title": "купить лампочку",
         "due_at": None,
         "due_precision": None,
+        "duration": None,
         "repeat": None,
         "priority": "normal",
         "promise": None,
@@ -554,6 +556,9 @@ class FakeAnalyst:
         # Сферы владельца (`techspec/30-spheres.md` §30.2) — по вызову; `None` —
         # блока сфер нет.
         self.spheres: list[list[KnownSphere] | None] = []
+        # Строки часов по сферам (`techspec/31-hours.md` §31.2) — по вызову
+        # текста и голоса; `None` — блока нет.
+        self.hours: list[list[str] | None] = []
         self.photo_verdict: PhotoVerdict = (
             PhotoAnalysis(
                 understanding=photo,
@@ -594,9 +599,11 @@ class FakeAnalyst:
         swipe: str | None = None,
         recent: str | None = None,
         spheres: Sequence[KnownSphere] | None = None,
+        hours: Sequence[str] | None = None,
     ) -> Verdict:
         self.calls.append((text, forwarded_from, spoken))
         self.spheres.append(None if spheres is None else list(spheres))
+        self.hours.append(None if hours is None else list(hours))
         self.questions.append(open_question)
         self.tasks.append(None if tasks is None else list(tasks))
         self.last_tasks.append(list(last_tasks))
@@ -716,8 +723,16 @@ class FakeEdits:
         broken: Iterable[str] = (),
         spheres: Sequence[Sphere] = (),
         reports: Mapping[int, ReportedChat] | None = None,
+        meetings: Sequence[Meeting] = (),
+        stamps: Sequence[ChatStamp] = (),
     ) -> None:
         self.tasks = {task.id: task for task in tasks}
+        # Встречи и сообщения чатов для часов по сферам (`techspec/31-hours.md`
+        # §31.1); их чтения — в `hour_reads`, а не в `calls`. Встречи — с
+        # началом в окне чтения, как у запроса базы.
+        self.meeting_rows = list(meetings)
+        self.stamp_rows = list(stamps)
+        self.hour_reads: list[tuple[str, datetime]] = []
         # Отчёты о переписке по сообщению бота (§30.2); их чтения — в
         # `report_reads`, а не в `calls`.
         self.reports = dict(reports or {})
@@ -764,6 +779,18 @@ class FakeEdits:
         if "spheres" in self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
         return list(self.book)
+
+    async def meetings(self, since: datetime, until: datetime) -> list[Meeting]:
+        self.hour_reads.append(("meetings", since))
+        if "meetings" in self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return [row for row in self.meeting_rows if since <= row.start < until]
+
+    async def chat_stamps(self, since: datetime) -> list[ChatStamp]:
+        self.hour_reads.append(("chat_stamps", since))
+        if "chat_stamps" in self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return [row for row in self.stamp_rows if row.sent_at >= since]
 
     async def open_tasks(self, limit: int) -> list[TaskDetails]:
         self._touch("open_tasks", limit)

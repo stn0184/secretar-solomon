@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 # Значки категорий (`techspec/29-icons.md`): первый символ сообщения бота и
@@ -221,15 +221,22 @@ def part_label(precision: str) -> str:
     return PART_WORDS[precision].capitalize()
 
 
-def format_due(due_at: datetime, precision: str | None) -> str:
+def format_due(due_at: datetime, precision: str | None, duration: int | None = None) -> str:
     """Срок словами: день, а со временем — и час, у части дня — её слово.
 
     Время показывается, только когда человек его назвал: у срока «в пятницу»
     в базе стоит 18:00 (`techspec/03-schema.md` §3.3), у «утром» — 08:00
     (§21.2), и произносить этот час вслух значило бы приписать человеку то,
     чего он не говорил: «пятница, 9 октября, утром».
+
+    `duration` — минуты встречи (`techspec/31-hours.md` §31.1): у срока с
+    часом — и её конец, «14:00–16:00». Встреча без названного конца идёт час,
+    и конец звучит тоже: так видно, сколько бот ей отвёл.
     """
     day = format_day(due_at)
+    if precision == "time" and duration:
+        end = due_at + timedelta(minutes=duration)
+        return f"{day}, {format_time(due_at)}–{format_time(end)}"
     if precision == "time":
         return f"{day}, {format_time(due_at)}"
     if precision in PART_WORDS:

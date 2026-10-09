@@ -317,6 +317,55 @@ async def test_due_with_time_is_retold_with_the_hour() -> None:
     task = understandings.calls[0]["task"]
     assert isinstance(task, dict)
     assert task["people"] == ["Аня"]
+    assert task["duration"] is None
+
+
+async def test_meeting_is_recorded_with_its_duration_and_end() -> None:
+    """«Завтра с 14 до 16 созвон по VoiceFin» — длительность 120 минут в задаче,
+    конец — в ответе (`techspec/31-hours.md` §31.1)."""
+    analyst = FakeAnalyst(
+        make_understanding(
+            title="созвон по VoiceFin",
+            due_at=FRIDAY_EVENING.replace(hour=14),
+            due_precision="time",
+            duration=120,
+        )
+    )
+    service, _, understandings = build_service(analyst)
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="в пятницу с 14 до 16 созвон по VoiceFin"
+    )
+
+    assert outcome.message == (
+        "✅ Записал: созвон по VoiceFin. Срок: пятница, 18 сентября, 14:00–16:00"
+    )
+    task = understandings.calls[0]["task"]
+    assert isinstance(task, dict)
+    assert task["duration"] == 120
+
+
+async def test_duration_without_an_hour_is_not_recorded() -> None:
+    """Длительность — только у срока с часом: у дела на день её нет ни в задаче,
+    ни в ответе."""
+    analyst = FakeAnalyst(
+        make_understanding(
+            title="встреча с бухгалтером",
+            due_at=FRIDAY_EVENING.replace(hour=18),
+            due_precision="day",
+            duration=60,
+        )
+    )
+    service, _, understandings = build_service(analyst)
+
+    outcome = await service.record_from_message(
+        chat_id=42, telegram_message_id=7, text="в пятницу встреча с бухгалтером"
+    )
+
+    assert outcome.message == "✅ Записал: встреча с бухгалтером. Срок: пятница, 18 сентября"
+    task = understandings.calls[0]["task"]
+    assert isinstance(task, dict)
+    assert task["duration"] is None
 
 
 async def test_part_of_day_is_retold_as_said_and_reminded_at_its_start() -> None:

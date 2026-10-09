@@ -44,8 +44,16 @@ TASK_COLUMNS = "id, title, status"
 # с правилом повтора и разом (`techspec/13-repeat.md` §13.2).
 DETAIL_COLUMNS = (
     "id, title, kind, status, due_at, due_precision, priority, promise, people, created_at, "
-    "repeat, occurrence_at, sphere_id"
+    "repeat, occurrence_at, sphere_id, duration"
 )
+# Встреча для часов по сферам (`techspec/31-hours.md` §31.1): начало,
+# длительность и сфера. Убранная (`cancelled`) в часы не идёт, сделанная —
+# идёт: встреча была.
+MEETING_COLUMNS = "due_at, duration, sphere_id"
+MEETING_STATUSES = (ACTIVE_STATUS, "done")
+# Встреч владельца за неделю с запасом больше этого не бывает; выборка
+# режется, а не падает.
+MEETINGS_LIMIT = 1000
 # Сообщение владельца, на которое ответили свайпом или по которому нажали
 # кнопку кандидата: текст, задача, разбор и ответ бота (§12.2, §12.6).
 STORED_MESSAGE_COLUMNS = "id, text, task_id, analysis, reply"
@@ -108,7 +116,8 @@ class TaskDetails:
     суть, вид, срок, срочность, обещание, люди — и статус, потому что по
     кнопке приходит и закрытая задача. `repeat` и `occurrence_at` — правило
     повтора и раз, который задача сейчас представляет (§13.2); у разовой
-    оба пусты. `sphere_id` — сфера дела (`techspec/30-spheres.md` §30.2).
+    оба пусты. `sphere_id` — сфера дела (`techspec/30-spheres.md` §30.2),
+    `duration` — минуты встречи (`techspec/31-hours.md` §31.1).
     """
 
     id: str
@@ -124,6 +133,17 @@ class TaskDetails:
     repeat: Mapping[str, Any] | None = None
     occurrence_at: datetime | None = None
     sphere_id: str | None = None
+    duration: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Meeting:
+    """Встреча для часов по сферам (`techspec/31-hours.md` §31.1): начало,
+    минуты и сфера дела."""
+
+    start: datetime
+    minutes: int
+    sphere_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +303,15 @@ def optional_moment(value: Any, field: str) -> datetime | None:
     return None if value is None else moment(value, field)
 
 
+def _optional_minutes(value: Any) -> int | None:
+    """Минуты встречи или пусто; не целое число — отказ, а не догадка."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DatabaseError(f"В ответе базы не разобрать duration: {value!r}.")
+    return value
+
+
 def task_details_from_row(row: Any) -> TaskDetails:
     """Разобрать строку задачи целиком. Неполная — отказ: править её вслепую нельзя."""
     if not isinstance(row, Mapping):
@@ -305,6 +334,7 @@ def task_details_from_row(row: Any) -> TaskDetails:
             occurrence_at=optional_moment(row.get("occurrence_at"), "occurrence_at"),
             # Сфера читается мягко, как повтор: строка без колонки — без сферы.
             sphere_id=_optional_text(row.get("sphere_id")),
+            duration=_optional_minutes(row.get("duration")),
         )
     except KeyError as error:
         raise DatabaseError(f"В ответе базы нет поля задачи: {error}.") from error
@@ -619,6 +649,45 @@ async def list_open_tasks(db: Client, *, owner_telegram_id: int, limit: int) -> 
         )
     )
     return [task_details_from_row(row) for row in _rows(rows, "задач")]
+
+
+async def list_meetings(
+    db: Client, *, owner_telegram_id: int, since: datetime, until: datetime
+) -> list[Meeting]:
+    """Встречи владельца с началом в `[since, until)` (`techspec/31-hours.md`
+    §31.1): задачи с длительностью, кроме убранных. Окна и то, что из встречи
+    уже прошло, решает `services/hours.py`."""
+    rows = await ask(
+        lambda: (
+            db.table(TASKS_TABLE)
+            .select(MEETING_COLUMNS)
+            .eq("owner_telegram_id", owner_telegram_id)
+            .in_("status", MEETING_STATUSES)
+            .not_.is_("duration", None)
+            .gte("due_at", since.isoformat())
+            .lt("due_at", until.isoformat())
+            .order("due_at", desc=False)
+            .limit(MEETINGS_LIMIT)
+            .execute()
+            .data
+        )
+    )
+    meetings: list[Meeting] = []
+    for row in _rows(rows, "встреч"):
+        if not isinstance(row, Mapping):
+            raise DatabaseError("База вернула не строку встречи.")
+        minutes = _optional_minutes(row.get("duration"))
+        start = row.get("due_at")
+        if minutes is None or start is None:
+            raise DatabaseError("В ответе базы встреча без срока или длительности.")
+        meetings.append(
+            Meeting(
+                start=moment(start, "due_at"),
+                minutes=minutes,
+                sphere_id=_optional_text(row.get("sphere_id")),
+            )
+        )
+    return meetings
 
 
 async def list_task_people(

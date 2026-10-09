@@ -46,6 +46,13 @@ MESSAGES_TABLE = "chat_messages"
 ANALYSES_TABLE = "chat_analyses"
 SOURCE_COLUMNS = "platform, connection_id, is_enabled, asked_at, consented_at, declined_at"
 MESSAGE_COLUMNS = "id, direction, sender, sent_at, kind, text, erased_at"
+# Сообщение для часов по сферам (`techspec/31-hours.md` §31.1): чат, чьё, время
+# площадки — и сфера чата вложенной строкой: сессия идёт в нынешнюю сферу чата.
+STAMP_COLUMNS = "id, thread_id, direction, sent_at, chat_threads(sphere_id)"
+# PostgREST отдаёт не больше тысячи строк за раз: неделя переписки читается
+# страницами, а сверх предела страниц — режется, а не падает.
+STAMP_PAGE = 1000
+STAMP_PAGES = 50
 
 # Площадка (§25.1): общий путь для Telegram (этап 025), Instagram (026) и MAX
 # (027).
@@ -100,6 +107,17 @@ class ChatMessage:
     kind: ChatKind
     text: str
     erased: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ChatStamp:
+    """Сообщение чата для сессий переписки (`techspec/31-hours.md` §31.1): чат,
+    его нынешняя сфера, время площадки и чьё оно — `mine` у владельца."""
+
+    thread_id: str
+    sphere_id: str | None
+    sent_at: datetime
+    mine: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -742,3 +760,56 @@ async def erase_old_chat_messages(db: Client, *, owner_telegram_id: int, before:
     params = {"owner_telegram_id": owner_telegram_id, "before": before.isoformat()}
     data = await ask(lambda: db.rpc(ERASE_OLD_FUNCTION, params).execute().data)
     return _count(data, "сколько сообщений чата стёрто сроком")
+
+
+# --- Часы по сферам ---------------------------------------------------------------
+
+
+def _stamp_from_row(row: Any) -> ChatStamp:
+    """Сообщение для сессий из строки; без чата, направления или времени — отказ."""
+    if not isinstance(row, Mapping):
+        raise DatabaseError("База вернула не строку сообщения чата.")
+    try:
+        direction = row["direction"]
+        if direction not in get_args(Direction):
+            raise DatabaseError(f"База вернула сообщение чата не того вида: {direction}.")
+        thread = row.get("chat_threads")
+        sphere_id = thread.get("sphere_id") if isinstance(thread, Mapping) else None
+        return ChatStamp(
+            thread_id=str(row["thread_id"]),
+            sphere_id=_optional_text(sphere_id),
+            sent_at=moment(row["sent_at"], "sent_at"),
+            mine=direction == "out",
+        )
+    except KeyError as error:
+        raise DatabaseError(f"В ответе базы нет поля сообщения чата: {error}.") from error
+
+
+async def chat_stamps(db: Client, *, owner_telegram_id: int, since: datetime) -> list[ChatStamp]:
+    """Сообщения личных чатов владельца по времени площадки не раньше `since`
+    (`techspec/31-hours.md` §31.1) — стёртые тоже: время и направление у них
+    остаются. Страницами по `STAMP_PAGE`, порядок — по времени и id, чтобы
+    страницы не перекрывались; больше `STAMP_PAGES` страниц — счёт по первым,
+    часы и так примерные."""
+    stamps: list[ChatStamp] = []
+    for page in range(STAMP_PAGES):
+        first = page * STAMP_PAGE
+
+        def query(first: int = first) -> Any:
+            return (
+                db.table(MESSAGES_TABLE)
+                .select(STAMP_COLUMNS)
+                .eq("owner_telegram_id", owner_telegram_id)
+                .gte("sent_at", since.isoformat())
+                .order("sent_at")
+                .order("id")
+                .range(first, first + STAMP_PAGE - 1)
+                .execute()
+                .data
+            )
+
+        rows = _rows(await ask(query), "сообщения чатов для часов")
+        stamps.extend(_stamp_from_row(row) for row in rows)
+        if len(rows) < STAMP_PAGE:
+            break
+    return stamps

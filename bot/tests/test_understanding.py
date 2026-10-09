@@ -40,6 +40,7 @@ from solomon.db.rpc import DatabaseError
 from solomon.db.spheres import Sphere
 from solomon.db.tasks import RecentMessage, TaskDetails
 from solomon.handlers import PHOTO_LIMIT
+from solomon.services import hours
 from solomon.services.batches import Line, conversation_text, is_conversation
 from solomon.services.conversation import recent_block, reply_text, reports_action
 from solomon.services.spheres import settle as settle_spheres
@@ -98,6 +99,7 @@ from solomon.services.understanding import (
     format_open_question,
     format_open_tasks,
     format_recent,
+    meeting_minutes,
     open_task_lines,
     searches_of,
     settle_parts,
@@ -1160,9 +1162,11 @@ def test_every_answer_schema_fits_the_grammar_limit() -> None:
 
 def test_sphere_is_one_field_and_the_sphere_edit_is_an_action() -> None:
     """Сфера (`techspec/30-spheres.md` §30.2) — одно поле разбора; правка сферы —
-    значение `action`, а не поле правки: своих полей после этапа 032 — 38 у
-    текста и голоса, 39 у снимка, 38 у переписки, место под одно поле этапа
-    033 есть у каждой схемы."""
+    значение `action`, а не поле правки. Длительность встречи
+    (`techspec/31-hours.md` §31.1) — тоже одно поле разбора, и правка меняет её
+    тем же верхним полем: своих полей после этапа 033 — 39 у текста и голоса,
+    40 у снимка, 39 у переписки. Снимок — у предела: следующее поле — только
+    вместо другого."""
     counts = {
         model.__name__: own_fields(model.model_json_schema())
         for model in (MessageAnswer, PhotoUnderstanding, ConversationUnderstanding)
@@ -1170,11 +1174,13 @@ def test_sphere_is_one_field_and_the_sphere_edit_is_an_action() -> None:
 
     assert "sphere" in Understanding.model_fields
     assert "sphere" not in TaskEdit.model_fields
+    assert "duration" in Understanding.model_fields
+    assert "duration" not in TaskEdit.model_fields
     assert TaskEdit.model_json_schema()["properties"]["action"]["enum"][-1] == "sphere"
     assert counts == {
-        "MessageAnswer": 38,
-        "PhotoUnderstanding": 39,
-        "ConversationUnderstanding": 38,
+        "MessageAnswer": 39,
+        "PhotoUnderstanding": 40,
+        "ConversationUnderstanding": 39,
     }
 
 
@@ -1398,6 +1404,43 @@ def test_part_of_day_of_every_item_gets_the_start_of_the_part() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("minutes", "kept"),
+    [
+        (60, 60),
+        (120, 120),
+        (1, 1),
+        (1440, 1440),
+        (0, None),
+        (-30, None),
+        (1441, None),
+        (None, None),
+    ],
+)
+def test_meeting_lasts_a_minute_to_a_day(minutes: int | None, kept: int | None) -> None:
+    """Длительность встречи (`techspec/31-hours.md` §31.1) — минуты от одной до
+    суток; за пределом — без длительности, а не отказ всего разбора."""
+    assert meeting_minutes(minutes) == kept
+
+
+def test_duration_of_the_parse_and_of_every_item_is_held_to_a_day() -> None:
+    """Предел держит бот там же, где ставит часть дня (§21.2): у верха и у дел
+    `also`. С точностью срока длительность здесь не сверяется: у правки верх —
+    «как новое поручение», а «до 16» относится к сроку задачи из списка."""
+    parsed = make_message_understanding(
+        also=[make_item(duration=90), make_item(duration=5000)],
+        duration=120,
+    )
+    broken = make_understanding(duration=0)
+
+    settled = settle_parts(parsed, TZ)
+
+    assert isinstance(settled, MessageUnderstanding)
+    assert settled.duration == 120
+    assert [item.duration for item in settled.also] == [90, None]
+    assert settle_parts(broken, TZ).duration is None
+
+
 async def test_text_answer_keeps_its_other_tasks() -> None:
     items = [make_item(title="забрать костюм"), make_item(kind="idea", title="подарок")]
     answer = FakeAnswer(parsed_output=make_message_understanding(also=items))
@@ -1411,16 +1454,15 @@ async def test_text_answer_keeps_its_other_tasks() -> None:
 
 # ------------------------------------------------------------ снимок (§14.3)
 
-# Эталоны пересчитаны после этапа 032 (`techspec/30-spheres.md` §30.2): в
-# блоке 1 — виды `sphere` и `sphere_drop` и поле `sphere`, сферы среди
-# нескольких дел и правка `action = sphere`; в схеме `Understanding` — поле
-# `sphere`, значения вида и действия правки. Дальше промпт и схема ответа
-# текста и голоса сдвигаются только правкой, которая их меняет, — снимок и
-# прочие ветки их не трогают.
-PROMPT_WITH_EMPTY_TASKS_SHA256 = "a8e54174b454a660879a380842e996fa1b95ca1cf4c94783e44d6db29b36ec28"
-PROMPT_BARE_SHA256 = "caeac83128936b36fc663b0ed548d34884b9a19a8a78839a9ded859759adea02"
-SCHEMA_SHA256 = "eeb661f5a86618e847ef6e0e752fc8a21f7a81f535f9729d6e9fff45b10f33c0"
-MESSAGE_SCHEMA_SHA256 = "a287bb3c53c7490573719e1005aee1155ddef986615de5ea4b3e15bd4ef0e209"
+# Эталоны пересчитаны после этапа 033 (`techspec/31-hours.md` §31.1): в блоке
+# 1 — поле `duration` и его правила, длительность среди нескольких дел и в
+# правке; в схеме `Understanding` — поле `duration`. Дальше промпт и схема
+# ответа текста и голоса сдвигаются только правкой, которая их меняет, —
+# снимок и прочие ветки их не трогают.
+PROMPT_WITH_EMPTY_TASKS_SHA256 = "aae5504d08654c6ab5c0c91b5d40e423b3e2f8bbfa7e19065995ebf834119a9d"
+PROMPT_BARE_SHA256 = "1f8a75a80536f55444bafa2c4bb48f52fe481a72f89145bd6bd34b50ec527f00"
+SCHEMA_SHA256 = "3c5dbeafd755c4eba143e3033e1cb23fb79067db8dd3529a09d7c922131126d3"
+MESSAGE_SCHEMA_SHA256 = "45d07aabc667699b94eae0894f962c889e59f54ec8eeacc88c6b0bda6a899a57"
 
 # Не настоящая картинка: модели здесь нет, важно только, что байты дошли.
 IMAGE = b"\xff\xd8\xff\xe0 not a real jpeg"
@@ -2212,14 +2254,21 @@ async def test_conversation_part_of_day_gets_the_start_of_the_part() -> None:
 # примеров разговора (§17), девять примеров пересланной переписки (§18),
 # восемь примеров нескольких дел (§23), тринадцать — о поиске (§24.1): что
 # поиск, что нет, вопрос «куда искать», ответ на него и уточнение вдогонку, —
-# и четырнадцать о сферах (§30.2): завести, убрать, знание, сфера дела по
-# смыслу и по людям, правка словом и ответом на отчёт, разговор о сфере.
+# четырнадцать о сферах (§30.2): завести, убрать, знание, сфера дела по
+# смыслу и по людям, правка словом и ответом на отчёт, разговор о сфере, — и
+# тринадцать о часах (§31): длительность встречи с концом, без конца, у
+# простого дела и без часа, «до 16» правкой, перенос и первый час правкой,
+# конец встречи в ответе и вопросы о часах по сферам из блока часов.
 # Этим владелец смотрит, как помощник понимает.
 # Прогон ходит в модель по-настоящему, поэтому в воротах не участвует —
 # `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 110
+FIXTURE_COUNT = 123
 SPHERE_COUNT = 14
+HOURS_COUNT = 13
+# Окна блока часов в примере (`techspec/31-hours.md` §31.2): по порядку
+# `hours.tally` — сегодня, вчера, неделя.
+HOURS_WINDOWS = ("today", "yesterday", "week")
 SEVERAL_COUNT = 9
 SEARCH_COUNT = 13
 EDIT_COUNT = 21
@@ -2334,9 +2383,26 @@ def tasks_for(case: dict[str, Any]) -> list[TaskDetails]:
                 people=tuple(raw.get("people", ())),
                 repeat=raw.get("repeat"),
                 sphere_id=ids.get(raw.get("sphere", "")),
+                duration=raw.get("duration"),
             )
         )
     return tasks
+
+
+def hours_for(case: dict[str, Any], now: datetime, timezone: ZoneInfo) -> list[str]:
+    """Блок часов примера — как его собрал бы бот (§31.2): окна `hours.tally` на
+    «сейчас» прогона, часы — из `spent` примера; без него — пустые окна, как у
+    владельца без встреч и переписки. У своего сообщения блок есть всегда."""
+    periods = hours.tally([], [], [], now, timezone)
+    filled = []
+    for window, period in zip(HOURS_WINDOWS, periods, strict=True):
+        items = tuple(
+            hours.SphereHours(raw["sphere"], raw["meetings"], raw["chat"])
+            for raw in case.get("spent", [])
+            if raw["window"] == window
+        )
+        filled.append(hours.Period(period.label, items))
+    return hours.lines(filled)
 
 
 def model_edit(**fields: Any) -> dict[str, Any]:
@@ -2701,6 +2767,52 @@ def sphere_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     return None
 
 
+def hours_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInfo) -> str | None:
+    """Чем пример часов разошёлся с ожиданием; `None` — сошёлся (§31).
+
+    `duration` — длительность верха строго, `duration_in` — одна из; `edit` —
+    действие и номер задачи, `due_time` — час нового срока «ЧЧ:ММ», `keeps_due`
+    — срок правкой не сдвинут (нет его или он прежний); `kind` — вид верха, у
+    разговора — ответ, как его отправил бы бот: из каждой группы `must`
+    хотя бы одно, из `forbid` — ничего.
+    """
+    expected = case["hours"]
+    text = case["text"]
+    edit = expected.get("edit")
+    kind = expected.get("kind", None if edit else case["kind"])
+    if kind is not None and got.kind != kind:
+        return f"{text}: ждали {kind}, получили {got.kind}"
+    if "duration" in expected and got.duration != expected["duration"]:
+        return f"{text}: ждали длительность {expected['duration']}, получили {got.duration}"
+    if "duration_in" in expected and got.duration not in expected["duration_in"]:
+        return f"{text}: ждали длительность из {expected['duration_in']}, получили {got.duration}"
+    if edit is not None:
+        if got.edit is None or got.edit.action != edit["action"]:
+            got_action = None if got.edit is None else got.edit.action
+            return f"{text}: ждали правку {edit['action']}, получили {got_action}"
+        if got.edit.task != edit["task"]:
+            return f"{text}: ждали задачу {edit['task']}, получили {got.edit.task}"
+        moved = got.edit.due_at.astimezone(timezone) if got.edit.due_at else None
+        due_time = edit.get("due_time")
+        if due_time is not None and (moved is None or moved.strftime("%H:%M") != due_time):
+            return f"{text}: ждали час {due_time}, получили {moved}"
+        if edit.get("keeps_due") and moved is not None:
+            listed = tasks_for(case)[edit["task"] - 1].due_at
+            if listed is None or moved != listed.astimezone(timezone):
+                return f"{text}: срок сдвинут правкой: {moved}"
+    if kind == "chat":
+        reply = reply_text(got.reply_hint)
+        if reply is None or reports_action(reply):
+            return f"{text}: ответа нет или он о действии: {got.reply_hint!r}"
+        for group in expected.get("must", []):
+            if not any(re.search(word, reply, re.IGNORECASE) for word in group):
+                return f"{text}: в ответе нет ни одного из {group}: {reply!r}"
+        for word in expected.get("forbid", []):
+            if re.search(word, reply, re.IGNORECASE):
+                return f"{text}: в ответе запрещённое {word!r}: {reply!r}"
+    return None
+
+
 def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     """Чем пример памяти разошёлся с ожиданием; `None` — сошёлся."""
     expected = case["facts"]
@@ -2809,7 +2921,16 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
     assert not any(
         "open_tasks" in case
         for case in fixtures
-        if not {"edit", "conversation", "undated", "overdue", "several", "search", "sphere"}
+        if not {
+            "edit",
+            "conversation",
+            "undated",
+            "overdue",
+            "several",
+            "search",
+            "sphere",
+            "hours",
+        }
         & set(case)
     )
     assert not any({"facts", "dialog", "repeat"} & set(case) for case in edits)
@@ -3532,6 +3653,41 @@ def test_sphere_fixtures_cover_the_cases_of_the_stage() -> None:
     assert lines[0].endswith("сфера: VoiceFin)")
 
 
+def test_hours_fixtures_cover_the_cases_of_the_stage() -> None:
+    """Часы (`techspec/31-hours.md` §31): длительность с концом, без конца, у
+    простого дела и без часа; правка «до 16», перенос встречи и первый час
+    правкой; конец встречи в ответе; итог за неделю и за день, пустое окно и
+    реплика, на которую о часах не говорят."""
+    cases = [case for case in load_fixtures() if "hours" in case]
+    now = datetime(*LIVE_MOMENT, tzinfo=TZ)
+
+    assert len(cases) == HOURS_COUNT
+    expected = [case["hours"] for case in cases]
+    durations = [item["duration"] for item in expected if "duration" in item and "edit" not in item]
+    assert sorted(durations, key=lambda minutes: minutes or 0) == [None, None, 60, 90, 120]
+    edits = [item["edit"] for item in expected if "edit" in item]
+    assert [edit.get("keeps_due", False) for edit in edits] == [True, False, False]
+    assert all(edit["action"] == "change" and edit["task"] == 1 for edit in edits)
+    for case in cases:
+        assert not {"edit", "talk", "sphere", "several", "forwarded_from"} & set(case)
+        if "edit" in case["hours"]:
+            assert tasks_for(case)[0].due_at is not None, case["text"]
+    spent = [case for case in cases if "spent" in case]
+    assert len(spent) == 4
+    assert all(case["hours"]["kind"] == "chat" for case in spent)
+    week = hours_for(spent[0], now, TZ)
+    assert week[2] == (
+        "Неделя с понедельника, 14 сентября: VoiceFin — 5 ч 30 мин (встречи 4 ч 30 мин, "
+        "переписка 1 ч); РЕЙВА — 45 мин (переписка 45 мин). Всего 6 ч 15 мин."
+    )
+    empty = hours_for({}, now, TZ)
+    assert empty[0] == "Сегодня, среда, 16 сентября: ни встреч, ни переписки."
+    ranged = next(case for case in cases if case["text"].startswith("до скольки"))
+    assert open_task_lines(tasks_for(ranged), TZ)[0] == (
+        "1. созвон по VoiceFin (срок: четверг, 17 сентября, 14:00–16:00)"
+    )
+
+
 def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Нет ключа — живой прогон пропускается, а не падает."""
 
@@ -3575,6 +3731,7 @@ async def test_live_model_understands_the_fixtures() -> None:
                 swipe=case.get("swipe"),
                 recent=recent_for(case, settings.owner_timezone),
                 spheres=spheres_for(case),
+                hours=hours_for(case, now, settings.owner_timezone),
             )
 
     started = time.monotonic()
@@ -3603,6 +3760,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     several: list[str] = []
     searches: list[str] = []
     spheres: list[str] = []
+    spent: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
@@ -3632,6 +3790,16 @@ async def test_live_model_understands_the_fixtures() -> None:
             mismatch = several_mismatch(case, got, settings.owner_timezone)
             if mismatch:
                 several.append(mismatch)
+            continue
+        if "hours" in case:
+            mismatch = hours_mismatch(case, got, settings.owner_timezone)
+            if mismatch:
+                spent.append(mismatch)
+            expected_date = case["due_date"]
+            local = got.due_at.astimezone(settings.owner_timezone) if got.due_at else None
+            actual_date = local.date().isoformat() if local else None
+            if expected_date is not None and actual_date != expected_date:
+                dates.append(f"{case['text']}: ждали {expected_date}, получили {actual_date}")
             continue
         if "sphere" in case:
             mismatch = sphere_mismatch(case, got)
@@ -3692,6 +3860,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not several, "Несколько дел разошлись:\n" + "\n".join(several)
     assert not searches, "Поиск разошёлся: " + "; ".join(searches)
     assert not spheres, "Сферы разошлись:\n" + "\n".join(spheres)
+    assert not spent, "Часы разошлись:\n" + "\n".join(spent)
     matched = general - len(kinds)
     assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)
 

@@ -88,6 +88,9 @@ SPHERE_ACTION = "sphere"
 # Запрос поиска в базе — до 500 знаков (`techspec/03-schema.md` §3.10):
 # длиннее режет бот, иначе отказ базы съел бы весь поиск.
 QUERY_LIMIT = 500
+# Длительность встречи (`techspec/31-hours.md` §31.1) — до суток, как держит
+# база (`tasks_duration_check`): за пределом — без длительности, а не отказ.
+MEETING_LIMIT = 1440
 
 # Точность срока (`techspec/21-part-of-day.md` §21.2): день, час или часть
 # дня. Часы частей ставит бот (`services/parts.py`), модель называет часть.
@@ -168,6 +171,7 @@ class Understanding(BaseModel):
     title: str
     due_at: datetime | None
     due_precision: DuePrecision | None
+    duration: int | None
     repeat: Repeat | None
     priority: Literal["low", "normal", "high"]
     promise: Literal["mine", "to_me"] | None
@@ -195,6 +199,9 @@ class TaskItem(BaseModel):
     title: str
     due_at: datetime | None
     due_precision: DuePrecision | None
+    # Длительность встречи (`techspec/31-hours.md` §31.1). Модели `TaskItem` не
+    # уходит, а разбор до этапа 033 читается без неё.
+    duration: int | None = None
     repeat: Repeat | None
     priority: Literal["low", "normal", "high"]
     promise: Literal["mine", "to_me"] | None
@@ -475,6 +482,15 @@ question = null, needs_review = false.
   в пояс владельца из контекста момента: при UTC+05:00 «18 мск» — 20:00.
 due_at — время по ISO с поясом владельца.
 
+duration — сколько минут длится встреча; только у дела с часом
+(due_precision = time), иначе null:
+- назван конец или длина — по ним: «с 14 до 16» — 120, «в 10 на полчаса» —
+  30, «в 15 на полтора часа» — 90;
+- встреча, созвон, переговоры, приём, урок, тренировка без названного конца —
+  60;
+- простое дело с часом — позвонить, написать, отправить, забрать, выпить
+  таблетку: «в 15 позвонить маме» — null.
+
 repeat — повтор, только у задачи (kind = task) со сроком; иначе null.
 Правила: по дням («каждый день», «через день» — interval 2, «каждые 3 дня»),
 по неделям («каждый понедельник», «по будням» — weekdays 1–5, «по выходным» —
@@ -672,10 +688,10 @@ SEVERAL_RULES = """В одном сообщении бывает несколь�
 (answers_question = true) или правит задачу (edit), первый элемент — о них,
 как всегда, и все новые дела — следующими элементами. Дело одно — в items
 один элемент. У каждого следующего элемента свои kind (task, idea, wish, search,
-sphere или sphere_drop), суть, срок, повтор, срочность, обещание, люди, сфера и
-признаки — по тем же правилам, что у первого. Ответ, правка, память и подсказка бывают
-только у первого: у следующих answers_question = false, edit = null,
-facts = [], reply_hint = null.
+sphere или sphere_drop), суть, срок, длительность, повтор, срочность, обещание,
+люди, сфера и признаки — по тем же правилам, что у первого. Ответ, правка,
+память и подсказка бывают только у первого: у следующих answers_question =
+false, edit = null, facts = [], reply_hint = null.
 
 question — только у одного дела, первого из тех, что без ответа не сделать.
 Вопрос называет дело: «Кому позвонить?», «Когда забрать костюм?», а не
@@ -891,6 +907,29 @@ def format_spheres(spheres: Sequence[KnownSphere], rules: str) -> str:
     return "\n".join((SPHERES_HEAD, *lines, rules))
 
 
+# Блок «Часы по сферам» (`techspec/31-hours.md` §31.2): строки считает бот
+# (`services/hours.py`), модель отвечает из них и ничего не досчитывает.
+HOURS_HEAD = (
+    "Часы по сферам — примерно, только из встреч с длительностью и из переписки в личных чатах:"
+)
+HOURS_RULES = """Эти часы посчитал бот. Вопрос, сколько времени ушло на сферу или на работу,
+«куда ушёл день», «сколько я работал на этой неделе», — разговор (chat):
+отвечайте только по этим строкам, со словом «примерно», в часах и минутах, как в
+строках; ничего не досчитывайте и не складывайте сами. Сферы нет в строке окна —
+по ней не было ни встреч, ни переписки, так и скажите. Другую работу бот не
+видит: без встреч и переписки часов нет. Окон только три — сегодня, вчера и
+эта неделя; о прошлой неделе или месяце скажите, что их нет. Сами, без
+вопроса, о часах не заговаривайте."""
+
+
+def format_hours(lines: Sequence[str] | None) -> str:
+    """Блок «Часы по сферам» (§31.2): заголовок, строки окон и правила. Нет
+    строк — блока нет."""
+    if not lines:
+        return ""
+    return "\n".join((HOURS_HEAD, *lines, HOURS_RULES))
+
+
 def sphere_names(spheres: Sequence[KnownSphere]) -> dict[str, str]:
     """Название сферы по её id — для строки «сфера: X» открытой задачи."""
     return {sphere.id: sphere.name for sphere in spheres}
@@ -901,6 +940,9 @@ class OpenTask(Protocol):
 
     @property
     def sphere_id(self) -> str | None: ...
+
+    @property
+    def duration(self) -> int | None: ...
 
     @property
     def title(self) -> str: ...
@@ -969,6 +1011,13 @@ due_removed и time_removed = false. Новый срок — due_at и due_preci
 в due_at с due_precision = day; назван и час — он главнее, time_removed =
 false. Снять срок — due_removed = true; people — новый список людей
 целиком, он заменяет прежний. Вид задачи словом не меняется.
+Длительность встречи — не поле edit, а duration верхнего уровня: «созвон до
+16», «встреча продлится два часа», «с 15 до 17» о задаче из списка —
+action = change, а duration — новая длительность в минутах от начала встречи,
+по сроку задачи в списке или по новому сроку правки: у созвона в 14:00 «до 16»
+— 120, срок не меняется — due_at в edit = null. Конец и длина не названы —
+duration = null, прежняя длительность останется; только встрече без часа в
+списке, которой правка ставит час, — 60, как новой.
 У задачи со строкой «повтор: …» — повторяющейся:
 - done — сделан этот раз, задача перейдёт на следующий; skip — пропуск
   этого раза. «Отменилась», «не будет» без слов «насовсем», «больше не
@@ -988,7 +1037,8 @@ false. Снять срок — due_removed = true; people — новый спи�
 action = change без новых значений и один вопрос в question. В одном
 сообщении несколько правок — отдайте первую.
 Поля верхнего уровня (kind, title, due_at и остальные) заполняйте так, будто
-сообщение — новое поручение: они нужны, если задачи в списке нет.
+сообщение — новое поручение: они нужны, если задачи в списке нет. Кроме
+duration — её правила выше.
 Не правка, edit = null:
 - новое поручение, похожее на записанное: то же дело — дубль (same_as,
   правила ниже); «купить молоко в субботу» при «купить молоко» на пятницу —
@@ -1059,13 +1109,13 @@ def _open_task_line(
     подробности только те, что есть.
 
     Повтор — словами без часа: час уже в сроке (§13.5). Сфера — по названию
-    из списка сфер (§30.2); нет её там — строки нет.
+    из списка сфер (§30.2); нет её там — строки нет. У встречи с длительностью
+    срок — с концом, «14:00–16:00» (`techspec/31-hours.md` §31.1).
     """
     details: list[str] = []
     if task.due_at is not None:
-        details.append(
-            f"срок: {texts.format_due(task.due_at.astimezone(timezone), task.due_precision)}"
-        )
+        local = task.due_at.astimezone(timezone)
+        details.append(f"срок: {texts.format_due(local, task.due_precision, task.duration)}")
     if task.repeat is not None:
         details.append(f"повтор: {texts.repeat_words(task.repeat)}")
     if task.people:
@@ -1175,10 +1225,15 @@ def build_system_prompt(
     short: bool = False,
     conversation: bool = False,
     spheres: Sequence[KnownSphere] | None = None,
+    hours: Sequence[str] | None = None,
 ) -> str:
     """Системный промпт (§5.2): роль и правила, момент, что уже известно,
-    сферы, открытый вопрос, открытые задачи, недавний разговор. Пустые блоки
-    не попадают вовсе.
+    сферы, часы по сферам, открытый вопрос, открытые задачи, недавний
+    разговор. Пустые блоки не попадают вовсе.
+
+    `hours` — строки блока «Часы по сферам» (`techspec/31-hours.md` §31.2):
+    их считает слой выше и даёт только своему тексту и голосу — разговор
+    ведёт только своё сообщение (§17.1); `None` — блока нет.
 
     `spheres` — живые сферы со знаниями (§30.2), `None` — блока нет (сбой
     чтения или вызов без сфер). У своего текста и голоса блок есть и без
@@ -1208,6 +1263,7 @@ def build_system_prompt(
     blocks = (
         format_known(known),
         sphere_block,
+        format_hours(hours),
         format_open_question(open_question, timezone),
         format_open_tasks(
             tasks,
@@ -1292,12 +1348,17 @@ def settle_parts[U: Understanding](parsed: U, timezone: ZoneInfo) -> U:
     у поручения повтор верхнего уровня, у правки — свой. Зовётся там, где
     ответ модели становится разбором, во всех трёх путях — до плана
     напоминаний и до записи. Дела `also` (§23.2) — так же, каждое со своим
-    повтором. Остальные поля не трогаются.
+    повтором. Длительность встречи (`techspec/31-hours.md` §31.1) — в
+    пределе суток, у верха и у дел. Остальные поля не трогаются.
     """
     due_at, precision = parts.settle(
         parsed.due_at, parsed.due_precision, repeating=parsed.repeat is not None, timezone=timezone
     )
-    update: dict[str, Any] = {"due_at": due_at, "due_precision": precision}
+    update: dict[str, Any] = {
+        "due_at": due_at,
+        "due_precision": precision,
+        "duration": meeting_minutes(parsed.duration),
+    }
     if isinstance(parsed, MessageUnderstanding):
         update["also"] = [_settle_item(item, timezone) for item in parsed.also]
     edit = parsed.edit
@@ -1312,11 +1373,31 @@ def settle_parts[U: Understanding](parsed: U, timezone: ZoneInfo) -> U:
 
 
 def _settle_item(item: TaskItem, timezone: ZoneInfo) -> TaskItem:
-    """Часть дня у дела `also` — как у верхнего поручения."""
+    """Часть дня и длительность у дела `also` — как у верхнего поручения."""
     due_at, precision = parts.settle(
         item.due_at, item.due_precision, repeating=item.repeat is not None, timezone=timezone
     )
-    return item.model_copy(update={"due_at": due_at, "due_precision": precision})
+    return item.model_copy(
+        update={
+            "due_at": due_at,
+            "due_precision": precision,
+            "duration": meeting_minutes(item.duration),
+        }
+    )
+
+
+def meeting_minutes(minutes: int | None) -> int | None:
+    """Длительность встречи в пределе (`techspec/31-hours.md` §31.1): от минуты
+    до суток, иначе — без длительности.
+
+    С точностью срока здесь не сверяется: у правки верхний срок — «как у нового
+    поручения», а «до 16» считается от срока задачи из списка. Длительность
+    без часа отбрасывают запись и правка (`services/tasks.py`,
+    `services/edits.py`), а снимает и база.
+    """
+    if minutes is None or not 1 <= minutes <= MEETING_LIMIT:
+        return None
+    return minutes
 
 
 def trim_photo(parsed: PhotoUnderstanding) -> PhotoUnderstanding:
@@ -1571,6 +1652,7 @@ class UnderstandingService:
         swipe: str | None = None,
         recent: str | None = None,
         spheres: Sequence[KnownSphere] | None = None,
+        hours: Sequence[str] | None = None,
     ) -> Verdict:
         """Разобрать сообщение или честно сказать, что не вышло.
 
@@ -1590,7 +1672,8 @@ class UnderstandingService:
         `recent` — строки недавнего разговора (блок 6, §17.3); у
         пересланного блока нет, даже если строки пришли: чужие слова
         разговора не ведут (§17.1). `spheres` — живые сферы со знаниями
-        (§30.2), `None` — блока сфер нет.
+        (§30.2), `None` — блока сфер нет. `hours` — строки часов по сферам
+        (`techspec/31-hours.md` §31.2); у пересланного блока нет, как и блока 6.
         """
         known = await self._known_facts()
         forwarded = forwarded_from is not None
@@ -1604,6 +1687,7 @@ class UnderstandingService:
             None if forwarded else recent,
             short=forwarded,
             spheres=spheres,
+            hours=None if forwarded else hours,
         )
         message = build_user_message(text, forwarded_from, spoken, swipe)
         answer = await self._ask(self._call(system=system, text=message))

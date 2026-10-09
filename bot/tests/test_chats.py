@@ -43,6 +43,7 @@ from solomon.db.chats import (
     ChatMessage,
     ChatReport,
     ChatSource,
+    ChatStamp,
     ChatToAnalyze,
     ChatTrace,
     ReportLine,
@@ -399,6 +400,81 @@ async def test_new_messages_read_the_unanalyzed_of_the_owner_in_order() -> None:
     assert ("eq", "thread_id", THREAD_ID) in fake.calls
     assert ("is", "analysis_id", None) in fake.calls
     assert ("limit", 50) in fake.calls
+
+
+def stamp_row(**changes: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": MESSAGE_ID,
+        "thread_id": THREAD_ID,
+        "direction": "out",
+        "sent_at": "2026-10-07T06:00:00+00:00",
+        "chat_threads": {"sphere_id": "s-voicefin"},
+    }
+    row.update(changes)
+    return row
+
+
+async def test_chat_stamps_read_the_owner_messages_with_the_sphere_of_the_chat() -> None:
+    """Часы по сферам (`techspec/31-hours.md` §31.1): чат, его нынешняя сфера,
+    время площадки и чьё сообщение — стёртые тоже."""
+    fake = FakeClient(
+        tables={
+            "chat_messages": [
+                stamp_row(),
+                stamp_row(id="m2", direction="in", chat_threads={"sphere_id": None}),
+            ]
+        }
+    )
+
+    found = await db_chats.chat_stamps(as_client(fake), owner_telegram_id=OWNER_ID, since=NOW)
+
+    assert found == [
+        ChatStamp(
+            thread_id=THREAD_ID,
+            sphere_id="s-voicefin",
+            sent_at=datetime(2026, 10, 7, 11, 0, tzinfo=TZ),
+            mine=True,
+        ),
+        ChatStamp(
+            thread_id=THREAD_ID,
+            sphere_id=None,
+            sent_at=datetime(2026, 10, 7, 11, 0, tzinfo=TZ),
+            mine=False,
+        ),
+    ]
+    assert ("select", (db_chats.STAMP_COLUMNS,)) in fake.calls
+    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
+    assert ("gte", "sent_at", NOW.isoformat()) in fake.calls
+    assert ("range", 0, db_chats.STAMP_PAGE - 1) in fake.calls
+    assert not any(call[0] == "is" for call in fake.calls)
+
+
+async def test_chat_stamps_go_by_pages_up_to_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Полная страница — читается следующая; предел страниц режет счёт, а не
+    роняет его."""
+    monkeypatch.setattr(db_chats, "STAMP_PAGE", 2)
+    monkeypatch.setattr(db_chats, "STAMP_PAGES", 3)
+    fake = FakeClient(tables={"chat_messages": [stamp_row(), stamp_row(id="m2")]})
+
+    found = await db_chats.chat_stamps(as_client(fake), owner_telegram_id=OWNER_ID, since=NOW)
+
+    assert len(found) == 6
+    assert [call for call in fake.calls if call[0] == "range"] == [
+        ("range", 0, 1),
+        ("range", 2, 3),
+        ("range", 4, 5),
+    ]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [stamp_row(sent_at=None), stamp_row(direction="sideways"), {"id": MESSAGE_ID}, "строка"],
+)
+async def test_incomplete_chat_stamp_is_a_refusal(row: object) -> None:
+    fake = FakeClient(tables={"chat_messages": [row]})
+
+    with pytest.raises(DatabaseError):
+        await db_chats.chat_stamps(as_client(fake), owner_telegram_id=OWNER_ID, since=NOW)
 
 
 async def test_earlier_messages_are_analyzed_kept_and_chronological() -> None:

@@ -191,7 +191,9 @@ class Change:
     `changes` при нём — «Так и записано», без него — «Не понял» (§12.8).
     `lost_at` и `lost_precision` — прежний час или часть дня, которые не
     удержались при переносе на сегодня: час уже наступил, часть кончилась;
-    по ним ответ спрашивает «во сколько?» (§12.8).
+    по ним ответ спрашивает «во сколько?» (§12.8). `duration` — минуты
+    встречи после правки (`techspec/31-hours.md` §31.1): у срока без часа их
+    нет.
     """
 
     changes: dict[str, Any]
@@ -208,6 +210,7 @@ class Change:
     named: bool = False
     lost_at: datetime | None = None
     lost_precision: str | None = None
+    duration: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,7 +350,13 @@ def _new_rule(task: TaskDetails, edit: TaskEdit) -> dict[str, Any] | None:
     return rule
 
 
-def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo, now: datetime) -> Change:
+def edit_changes(
+    task: TaskDetails,
+    edit: TaskEdit,
+    timezone: ZoneInfo,
+    now: datetime,
+    duration: int | None = None,
+) -> Change:
     """Слить правку модели с задачей: только отличия, пустое — «не менял» (§12.1).
 
     Прежний час при переносе ставит бот, а не модель (§12.8): модель называет
@@ -364,6 +373,11 @@ def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo, now: dat
     когда сменился срок («теперь в 11»). Новое правило главнее и снятия
     правила, и снятия срока: из противоречивых значений — то, что ничего
     не теряет.
+
+    `duration` — длительность встречи верхним полем разбора
+    (`techspec/31-hours.md` §31.1): «созвон до 16». Она ложится, только если
+    срок после правки — с часом; не названа — у встречи остаётся прежняя, а
+    срок ушёл с часа — длительности нет (её снимет и база).
     """
     rule = _new_rule(task, edit)
     if rule is not None and edit.due_removed:
@@ -391,6 +405,12 @@ def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo, now: dat
         changes["promise"] = edit.promise
     if edit.people is not None and list(edit.people) != list(task.people):
         changes["people"] = list(edit.people)
+    timed = due_at is not None and due_precision == "time"
+    new_duration = task.duration if timed else None
+    if timed and duration is not None:
+        if duration != task.duration:
+            changes["duration"] = duration
+        new_duration = duration
     # Названное — то, что бот принял: отброшенное правило и пустая суть не в счёт.
     named = any(
         (
@@ -403,6 +423,7 @@ def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo, now: dat
             edit.people is not None,
             rule is not None,
             edit.repeat_removed,
+            timed and duration is not None,
         )
     )
     return Change(
@@ -420,6 +441,7 @@ def edit_changes(task: TaskDetails, edit: TaskEdit, timezone: ZoneInfo, now: dat
         named=named,
         lost_at=due.lost_at,
         lost_precision=due.lost_precision,
+        duration=new_duration,
     )
 
 

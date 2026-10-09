@@ -85,11 +85,12 @@ from solomon.db import reminders as db_reminders
 from solomon.db import searches as db_searches
 from solomon.db import spheres as db_spheres
 from solomon.db import tasks as db_tasks
-from solomon.db.chats import ReportedChat
+from solomon.db.chats import ChatStamp, ReportedChat
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.spheres import Sphere
 from solomon.db.tasks import (
+    Meeting,
     MessageKind,
     OpenQuestion,
     PickedMessage,
@@ -101,7 +102,7 @@ from solomon.db.tasks import (
     TaskDetails,
     TaskEvent,
 )
-from solomon.services import batches, conversation, edits, overdue
+from solomon.services import batches, conversation, edits, hours, overdue
 from solomon.services.batches import Batches, Line
 from solomon.services.names import known_names
 from solomon.services.reminders import Planner, database_planner, next_fire_at
@@ -352,6 +353,7 @@ class Analyst(Protocol):
         swipe: str | None = None,
         recent: str | None = None,
         spheres: Sequence[KnownSphere] | None = None,
+        hours: Sequence[str] | None = None,
     ) -> Verdict: ...
 
     async def analyze_photo(
@@ -432,7 +434,9 @@ class EditContext:
     `recent` — готовый блок 6 (`techspec/17-conversation.md` §17.3); `None` —
     блока нет. `spheres` — живые сферы со знаниями (`techspec/30-spheres.md`
     §30.2); `None` — не прочитались, и блока сфер нет. `chat` — чат, на отчёт
-    о котором ответили свайпом: правка сферы — его (§30.2).
+    о котором ответили свайпом: правка сферы — его (§30.2). `hours` — строки
+    часов по сферам (`techspec/31-hours.md` §31.2), только у своего
+    сообщения; `None` — блока нет.
     """
 
     tasks: list[TaskDetails] | None
@@ -442,6 +446,7 @@ class EditContext:
     recent: str | None = None
     spheres: list[Sphere] | None = None
     chat: ReportedChat | None = None
+    hours: tuple[str, ...] | None = None
 
 
 NO_EDIT = EditContext(tasks=None, last_tasks=(), swipe=None)
@@ -508,6 +513,10 @@ class EditStore(Protocol):
     ) -> TaskDetails | None: ...
 
     async def spheres(self) -> list[Sphere]: ...
+
+    async def meetings(self, since: datetime, until: datetime) -> list[Meeting]: ...
+
+    async def chat_stamps(self, since: datetime) -> list[ChatStamp]: ...
 
 
 class NameSource(Protocol):
@@ -642,6 +651,14 @@ class DatabaseEditStore:
             self._db, owner_telegram_id=self._owner, telegram_message_id=telegram_message_id
         )
 
+    async def meetings(self, since: datetime, until: datetime) -> list[Meeting]:
+        return await db_tasks.list_meetings(
+            self._db, owner_telegram_id=self._owner, since=since, until=until
+        )
+
+    async def chat_stamps(self, since: datetime) -> list[ChatStamp]:
+        return await db_chats.chat_stamps(self._db, owner_telegram_id=self._owner, since=since)
+
 
 def rule_of(understanding: Understanding, due_at: datetime | None) -> RuleOutcome:
     """Правило модели для записи задачи со сроком `due_at` (§13.5)."""
@@ -668,7 +685,20 @@ def task_fields(understanding: Understanding, rule: RuleOutcome | None = None) -
         # Сфера по смыслу — только из списка (`techspec/30-spheres.md` §30.2):
         # `settle` уже свёл её к названию из списка или снял.
         "sphere": understanding.sphere,
+        "duration": meeting_duration(
+            understanding.due_at, understanding.due_precision, understanding.duration
+        ),
     }
+
+
+def meeting_duration(
+    due_at: datetime | None, precision: str | None, duration: int | None
+) -> int | None:
+    """Длительность, которая ляжет в задачу (`techspec/31-hours.md` §31.1):
+    только у срока с часом — у остального её снимет и база."""
+    if due_at is None or precision != "time":
+        return None
+    return duration
 
 
 def several_items(also: Sequence[TaskItem]) -> tuple[list[tuple[int, TaskItem]], list[str]]:
@@ -1895,6 +1925,7 @@ class TaskService:
             swipe=context.swipe,
             recent=context.recent,
             spheres=context.spheres,
+            hours=context.hours,
         )
         if isinstance(verdict, Analysis):
             # Сфера — как её запишет бот: дела по смыслу — только из списка;
@@ -2149,7 +2180,7 @@ class TaskService:
                 texts.ICON_RECORDED,
                 texts.duplicate_reply(
                     title=same.title,
-                    due=self._due_words(same.due_at, same.due_precision),
+                    due=self._due_words(same.due_at, same.due_precision, same.duration),
                     repeat=rule_words(same.repeat),
                 ),
             )
@@ -2396,7 +2427,7 @@ class TaskService:
                 continue
             said = texts.duplicate_reply(
                 title=same.title,
-                due=self._due_words(same.due_at, same.due_precision),
+                due=self._due_words(same.due_at, same.due_precision, same.duration),
                 repeat=rule_words(same.repeat),
             )
             dups.append((number, item.title, said))
@@ -2525,7 +2556,7 @@ class TaskService:
     def _record_line(self, line: _Line, now: datetime, *, listed: bool = False) -> str:
         """Строка записи нового дела: «Записал: …» или строка списка (§23.4)."""
         item = line.item
-        due = self._due_words(item.due_at, item.due_precision)
+        due = self._due_words(item.due_at, item.due_precision, item.duration)
         remind_at = self._remind_words(line.planned, now)
         repeat = rule_words(line.rule.rule)
         if listed:
@@ -2557,7 +2588,7 @@ class TaskService:
         return texts.asked_reply(
             title=item.title,
             question=said,
-            due=self._due_words(item.due_at, item.due_precision),
+            due=self._due_words(item.due_at, item.due_precision, item.duration),
             remind_at=self._remind_words(line.planned, now),
             repeat=rule_words(line.rule.rule),
             sphere=item.sphere,
@@ -2597,7 +2628,9 @@ class TaskService:
             reply = texts.asked_reply(
                 title=understanding.title,
                 question=said,
-                due=self._due_words(understanding.due_at, understanding.due_precision),
+                due=self._due_words(
+                    understanding.due_at, understanding.due_precision, understanding.duration
+                ),
                 remind_at=self._remind_words(planned, now),
                 repeat=rule_words(rule.rule),
                 heads=self._heads(understanding),
@@ -2631,7 +2664,8 @@ class TaskService:
         список — блока 5 нет, и разбор идёт как до правки словом (поручение
         важнее контекста); не прочиталась последняя задача, свайп или
         разговор — нет только этой части. `before` — время самого сообщения,
-        граница блока 6.
+        граница блока 6. Часы по сферам (`techspec/31-hours.md` §31.2) — тоже
+        только у своего сообщения: разговор ведёт только оно.
         """
         if forwarded_from is not None:
             return await self._check_context()
@@ -2640,15 +2674,17 @@ class TaskService:
             return EditContext(tasks=[], last_tasks=(), swipe=None)
         now = self._clock()
         since = now - edits.LAST_TASK_WINDOW
-        tasks, events, swiped, recent, book = await asyncio.gather(
+        tasks, events, swiped, recent, book, sources = await asyncio.gather(
             self._open_tasks(store),
             self._last_events(store, since),
             self._swiped(store, chat_id, swipe),
             self._recent(store, since, before),
             self._spheres(store),
+            self._hour_sources(store, now),
         )
+        counted = self._hours_lines(sources, book, now)
         if tasks is None:
-            return replace(NO_EDIT, recent=recent, spheres=book)
+            return replace(NO_EDIT, recent=recent, spheres=book, hours=counted)
         last_tasks = tuple(edits.last_task_numbers(events, tasks, now))
         line = None
         if swiped is not None:
@@ -2668,6 +2704,7 @@ class TaskService:
             recent=recent,
             spheres=book,
             chat=swiped.chat if swiped is not None else None,
+            hours=counted,
         )
 
     async def _recent(self, store: EditStore, since: datetime, before: datetime) -> str | None:
@@ -2700,6 +2737,43 @@ class TaskService:
             return replace(NO_EDIT, spheres=book)
         logger.info("Список для сверки дублей: задач %s", len(tasks))
         return EditContext(tasks=tasks, last_tasks=(), swipe=None, edits=False, spheres=book)
+
+    async def _hour_sources(
+        self, store: EditStore, now: datetime
+    ) -> tuple[list[Meeting], list[ChatStamp]] | None:
+        """Встречи и сообщения чатов для часов по сферам (§31.1) — или `None`,
+        если база не ответила: разбор идёт без блока часов."""
+        since = hours.reading_since(now, self._settings.owner_timezone)
+        try:
+            meetings, stamps = await asyncio.gather(
+                store.meetings(since, now), store.chat_stamps(since)
+            )
+        except DatabaseError as error:
+            logger.warning("Часы по сферам не прочитаны, разбор без них: %s", error)
+            return None
+        return meetings, stamps
+
+    def _hours_lines(
+        self,
+        sources: tuple[list[Meeting], list[ChatStamp]] | None,
+        book: Sequence[Sphere] | None,
+        now: datetime,
+    ) -> tuple[str, ...] | None:
+        """Строки блока «Часы по сферам» (§31.2). Не прочитались встречи,
+        переписка или сферы — блока нет: часы сферы без её названия ушли бы в
+        «без сферы» и обманули бы. В журнал — только числа."""
+        if sources is None or book is None:
+            return None
+        meetings, stamps = sources
+        periods = hours.tally(meetings, stamps, book, now, self._settings.owner_timezone)
+        logger.info(
+            "Часы по сферам: встреч %s, сообщений чатов %s, минут сегодня %s, за неделю %s",
+            len(meetings),
+            len(stamps),
+            sum(item.total for item in periods[0].spheres),
+            sum(item.total for item in periods[-1].spheres),
+        )
+        return tuple(hours.lines(periods))
 
     async def _spheres(self, store: EditStore) -> list[Sphere] | None:
         """Живые сферы со знаниями (§30.2) — или `None`, если база не ответила:
@@ -2852,10 +2926,11 @@ class TaskService:
             **task_fields(understanding, rule),
             "due_at": due_at.isoformat(),
             "due_precision": precision,
+            "duration": meeting_duration(due_at, precision, understanding.duration),
         }
         line = texts.not_found_reply(
             title=understanding.title,
-            due=self._due_words(due_at, precision),
+            due=self._due_words(due_at, precision, understanding.duration),
             review_reason=review_reason(understanding, rule),
             priority=understanding.priority,
             remind_at=self._remind_words(planned, now),
@@ -2915,7 +2990,9 @@ class TaskService:
                 title=task.title,
             )
         question = (understanding.question or "").strip()
-        change = edits.edit_changes(task, edit, self._settings.owner_timezone, now)
+        change = edits.edit_changes(
+            task, edit, self._settings.owner_timezone, now, understanding.duration
+        )
         if not question and change.needs_start:
             question = texts.REPEAT_START
         stays = (change.due_at, change.due_precision)
@@ -2939,7 +3016,7 @@ class TaskService:
             else:
                 reply = texts.edited_reply(
                     texts.SAME_AS_RECORDED.format(title=task.title),
-                    self._due_words(change.due_at, change.due_precision),
+                    self._due_words(change.due_at, change.due_precision, change.duration),
                     priority=change.priority if edit.priority is not None else None,
                     people=change.people if edit.people is not None else None,
                     repeat=rule_words(change.repeat),
@@ -2986,7 +3063,7 @@ class TaskService:
                 )
             reply = texts.edited_reply(
                 head.format(title=change.title),
-                self._due_words(change.due_at, change.due_precision),
+                self._due_words(change.due_at, change.due_precision, change.duration),
                 remind_at,
                 priority,
                 people,
@@ -3065,7 +3142,7 @@ class TaskService:
         head = texts.DONE_REPEAT if action == "done" else texts.SKIPPED
         reply = texts.advanced_reply(
             head.format(title=task.title),
-            self._due_words(next_at, precision),
+            self._due_words(next_at, precision, task.duration),
             self._remind_words(planned, now),
         )
         back = Button(
@@ -3204,11 +3281,12 @@ class TaskService:
         (`techspec/23-several-tasks.md` §23.2). В разборе, записанном до этапа
         013, нет `same_as` — он читается как «не дубль»; в правке до этапа 021
         нет `time_removed` — она читается как «час не снимали» (§12.8); в
-        разборе до этапа 032 нет `sphere` — он читается как «без сферы».
+        разборе до этапа 032 нет `sphere` — он читается как «без сферы», до
+        этапа 033 нет `duration` — как «без длительности».
         """
         if stored.analysis is None:
             return None
-        analysis = {"same_as": None, "sphere": None, **stored.analysis}
+        analysis = {"same_as": None, "sphere": None, "duration": None, **stored.analysis}
         if isinstance(analysis.get("edit"), dict):
             analysis["edit"] = {"time_removed": False, **analysis["edit"]}
         model: type[Understanding] = Understanding
@@ -3251,7 +3329,7 @@ class TaskService:
         logger.info("Задача %s возвращена в работу", reopened.id)
         reply = texts.edited_reply(
             texts.REOPENED.format(title=reopened.title),
-            self._due_words(reopened.due_at, reopened.due_precision),
+            self._due_words(reopened.due_at, reopened.due_precision, reopened.duration),
             self._remind_words(planned, now),
             repeat=rule_words(reopened.repeat),
         )
@@ -3358,17 +3436,21 @@ class TaskService:
         logger.info("Задача %s возвращена на прежний раз", returned.id)
         reply = texts.edited_reply(
             texts.REOPENED.format(title=returned.title),
-            self._due_words(returned.due_at, returned.due_precision),
+            self._due_words(returned.due_at, returned.due_precision, returned.duration),
             self._remind_words(planned, now),
             repeat=rule_words(returned.repeat),
         )
         return PressOutcome(message=texts.iconed(texts.ICON_EDIT, reply), replace=True)
 
-    def _due_words(self, due_at: datetime | None, precision: str | None) -> str | None:
-        """Срок словами в поясе владельца; нет срока — нет и строки."""
+    def _due_words(
+        self, due_at: datetime | None, precision: str | None, duration: int | None = None
+    ) -> str | None:
+        """Срок словами в поясе владельца; нет срока — нет и строки. У встречи с
+        длительностью — с концом: «14:00–16:00» (`techspec/31-hours.md` §31.1)."""
         if due_at is None:
             return None
-        return texts.format_due(due_at.astimezone(self._settings.owner_timezone), precision)
+        local = due_at.astimezone(self._settings.owner_timezone)
+        return texts.format_due(local, precision, meeting_duration(due_at, precision, duration))
 
     def _remind_words(self, planned: list[Planned], now: datetime) -> str | None:
         """Ближайшее напоминание словами — из того же плана, что уходит в базу (§6.4)."""
@@ -3424,7 +3506,9 @@ class TaskService:
             texts.recorded_reply(
                 kind=understanding.kind,
                 title=understanding.title,
-                due=self._due_words(understanding.due_at, understanding.due_precision),
+                due=self._due_words(
+                    understanding.due_at, understanding.due_precision, understanding.duration
+                ),
                 review_reason=review_reason(understanding, rule),
                 priority=understanding.priority,
                 remind_at=self._remind_words(planned, now),

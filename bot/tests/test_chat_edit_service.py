@@ -537,6 +537,46 @@ async def test_other_fields_keep_the_reminders_and_say_fixed() -> None:
     assert outcome.message == "✏️ Поправил: отправить отчёт. Срок: пятница, 2 октября. Люди: Петров"
 
 
+async def test_named_end_changes_the_duration_and_names_the_end() -> None:
+    """«Встреча до семи» — длительность верхним полем, срок и план не трогаются;
+    ответ называет конец (`techspec/31-hours.md` §31.1)."""
+    service, _, understandings, planner, _ = build(edited(1, top_duration=120))
+
+    outcome = await say(service, "встреча с Ренатой до семи")
+
+    assert planner.calls == []
+    assert saved_edit(understandings) == {
+        "task_id": MEETING_ID,
+        "action": "change",
+        "changes": {"duration": 120},
+        "schedule": [],
+        "question": None,
+    }
+    assert outcome.message == (
+        "✏️ Поправил: встреча с Ренатой. Срок: пятница, 2 октября, 17:00–19:00"
+    )
+
+
+async def test_moved_meeting_keeps_its_duration() -> None:
+    """Перенос встречи на другой час длительности не называет — она остаётся,
+    и ответ называет новый конец."""
+    long_meeting = replace(MEETING, duration=90)
+    store = FakeEdits([LAMP, REPORT, long_meeting])
+    service, _, understandings, _, _ = build(
+        edited(1, due_at=TODAY_FIVE, due_precision="time"),
+        store,
+        planner=FakePlanner(MOVE_PLAN),
+    )
+
+    outcome = await say(service, "встреча перенеслась на пять")
+
+    assert saved_edit(understandings)["changes"] == {"due_at": TODAY_FIVE}
+    assert outcome.message == (
+        "✏️ Перенёс: встреча с Ренатой. Срок: вторник, 29 сентября, 17:00–18:30. "
+        "Напомню: сегодня в 16:00"
+    )
+
+
 async def test_fixed_task_without_a_due_has_no_due_line() -> None:
     service, _, _, _, _ = build(edited(3, title="купить две лампочки"))
 

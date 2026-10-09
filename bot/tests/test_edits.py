@@ -40,6 +40,7 @@ def make_task(
     status: str = "active",
     repeat: dict[str, Any] | None = None,
     occurrence_at: datetime | None = None,
+    duration: int | None = None,
 ) -> TaskDetails:
     return TaskDetails(
         id=task_id,
@@ -54,6 +55,7 @@ def make_task(
         created_at=created_at,
         repeat=repeat,
         occurrence_at=occurrence_at,
+        duration=duration,
     )
 
 
@@ -781,6 +783,84 @@ def test_task_without_changes_keeps_its_due() -> None:
     assert change.changes == {}
     assert change.due_at == due
     assert change.due_precision == "day"
+
+
+# --- длительность встречи (`techspec/31-hours.md` §31.1) ---------------------
+
+# Встреча в субботу, 3 октября, в 14:00 у владельца.
+SATURDAY_TWO = datetime(2026, 10, 3, 14, 0, tzinfo=TZ)
+
+
+def test_named_end_changes_the_duration_of_a_meeting() -> None:
+    """«Созвон до 16» — длительность верхним полем разбора, срок не трогается."""
+    task = make_task(due_at=SATURDAY_TWO, due_precision="time", duration=60)
+
+    change = edits.edit_changes(task, make_edit(), TZ, NOW, duration=120)
+
+    assert change.changes == {"duration": 120}
+    assert change.duration == 120
+    assert change.named
+    assert not change.due_changed
+
+
+def test_move_without_an_end_keeps_the_duration() -> None:
+    """Перенос встречи на другой час длительности не называет — она остаётся."""
+    task = make_task(due_at=SATURDAY_TWO, due_precision="time", duration=120)
+    edit = make_edit(due_at=datetime(2026, 10, 3, 15, 0, tzinfo=TZ), due_precision="time")
+
+    change = edits.edit_changes(task, edit, TZ, NOW)
+
+    assert "duration" not in change.changes
+    assert change.duration == 120
+
+
+def test_same_duration_is_no_change_but_still_named() -> None:
+    """Та же длительность — «Так и записано», а не «Не понял»."""
+    task = make_task(due_at=SATURDAY_TWO, due_precision="time", duration=120)
+
+    change = edits.edit_changes(task, make_edit(), TZ, NOW, duration=120)
+
+    assert change.changes == {}
+    assert change.named
+
+
+def test_meeting_gets_its_first_hour_and_the_duration_together() -> None:
+    """Встреча на день получает час — и длительность того же разбора."""
+    task = make_task(due_at=datetime(2026, 10, 3, 18, 0, tzinfo=TZ), due_precision="day")
+    edit = make_edit(due_at=SATURDAY_TWO, due_precision="time")
+
+    change = edits.edit_changes(task, edit, TZ, NOW, duration=60)
+
+    assert change.changes == {"due_at": SATURDAY_TWO.isoformat(), "duration": 60}
+    assert change.duration == 60
+
+
+def test_meeting_moved_off_the_hour_loses_the_duration() -> None:
+    """«Время пока не знаю» — срок ушёл с часа, длительности нет: её снимет и
+    база (§3.3). Перенос на день час держит (§12.8) — и длительность тоже."""
+    task = make_task(due_at=SATURDAY_TWO, due_precision="time", duration=120)
+    unknown = make_edit(time_removed=True)
+    another_day = make_edit(due_at=datetime(2026, 10, 5, 18, 0, tzinfo=TZ), due_precision="day")
+
+    off = edits.edit_changes(task, unknown, TZ, NOW, duration=120)
+    kept = edits.edit_changes(task, another_day, TZ, NOW)
+
+    assert off.changes == {"due_date": "2026-10-03"}
+    assert off.duration is None
+    assert kept.due_precision == "time"
+    assert kept.duration == 120
+
+
+def test_end_of_a_task_without_an_hour_is_not_a_change() -> None:
+    """«До 16» у дела без часа длительности не даёт: «Не понял», а не «Так и
+    записано»."""
+    task = make_task(due_at=datetime(2026, 10, 3, 18, 0, tzinfo=TZ), due_precision="day")
+
+    change = edits.edit_changes(task, make_edit(), TZ, NOW, duration=120)
+
+    assert change.changes == {}
+    assert change.duration is None
+    assert not change.named
 
 
 # --- кнопки ------------------------------------------------------------------
