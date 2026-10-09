@@ -82,9 +82,11 @@ from solomon.config import Settings
 from solomon.db import facts as db_facts
 from solomon.db import reminders as db_reminders
 from solomon.db import searches as db_searches
+from solomon.db import spheres as db_spheres
 from solomon.db import tasks as db_tasks
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
+from solomon.db.spheres import Sphere
 from solomon.db.tasks import (
     MessageKind,
     OpenQuestion,
@@ -111,6 +113,14 @@ from solomon.services.repeat import (
     same_rule,
     series_precision,
 )
+from solomon.services.spheres import (
+    SPHERE_LIMIT,
+    SpherePlan,
+    plan_spheres,
+    sphere_note,
+)
+from solomon.services.spheres import find as find_sphere
+from solomon.services.spheres import settle as settle_spheres
 from solomon.services.transcription import (
     NotTranscribed,
     Transcriber,
@@ -119,6 +129,7 @@ from solomon.services.transcription import (
 )
 from solomon.services.understanding import (
     SEARCH_KIND,
+    SPHERE_ACTION,
     TASK_KINDS,
     Analysis,
     AskedQuestion,
@@ -127,6 +138,7 @@ from solomon.services.understanding import (
     ConversationUnderstanding,
     ConversationVerdict,
     ImageType,
+    KnownSphere,
     MessageUnderstanding,
     OpenTask,
     PhotoAnalysis,
@@ -263,7 +275,8 @@ class UnderstandingRecorder(Protocol):
     прочитанное со снимка (§14.2). `same_task` — задача, которую сообщение
     повторяет (`techspec/15-duplicates.md` §15.3): новой не заводится.
     `reply` пуст у расшифровки голосового из переписки (§18.3): ответа у
-    такого сообщения нет.
+    такого сообщения нет. `spheres` — что сообщение делает со сферами
+    (`techspec/30-spheres.md` §30.2): `{drop, add, chat}`.
     """
 
     async def __call__(
@@ -284,6 +297,7 @@ class UnderstandingRecorder(Protocol):
         edit: Mapping[str, Any] | None = None,
         photo_text: str | None = None,
         same_task: str | None = None,
+        spheres: Mapping[str, Any] | None = None,
     ) -> list[Task]: ...
 
 
@@ -335,6 +349,7 @@ class Analyst(Protocol):
         last_tasks: Sequence[int] = (),
         swipe: str | None = None,
         recent: str | None = None,
+        spheres: Sequence[KnownSphere] | None = None,
     ) -> Verdict: ...
 
     async def analyze_photo(
@@ -346,6 +361,7 @@ class Analyst(Protocol):
         forwarded_from: str | None = None,
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
+        spheres: Sequence[KnownSphere] | None = None,
     ) -> PhotoVerdict: ...
 
     async def analyze_conversation(
@@ -355,6 +371,7 @@ class Analyst(Protocol):
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
         recent: str | None = None,
+        spheres: Sequence[KnownSphere] | None = None,
     ) -> ConversationVerdict: ...
 
 
@@ -411,7 +428,8 @@ class EditContext:
     правка разрешена: у пересланного и снимка список есть только для сверки
     дублей (`techspec/15-duplicates.md` §15.2), и их `edit` бот не слушает.
     `recent` — готовый блок 6 (`techspec/17-conversation.md` §17.3); `None` —
-    блока нет.
+    блока нет. `spheres` — живые сферы со знаниями (`techspec/30-spheres.md`
+    §30.2); `None` — не прочитались, и блока сфер нет.
     """
 
     tasks: list[TaskDetails] | None
@@ -419,6 +437,7 @@ class EditContext:
     swipe: str | None
     edits: bool = True
     recent: str | None = None
+    spheres: list[Sphere] | None = None
 
 
 NO_EDIT = EditContext(tasks=None, last_tasks=(), swipe=None)
@@ -479,6 +498,8 @@ class EditStore(Protocol):
     async def return_occurrence(
         self, task_id: str, back_to: int, moved_from: int, schedule: Sequence[Planned]
     ) -> TaskDetails | None: ...
+
+    async def spheres(self) -> list[Sphere]: ...
 
 
 class NameSource(Protocol):
@@ -605,6 +626,9 @@ class DatabaseEditStore:
             schedule=schedule,
         )
 
+    async def spheres(self) -> list[Sphere]:
+        return await db_spheres.list_spheres(self._db, owner_telegram_id=self._owner)
+
 
 def rule_of(understanding: Understanding, due_at: datetime | None) -> RuleOutcome:
     """Правило модели для записи задачи со сроком `due_at` (§13.5)."""
@@ -628,6 +652,9 @@ def task_fields(understanding: Understanding, rule: RuleOutcome | None = None) -
         "promise": understanding.promise,
         "people": understanding.people,
         "needs_review": understanding.needs_review or outcome.malformed,
+        # Сфера по смыслу — только из списка (`techspec/30-spheres.md` §30.2):
+        # `settle` уже свёл её к названию из списка или снял.
+        "sphere": understanding.sphere,
     }
 
 
@@ -837,6 +864,8 @@ class Decision:
     # Дубль (§15.3): задача, о которой сообщение, — новой нет.
     same_task: str | None = None
     more: tuple[NewTask, ...] = ()
+    # Сфера чата и его дел — ответ на отчёт о переписке (§30.2).
+    chat_sphere: Mapping[str, Any] | None = None
 
     def task_rows(self) -> list[dict[str, Any]]:
         """Аргумент `tasks` для `record_understanding` (§23.6): дела по номерам."""
@@ -941,6 +970,7 @@ class _Top:
     minute: datetime | None = None
     first: Understanding | None = None
     unfound: _Unfound | None = None
+    chat_sphere: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -977,18 +1007,35 @@ def edit_row(
     }
 
 
-def fact_rows(understanding: Understanding) -> list[dict[str, Any]]:
+def fact_rows(understanding: Understanding, sphere: str | None = None) -> list[dict[str, Any]]:
     """Записи памяти для `record_understanding` (§3.7): статус — по виду сообщения.
 
     Модель отдаёт только категорию и текст; факт это или предположение,
     решает бот по `kind` (`techspec/08-memory.md` §8.2), и решение
-    проверяется кодом, а не моделью.
+    проверяется кодом, а не моделью. `sphere` — знание о сфере «это по X:
+    …» (`techspec/30-spheres.md` §30.2): у каждой записи сообщения.
     """
     status = fact_status(understanding.kind)
-    return [
-        {"category": item.category, "text": item.text, "status": status}
-        for item in understanding.facts
-    ]
+    rows: list[dict[str, Any]] = []
+    for item in understanding.facts:
+        row: dict[str, Any] = {"category": item.category, "text": item.text, "status": status}
+        if sphere is not None:
+            row["sphere"] = sphere
+        rows.append(row)
+    return rows
+
+
+def sphere_ops(plan: SpherePlan, chat: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Аргумент `spheres` для `record_understanding` (§3.4): убрать, завести,
+    сфера чата — только непустое; нечего — `None`."""
+    ops: dict[str, Any] = {}
+    if plan.drop:
+        ops["drop"] = list(plan.drop)
+    if plan.add:
+        ops["add"] = list(plan.add)
+    if chat is not None:
+        ops["chat"] = dict(chat)
+    return ops or None
 
 
 def record_icon(kinds: Iterable[str]) -> str:
@@ -1136,6 +1183,7 @@ class TaskService:
             edit: Mapping[str, Any] | None = None,
             photo_text: str | None = None,
             same_task: str | None = None,
+            spheres: Mapping[str, Any] | None = None,
         ) -> list[Task]:
             return await db_tasks.record_understanding(
                 db,
@@ -1154,6 +1202,7 @@ class TaskService:
                 edit=edit,
                 photo_text=photo_text,
                 same_task=same_task,
+                spheres=spheres,
             )
 
         async def read_question(*, owner_telegram_id: int, since: datetime) -> OpenQuestion | None:
@@ -1380,6 +1429,7 @@ class TaskService:
             forwarded_from=forwarded_from,
             open_question=asked,
             tasks=context.tasks,
+            spheres=context.spheres,
         )
         if not isinstance(verdict, PhotoAnalysis):
             said = caption.strip()
@@ -1400,7 +1450,9 @@ class TaskService:
             # Текст на снимке — данные, а не команда (инвариант 3): задачи
             # снимок не правит и память не пишет, что бы модель ни отдала.
             logger.info("У снимка %s отброшены: %s", saved.id, ", ".join(dropped))
-        photo = understanding.model_copy(update={"edit": None, "facts": []})
+        photo = settle_spheres(
+            understanding.model_copy(update={"edit": None, "facts": []}), context.spheres or []
+        )
 
         if (asked is None or not photo.answers_question) and photo.kind not in TASK_KINDS:
             # Поручения нет — задачи и подсказки тоже. Разбор записывается:
@@ -1501,7 +1553,7 @@ class TaskService:
             self._open_question(), self._check_context(), self._conversation_recent(items)
         )
         verdict = await self._analyst.analyze_conversation(
-            text, open_question=asked, tasks=context.tasks, recent=recent
+            text, open_question=asked, tasks=context.tasks, recent=recent, spheres=context.spheres
         )
         if not isinstance(verdict, ConversationAnalysis):
             # Отказ модели (§5.4): одна задача «как есть» — кто писал и подпись.
@@ -1521,7 +1573,9 @@ class TaskService:
             # Переписка — данные, а не команда (инвариант 3): задачи она не
             # правит и память не пишет, что бы модель ни отдала.
             logger.info("У переписки %s отброшены: %s", saved.id, ", ".join(dropped))
-        read = understanding.model_copy(update={"edit": None, "facts": []})
+        read = settle_spheres(
+            understanding.model_copy(update={"edit": None, "facts": []}), context.spheres or []
+        )
         try:
             decision = await self._conversation_decision(
                 read, asked, context, items[head].telegram_message_id, caption=caption
@@ -1827,9 +1881,14 @@ class TaskService:
             last_tasks=context.last_tasks,
             swipe=context.swipe,
             recent=context.recent,
+            spheres=context.spheres,
         )
         if isinstance(verdict, Analysis):
-            understanding = verdict.understanding
+            # Сфера — как её запишет бот: дела по смыслу — только из списка;
+            # заводит и убирает сферы только своё сообщение (§30.2).
+            book = context.spheres or []
+            understanding = settle_spheres(verdict.understanding, book)
+            plan = plan_spheres(understanding, book) if talk else SpherePlan()
             note, search_id = await self._search_note(saved, understanding, talk=talk)
             now = self._clock()
             try:
@@ -1841,6 +1900,7 @@ class TaskService:
                     telegram_message_id,
                     talk=talk,
                     search_note=note,
+                    spheres=plan,
                 )
             except DatabaseError as error:
                 # Без плана «Напомню» было бы неправдой, а задача без
@@ -1851,9 +1911,10 @@ class TaskService:
                 saved,
                 decision,
                 analysis=understanding.model_dump(mode="json"),
-                facts=fact_rows(understanding),
+                facts=fact_rows(understanding, plan.fact_sphere),
                 verdict=verdict,
                 transcript=transcript,
+                spheres=sphere_ops(plan, decision.chat_sphere),
             )
             if outcome.ok and search_id is not None:
                 return replace(outcome, search_id=search_id)
@@ -1916,11 +1977,13 @@ class TaskService:
         verdict: Analysis | PhotoAnalysis | ConversationAnalysis | None,
         transcript: Transcript | None = None,
         photo_text: str | None = None,
+        spheres: Mapping[str, Any] | None = None,
     ) -> RecordOutcome:
         """Второй шаг и ответ — общий хвост текста, голоса, снимка и переписки.
 
         `verdict` — ответ модели, из него модель и токены (§3.2); `None` —
-        разбора не было, и записан текст «как есть».
+        разбора не было, и записан текст «как есть». `spheres` — что
+        сообщение делает со сферами (`techspec/30-spheres.md` §30.2).
         """
         try:
             recorded = await self._record_understanding(
@@ -1939,6 +2002,7 @@ class TaskService:
                 edit=decision.edit,
                 photo_text=photo_text,
                 same_task=decision.same_task,
+                spheres=spheres,
             )
         except DatabaseError as error:
             # Правку и дубль база отклоняет и тогда, когда задачу закрыли или
@@ -1949,6 +2013,14 @@ class TaskService:
 
         if facts:
             logger.info("Записано сведений о владельце: %s", len(facts))
+        if spheres:
+            # Журнал — только числа: названия сфер — слова владельца.
+            logger.info(
+                "Сферы: заведено %s, убрано %s, сфера чата %s",
+                len(spheres.get("add", ())),
+                len(spheres.get("drop", ())),
+                "да" if "chat" in spheres else "нет",
+            )
 
         # Задачи сообщения: поправленная ответом или правкой — первая (§23.6).
         new = recorded[1:] if decision.amend is not None or decision.edit is not None else recorded
@@ -1978,6 +2050,7 @@ class TaskService:
         *,
         talk: bool = False,
         search_note: str | None = None,
+        spheres: SpherePlan | None = None,
     ) -> Decision:
         """Пять путей разбора: ответ на вопрос, правка словом, дубль, запись
         с вопросом, обычная запись.
@@ -2015,9 +2088,16 @@ class TaskService:
         и запись прежние. Тем же путём идёт сообщение с поиском
         (`techspec/24-search.md` §24.4): `search_note` — его абзац, он встаёт
         после записи и перед вопросом, а поиск задачей не становится.
+
+        `spheres` — что сообщение делает со сферами (`techspec/30-spheres.md`
+        §30.2). «Заведи», «убери» — абзац о сферах тем же путём, что поиск;
+        знание о сфере — обычный путь сведения о себе: «Запомнил про X».
         """
+        plan = spheres or SpherePlan()
+        said = sphere_note(plan)
+        knowledge = understanding.kind == "about_me"
         numbered, beyond = several_items(also_of(understanding))
-        if numbered or beyond or search_note is not None:
+        if numbered or beyond or search_note is not None or (said is not None and not knowledge):
             return await self._decide_several(
                 understanding,
                 asked,
@@ -2027,6 +2107,7 @@ class TaskService:
                 numbered,
                 beyond,
                 search_note=search_note,
+                sphere_note=said,
             )
         top = await self._top(understanding, asked, now, context, telegram_message_id)
         if top.first is None:
@@ -2046,6 +2127,7 @@ class TaskService:
                 amend=top.amend,
                 edit=top.edit,
                 buttons=top.buttons + top.picks,
+                chat_sphere=top.chat_sphere,
             )
 
         same = self._duplicate_of(understanding, context.tasks)
@@ -2063,7 +2145,7 @@ class TaskService:
                 reply=reply, task=None, reminders=[], buttons=(apart,), same_task=same.id
             )
 
-        return await self._new_task(understanding, now, talk=talk)
+        return await self._new_task(understanding, now, talk=talk, spheres=plan)
 
     async def _top(
         self,
@@ -2085,7 +2167,12 @@ class TaskService:
             return await self._answer(understanding, asked, now)
         if understanding.edit is not None and context.tasks is not None and context.edits:
             return await self._edit_top(
-                understanding, understanding.edit, context.tasks, now, telegram_message_id
+                understanding,
+                understanding.edit,
+                context.tasks,
+                now,
+                telegram_message_id,
+                context.spheres or [],
             )
         return _Top(first=understanding)
 
@@ -2159,6 +2246,7 @@ class TaskService:
         tasks: Sequence[TaskDetails],
         now: datetime,
         telegram_message_id: int,
+        spheres: Sequence[Sphere] = (),
     ) -> _Top:
         """Правка словом (§12.3): задача узнана, кандидаты или не найдено.
 
@@ -2169,7 +2257,7 @@ class TaskService:
         """
         task = edits.task_by_number(tasks, edit.task)
         if task is not None:
-            edited = await self._edit_known(understanding, edit, task, now)
+            edited = await self._edit_known(understanding, edit, task, now, spheres)
             return _Top(
                 head=None if edited.unclear else edited.head,
                 icon=edited.icon,
@@ -2192,7 +2280,8 @@ class TaskService:
                 )
                 for item in candidates
             )
-            return _Top(question=edits.pick_question(edit, now, timezone), picks=picks)
+            question = edits.pick_question(edit, now, timezone, sphere=understanding.sphere)
+            return _Top(question=question, picks=picks)
         if edit.action == "change" and edit.due_at is not None and understanding.kind in TASK_KINDS:
             unfound = await self._unfound_task(understanding, edit.due_at, edit.due_precision, now)
             return _Top(
@@ -2204,6 +2293,9 @@ class TaskService:
                 minute=unfound.minute,
                 unfound=unfound,
             )
+        if edit.action == SPHERE_ACTION:
+            unknown = texts.sphere_task_unknown(understanding.sphere)
+            return _Top(head=unknown, icon=texts.ICON_TROUBLE)
         return _Top(head=texts.NOT_FOUND.format(title=understanding.title), icon=texts.ICON_TROUBLE)
 
     async def _decide_several(
@@ -2217,6 +2309,7 @@ class TaskService:
         beyond: Sequence[str],
         *,
         search_note: str | None = None,
+        sphere_note: tuple[str, str] | None = None,
     ) -> Decision:
         """Сообщение о нескольких делах (`techspec/23-several-tasks.md` §23.3).
 
@@ -2234,7 +2327,9 @@ class TaskService:
         список), дубли, накладки, дела сверх десяти, поиск (`search_note`,
         `techspec/24-search.md` §24.4), вопрос — последним. Вопрос встаёт в
         строку записи, только когда весь ответ — одна эта строка. Поиск в
-        верхних полях задачей не становится: его вид не дело.
+        верхних полях задачей не становится: его вид не дело. Абзац о сферах
+        (`sphere_note`, значок и текст, `techspec/30-spheres.md` §30.3) —
+        перед поиском; «заведи сферу» в верхних полях — тоже не дело.
         """
         top = await self._top(understanding, asked, now, context, telegram_message_id)
         question = top.question
@@ -2305,6 +2400,7 @@ class TaskService:
                 and not clashes
                 and more is None
                 and search_note is None
+                and sphere_note is None
             )
             if alone and line.asks and question is not None:
                 record = self._asked_line(line, question, now)
@@ -2339,6 +2435,7 @@ class TaskService:
             top.icon if top.head else None,
             record_icon(line.item.kind for line in lines) if lines else None,
             texts.ICON_RECORDED if dups else None,
+            sphere_note[0] if sphere_note else None,
             texts.ICON_SEARCH if search_note else None,
             asks=asking,
         )
@@ -2351,6 +2448,7 @@ class TaskService:
                     *(said for _, _, said in dups),
                     *clashes,
                     more,
+                    sphere_note[1] if sphere_note else None,
                     search_note,
                     question,
                 ),
@@ -2368,6 +2466,7 @@ class TaskService:
             + apart
             + top.picks,
             more=tuple(row for row in rows if row.item != 1),
+            chat_sphere=top.chat_sphere,
         )
 
     async def _plan_item(
@@ -2397,6 +2496,7 @@ class TaskService:
                 priority=item.priority,
                 remind_at=remind_at,
                 repeat=repeat,
+                sphere=item.sphere,
             )
         return texts.recorded_reply(
             kind=item.kind,
@@ -2406,6 +2506,7 @@ class TaskService:
             priority=item.priority,
             remind_at=remind_at,
             repeat=repeat,
+            sphere=item.sphere,
         )
 
     def _asked_line(self, line: _Line, question: str, now: datetime) -> str:
@@ -2418,10 +2519,16 @@ class TaskService:
             due=self._due_words(item.due_at, item.due_precision),
             remind_at=self._remind_words(line.planned, now),
             repeat=rule_words(line.rule.rule),
+            sphere=item.sphere,
         )
 
     async def _new_task(
-        self, understanding: Understanding, now: datetime, *, talk: bool = False
+        self,
+        understanding: Understanding,
+        now: datetime,
+        *,
+        talk: bool = False,
+        spheres: SpherePlan | None = None,
     ) -> Decision:
         """Запись с вопросом или обычная запись — сообщение заводит своё.
 
@@ -2453,6 +2560,7 @@ class TaskService:
                 remind_at=self._remind_words(planned, now),
                 repeat=rule_words(rule.rule),
                 heads=self._heads(understanding),
+                sphere=understanding.sphere,
             )
             # Открытый вопрос задачи хранится без значка: по тексту бот и
             # модель узнают его в ответе (`techspec/29-icons.md` §29.2).
@@ -2467,11 +2575,8 @@ class TaskService:
                 reminders=planned,
             )
 
-        return Decision(
-            reply=paragraphs(self._reply_for(understanding, planned, now, rule, talk=talk), clash),
-            task=task_row,
-            reminders=planned,
-        )
+        reply = self._reply_for(understanding, planned, now, rule, talk=talk, spheres=spheres)
+        return Decision(reply=paragraphs(reply, clash), task=task_row, reminders=planned)
 
     async def _edit_context(
         self, chat_id: int, forwarded_from: str | None, swipe: Swipe | None, before: datetime
@@ -2494,14 +2599,15 @@ class TaskService:
             return EditContext(tasks=[], last_tasks=(), swipe=None)
         now = self._clock()
         since = now - edits.LAST_TASK_WINDOW
-        tasks, events, swiped, recent = await asyncio.gather(
+        tasks, events, swiped, recent, book = await asyncio.gather(
             self._open_tasks(store),
             self._last_events(store, since),
             self._swiped(store, chat_id, swipe),
             self._recent(store, since, before),
+            self._spheres(store),
         )
         if tasks is None:
-            return replace(NO_EDIT, recent=recent)
+            return replace(NO_EDIT, recent=recent, spheres=book)
         last_tasks = tuple(edits.last_task_numbers(events, tasks, now))
         line = None
         if swiped is not None:
@@ -2514,7 +2620,9 @@ class TaskService:
             list(last_tasks),
             line is not None,
         )
-        return EditContext(tasks=tasks, last_tasks=last_tasks, swipe=line, recent=recent)
+        return EditContext(
+            tasks=tasks, last_tasks=last_tasks, swipe=line, recent=recent, spheres=book
+        )
 
     async def _recent(self, store: EditStore, since: datetime, before: datetime) -> str | None:
         """Блок 6 «Недавний разговор» (§17.3) или `None`, если блока нет.
@@ -2541,11 +2649,22 @@ class TaskService:
         store = self._edits
         if store is None:
             return EditContext(tasks=[], last_tasks=(), swipe=None, edits=False)
-        tasks = await self._open_tasks(store)
+        tasks, book = await asyncio.gather(self._open_tasks(store), self._spheres(store))
         if tasks is None:
-            return NO_EDIT
+            return replace(NO_EDIT, spheres=book)
         logger.info("Список для сверки дублей: задач %s", len(tasks))
-        return EditContext(tasks=tasks, last_tasks=(), swipe=None, edits=False)
+        return EditContext(tasks=tasks, last_tasks=(), swipe=None, edits=False, spheres=book)
+
+    async def _spheres(self, store: EditStore) -> list[Sphere] | None:
+        """Живые сферы со знаниями (§30.2) — или `None`, если база не ответила:
+        разбор идёт без блока сфер, поручение важнее контекста."""
+        try:
+            book = await store.spheres()
+        except DatabaseError as error:
+            logger.warning("Сферы не прочитаны, разбор без них: %s", error)
+            return None
+        logger.info("Сфер владельца: %s", len(book))
+        return book
 
     async def _open_tasks(self, store: EditStore) -> list[TaskDetails] | None:
         """Открытые задачи по номерам; база не ответила — `None`, блока нет."""
@@ -2691,6 +2810,7 @@ class TaskService:
             priority=understanding.priority,
             remind_at=self._remind_words(planned, now),
             repeat=rule_words(rule.rule),
+            sphere=understanding.sphere,
         )
         clash = await self._same_minute_titles(due_at, precision)
         return _Unfound(
@@ -2702,7 +2822,12 @@ class TaskService:
         )
 
     async def _edit_known(
-        self, understanding: Understanding, edit: TaskEdit, task: TaskDetails, now: datetime
+        self,
+        understanding: Understanding,
+        edit: TaskEdit,
+        task: TaskDetails,
+        now: datetime,
+        spheres: Sequence[Sphere] = (),
     ) -> Edited:
         """Правка узнанной задачи (§12.3, §12.5): что записать и что ответить.
 
@@ -2718,7 +2843,11 @@ class TaskService:
         следующий раз, «убрать» убирает серию. У разовой пропуск — то же, что
         «убрать»: в базу он уходит пропуском, и база решает по задаче, какой
         она будет в момент записи.
+
+        Правка сферы (`techspec/30-spheres.md` §30.2) — `_sphere_edit`.
         """
+        if edit.action == SPHERE_ACTION:
+            return self._sphere_edit(understanding, task, spheres)
         if edit.action in ("done", "skip") and task.repeat is not None:
             return await self._advance(task, edit.action, task.repeat, now)
         if edit.action in ("done", "cancel", "skip"):
@@ -2823,6 +2952,42 @@ class TaskService:
             stays=stays,
         )
 
+    @staticmethod
+    def _sphere_edit(
+        understanding: Understanding, task: TaskDetails, spheres: Sequence[Sphere]
+    ) -> Edited:
+        """«Это по X» о деле (§30.2): новая сфера — в верхнем `sphere`, уже
+        сведённая `settle` к названию из списка; пусто — снять сферу. Сферы
+        нет — заведётся (владелец назвал её сам), но не тринадцатая: тогда
+        ничего не меняется, а ответ говорит, как освободить место. Та же
+        сфера — «Так и записано», без записи правки."""
+        target = understanding.sphere
+        current = next((sphere.name for sphere in spheres if sphere.id == task.sphere_id), None)
+        found = find_sphere(spheres, target)
+        stays = (task.due_at, task.due_precision)
+        if target is not None and found is None and len(spheres) >= SPHERE_LIMIT:
+            return Edited(
+                edit=edit_row(task, "change"),
+                head=texts.spheres_full([target], SPHERE_LIMIT),
+                title=task.title,
+                stays=stays,
+                icon=texts.ICON_TROUBLE,
+            )
+        named = found.name if found is not None else target
+        if named == current:
+            return Edited(
+                edit=edit_row(task, "change"),
+                head=texts.sphere_same(task.title, current),
+                title=task.title,
+                stays=stays,
+            )
+        row = edit_row(task, SPHERE_ACTION)
+        row["sphere"] = named
+        head = texts.sphere_fixed(task.title, named)
+        if named is not None and found is None:
+            head = f"{head}. {texts.spheres_added([named])}"
+        return Edited(edit=row, head=head, title=task.title, stays=stays)
+
     async def _advance(
         self, task: TaskDetails, action: str, rule: Mapping[str, Any], now: datetime
     ) -> Edited:
@@ -2889,7 +3054,11 @@ class TaskService:
             task = await store.task(task_id)
             if task is None or task.status != db_tasks.ACTIVE_STATUS:
                 return PressOutcome(message=texts.PICKED_GONE, replace=False)
-            edited = await self._edit_known(understanding, understanding.edit, task, self._clock())
+            # Сферы нужны только правке сферы (§30.2): их список — на момент нажатия.
+            book = await store.spheres() if understanding.edit.action == SPHERE_ACTION else []
+            edited = await self._edit_known(
+                understanding, understanding.edit, task, self._clock(), book
+            )
             reply = paragraphs(stored.reply, edited.reply) if several else edited.reply
             picked = await store.pick(stored.id, edited.edit, reply)
         except DatabaseError as error:
@@ -2984,11 +3153,12 @@ class TaskService:
         моделью, без него (до этапа 023) — как разбор без других дел
         (`techspec/23-several-tasks.md` §23.2). В разборе, записанном до этапа
         013, нет `same_as` — он читается как «не дубль»; в правке до этапа 021
-        нет `time_removed` — она читается как «час не снимали» (§12.8).
+        нет `time_removed` — она читается как «час не снимали» (§12.8); в
+        разборе до этапа 032 нет `sphere` — он читается как «без сферы».
         """
         if stored.analysis is None:
             return None
-        analysis = {"same_as": None, **stored.analysis}
+        analysis = {"same_as": None, "sphere": None, **stored.analysis}
         if isinstance(analysis.get("edit"), dict):
             analysis["edit"] = {"time_removed": False, **analysis["edit"]}
         model: type[Understanding] = Understanding
@@ -3166,6 +3336,7 @@ class TaskService:
         rule: RuleOutcome,
         *,
         talk: bool = False,
+        spheres: SpherePlan | None = None,
     ) -> str:
         """Ответ человеку по видам, со значком (`techspec/29-icons.md`). Дословно
         из модели — причина, текст записи и ответ разговора.
@@ -3177,13 +3348,23 @@ class TaskService:
         не попадают — они видны в приложении. Разговор своего сообщения
         (`talk`) отвечает текстом модели (§17.2) без значка, у других видов
         поле не слушается.
+
+        Знание о сфере (`techspec/30-spheres.md` §30.3) — «Запомнил про
+        VoiceFin: …», за ним абзац о сферах: заведённая со знанием или не
+        влезшая в предел. Запись — со сферой после первых слов.
         """
         if understanding.kind == "about_me":
-            if understanding.facts:
-                said = texts.remembered([item.text for item in understanding.facts])
-                return texts.iconed(texts.ICON_RECORDED, said)
-            # Сведение есть, а нового нет — значит, оно уже в памяти (§8.2).
-            return texts.iconed(texts.ICON_RECORDED, texts.ALREADY_KNOWN)
+            plan = spheres or SpherePlan()
+            items = [item.text for item in understanding.facts]
+            if items and plan.fact_sphere is not None:
+                said = texts.remembered_about(plan.fact_sphere, items)
+            elif items:
+                said = texts.remembered(items)
+            else:
+                # Сведение есть, а нового нет — значит, оно уже в памяти (§8.2).
+                said = texts.ALREADY_KNOWN
+            note = sphere_note(plan)
+            return texts.iconed(texts.ICON_RECORDED, paragraphs(said, note[1] if note else None))
         if understanding.kind not in TASK_KINDS:
             if talk:
                 return self._talk_reply(understanding.reply_hint)
@@ -3199,6 +3380,7 @@ class TaskService:
                 remind_at=self._remind_words(planned, now),
                 repeat=rule_words(rule.rule),
                 heads=self._heads(understanding),
+                sphere=understanding.sphere,
             ),
         )
 

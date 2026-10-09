@@ -450,6 +450,105 @@ def remembered(items: Sequence[str]) -> str:
     return REMEMBERED.format(facts="; ".join(items))
 
 
+# Сферы жизни (`techspec/30-spheres.md` §30.3). Название сферы ставится после
+# «·» и после «про» — без склонения: «по семья» звучало бы не по-человечески.
+SPHERE_MARK = " · "
+REMEMBERED_ABOUT = "Запомнил про {sphere}: {facts}"
+SPHERE_ADDED = "Завёл сферу: {names}."
+SPHERES_ADDED = "Завёл сферы: {names}."
+SPHERE_EXISTS = "Сфера {names} уже есть."
+SPHERES_EXIST = "Сферы {names} уже есть."
+SPHERE_DROPPED = "Убрал сферу: {names}. Её дела и записи остались — без сферы."
+SPHERES_DROPPED = "Убрал сферы: {names}. Их дела и записи остались — без сферы."
+SPHERE_MISSING = "Сферы {names} нет — ничего не убирал."
+SPHERES_MISSING = "Сфер {names} нет — ничего не убирал."
+SPHERES_FULL = "Больше {limit} сфер не веду — не завёл: {names}. Уберите лишнюю: «убери сферу …»."
+# Правка сферы словом (§30.2): дело и переписка с делами.
+NO_SPHERE = "без сферы"
+SPHERE_FIXED = "Поправил: {title}"
+SPHERE_SAME = "Так и записано: {title}"
+CHAT_SPHERE_WHOM = "переписка с {whom} и её дела"
+NOTES_SPHERE_WHOM = "ваши заметки и их дела"
+SPHERE_TASK_UNKNOWN = "Не понял, какое дело отнести к сфере {sphere} — ничего не менял."
+SPHERE_TASK_UNKNOWN_BARE = "Не понял, с какого дела снять сферу — ничего не менял."
+
+
+def remembered_about(sphere: str, items: Sequence[str]) -> str:
+    """«Запомнил про VoiceFin: продаём подписку бухгалтерам» — знание о сфере."""
+    return REMEMBERED_ABOUT.format(sphere=sphere, facts="; ".join(items))
+
+
+def _spheres_phrase(one: str, many: str, names: Sequence[str]) -> str:
+    """Фраза о сферах: одна — `one`, несколько — `many`, названия через запятую."""
+    template = one if len(names) == 1 else many
+    return template.format(names=", ".join(names))
+
+
+def spheres_added(names: Sequence[str]) -> str:
+    """«Завёл сферы: VoiceFin, РЕЙВА.»"""
+    return _spheres_phrase(SPHERE_ADDED, SPHERES_ADDED, names)
+
+
+def spheres_exist(names: Sequence[str]) -> str:
+    """«Сфера VoiceFin уже есть.» — заводить второй раз нечего."""
+    return _spheres_phrase(SPHERE_EXISTS, SPHERES_EXIST, names)
+
+
+def spheres_dropped(names: Sequence[str]) -> str:
+    """«Убрал сферу: семья. Её дела и записи остались — без сферы.»"""
+    return _spheres_phrase(SPHERE_DROPPED, SPHERES_DROPPED, names)
+
+
+def spheres_missing(names: Sequence[str]) -> str:
+    """«Сферы «спорт» нет — ничего не убирал.»"""
+    return _spheres_phrase(SPHERE_MISSING, SPHERES_MISSING, [f"«{name}»" for name in names])
+
+
+def spheres_full(names: Sequence[str], limit: int) -> str:
+    """Предел сфер (§30.1): что не заведено и как освободить место."""
+    return SPHERES_FULL.format(limit=limit, names=", ".join(names))
+
+
+def sphered(head: str, sphere: str | None) -> str:
+    """Сфера после первых слов записи (§30.3): «Записал: {title}» —
+    «Записал · VoiceFin: {title}». Шаблон без двоеточия (строка списка) —
+    сфера после сути. Без сферы — как было. Возвращает шаблон: суть
+    подставляет вызывающий, поэтому скобки в названии сферы не мешают."""
+    if not sphere:
+        return head
+    safe = sphere.replace("{", "{{").replace("}", "}}")
+    prefix, colon, rest = head.partition(": ")
+    if colon:
+        return f"{prefix}{SPHERE_MARK}{safe}: {rest}"
+    return f"{head}{SPHERE_MARK}{safe}"
+
+
+def sphere_fixed(title: str, sphere: str | None) -> str:
+    """«Поправил: созвон с бухгалтерами · РЕЙВА» — правка сферы дела (§30.2)."""
+    return f"{SPHERE_FIXED.format(title=title)}{SPHERE_MARK}{sphere or NO_SPHERE}"
+
+
+def sphere_same(title: str, sphere: str | None) -> str:
+    """«Так и записано: созвон · РЕЙВА» — сфера дела уже та, что названа."""
+    return f"{SPHERE_SAME.format(title=title)}{SPHERE_MARK}{sphere or NO_SPHERE}"
+
+
+def chat_sphere_fixed(whom: str | None, sphere: str | None, *, same: bool = False) -> str:
+    """«Поправил: переписка с Игорем и её дела · РЕЙВА» — ответ на отчёт о
+    переписке (§30.2); `whom` — имя в творительном падеже из разбора, нет его
+    — заметки владельца."""
+    title = CHAT_SPHERE_WHOM.format(whom=whom) if whom else NOTES_SPHERE_WHOM
+    template = SPHERE_SAME if same else SPHERE_FIXED
+    return f"{template.format(title=title)}{SPHERE_MARK}{sphere or NO_SPHERE}"
+
+
+def sphere_task_unknown(sphere: str | None) -> str:
+    """Правка сферы, а задачи в списке нет (§12.3)."""
+    if sphere:
+        return SPHERE_TASK_UNKNOWN.format(sphere=sphere)
+    return SPHERE_TASK_UNKNOWN_BARE
+
+
 # Модель не ответила (`techspec/05-ai.md` §5.4): поручение не теряется, но и
 # делать вид, что оно разобрано, нельзя.
 RECORDED_AS_IS = "Записал как есть: «{text}». Разобрать сейчас не смог."
@@ -498,9 +597,12 @@ def recorded_reply(
     remind_at: str | None = None,
     repeat: str | None = None,
     heads: Mapping[str, str] = RECORDED_BY_KIND,
+    sphere: str | None = None,
 ) -> str:
     """Подтверждение записи: суть, повтор, срок, когда напомню, приоритет (если
     не обычный) и причина «перепроверьте».
+
+    `sphere` — сфера дела после первых слов: «Записал · VoiceFin: …» (§30.3).
 
     `heads` — первые слова по видам: у переписки — «Из переписки записал»
     (`techspec/18-forwarded.md` §18.4), дальше пересказ тот же.
@@ -512,7 +614,7 @@ def recorded_reply(
     Из ответа модели дословно уходит только `review_reason`
     (`techspec/05-ai.md` §5.4) — остальное собрано здесь.
     """
-    head = heads.get(kind, heads["task"]).format(title=title)
+    head = sphered(heads.get(kind, heads["task"]), sphere).format(title=title)
     return _retold(head, due, remind_at, priority, review_reason, repeat)
 
 
@@ -524,10 +626,13 @@ def listed_line(
     priority: str = "normal",
     remind_at: str | None = None,
     repeat: str | None = None,
+    sphere: str | None = None,
 ) -> str:
     """Строка списка (§23.4): пересказ §6.4 без слова «Записал», суть задачи —
-    с заглавной буквы, у идеи и желания — «Идея: …», «Желание: …»."""
-    head = LISTED_BY_KIND.get(kind, LISTED_BY_KIND["task"])
+    с заглавной буквы, у идеи и желания — «Идея: …», «Желание: …». Сфера —
+    после сути у дела и после вида у идеи: «Созвон · VoiceFin», «Идея ·
+    VoiceFin: …» (§30.3)."""
+    head = sphered(LISTED_BY_KIND.get(kind, LISTED_BY_KIND["task"]), sphere)
     named = _upper_first(title) if kind not in ("idea", "wish") else title
     return _retold(head.format(title=named), due, remind_at, priority, review_reason, repeat)
 
@@ -545,6 +650,7 @@ def asked_reply(
     remind_at: str | None = None,
     repeat: str | None = None,
     heads: Mapping[str, str] = RECORDED_BY_KIND,
+    sphere: str | None = None,
 ) -> str:
     """Запись с уточняющим вопросом (`techspec/10-dialog.md` §10.1).
 
@@ -554,7 +660,8 @@ def asked_reply(
     Вопрос уходит дословно от модели, как `review_reason`. `heads` — как у
     `recorded_reply`.
     """
-    return _retold(heads["task"].format(title=title), due, remind_at, "normal", question, repeat)
+    head = sphered(heads["task"], sphere).format(title=title)
+    return _retold(head, due, remind_at, "normal", question, repeat)
 
 
 # Ответ на вопрос лёг в ту же задачу (§10.2): пересказ как при записи, но
@@ -688,6 +795,10 @@ PICK_DONE = "Какую задачу закрыть?"
 PICK_CANCEL = "Какую задачу убрать из списка?"
 PICK_SKIP = "Какую задачу пропустить в этот раз?"
 PICK_CHANGE = "Какую задачу поправить?"
+# Правка сферы (`techspec/30-spheres.md` §30.2): сфера — после «к сфере»,
+# без склонения.
+PICK_SPHERE = "Какое дело отнести к сфере {sphere}?"
+PICK_UNSPHERE = "С какого дела снять сферу?"
 REOPEN_BUTTON = "Вернуть"
 PICKED_GONE = "Задачу уже закрыли или удалили — ничего не менял."
 # Нажатие не записалось: вопрос с кнопками остаётся, и сказать об этом надо
@@ -757,11 +868,11 @@ def not_found_reply(
     priority: str = "normal",
     remind_at: str | None = None,
     repeat: str | None = None,
+    sphere: str | None = None,
 ) -> str:
     """Перенос задачи, которой нет в списке, записан новой задачей (§12.3)."""
-    return _retold(
-        NOT_FOUND_RECORDED.format(title=title), due, remind_at, priority, review_reason, repeat
-    )
+    head = sphered(NOT_FOUND_RECORDED, sphere).format(title=title)
+    return _retold(head, due, remind_at, priority, review_reason, repeat)
 
 
 # Напоминание и кнопка под ним (`techspec/06-reminders.md` §6.2, §6.3).

@@ -47,6 +47,7 @@ from aiogram.types import (
 from solomon.config import Settings
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
+from solomon.db.spheres import Sphere
 from solomon.db.tasks import (
     MessageKind,
     OpenQuestion,
@@ -68,6 +69,7 @@ from solomon.services.understanding import (
     ConversationUnderstanding,
     ConversationVerdict,
     ImageType,
+    KnownSphere,
     MessageUnderstanding,
     NotUnderstood,
     OpenTask,
@@ -316,6 +318,7 @@ class FakeUnderstandings:
         edit: Mapping[str, Any] | None = None,
         photo_text: str | None = None,
         same_task: str | None = None,
+        spheres: Mapping[str, Any] | None = None,
     ) -> list[Task]:
         if self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
@@ -341,6 +344,7 @@ class FakeUnderstandings:
                 "edit": edit,
                 "photo_text": photo_text,
                 "same_task": same_task,
+                "spheres": None if spheres is None else dict(spheres),
             }
         )
         recorded = [self.task] if self.task is not None else []
@@ -458,6 +462,7 @@ def make_understanding(**fields: Any) -> Understanding:
         "priority": "normal",
         "promise": None,
         "people": [],
+        "sphere": None,
         "needs_review": False,
         "review_reason": None,
         "reply_hint": None,
@@ -545,6 +550,9 @@ class FakeAnalyst:
         self.swipes: list[str | None] = []
         # Блок 6 «Недавний разговор» (§17.3) — по вызову; `None` — блока нет.
         self.recents: list[str | None] = []
+        # Сферы владельца (`techspec/30-spheres.md` §30.2) — по вызову; `None` —
+        # блока сфер нет.
+        self.spheres: list[list[KnownSphere] | None] = []
         self.photo_verdict: PhotoVerdict = (
             PhotoAnalysis(
                 understanding=photo,
@@ -584,8 +592,10 @@ class FakeAnalyst:
         last_tasks: Sequence[int] = (),
         swipe: str | None = None,
         recent: str | None = None,
+        spheres: Sequence[KnownSphere] | None = None,
     ) -> Verdict:
         self.calls.append((text, forwarded_from, spoken))
+        self.spheres.append(None if spheres is None else list(spheres))
         self.questions.append(open_question)
         self.tasks.append(None if tasks is None else list(tasks))
         self.last_tasks.append(list(last_tasks))
@@ -602,8 +612,10 @@ class FakeAnalyst:
         forwarded_from: str | None = None,
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
+        spheres: Sequence[KnownSphere] | None = None,
     ) -> PhotoVerdict:
         self.photos.append((image, media_type, caption, forwarded_from))
+        self.spheres.append(None if spheres is None else list(spheres))
         self.questions.append(open_question)
         self.tasks.append(None if tasks is None else list(tasks))
         # Снимок модель смотрит дольше текста; пауза — как у `FakeTranscriber`:
@@ -618,8 +630,10 @@ class FakeAnalyst:
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
         recent: str | None = None,
+        spheres: Sequence[KnownSphere] | None = None,
     ) -> ConversationVerdict:
         self.conversations.append(text)
+        self.spheres.append(None if spheres is None else list(spheres))
         self.questions.append(open_question)
         self.tasks.append(None if tasks is None else list(tasks))
         self.recents.append(recent)
@@ -699,8 +713,13 @@ class FakeEdits:
         messages: Mapping[int, StoredMessage] | None = None,
         recent: Sequence[RecentMessage] = (),
         broken: Iterable[str] = (),
+        spheres: Sequence[Sphere] = (),
     ) -> None:
         self.tasks = {task.id: task for task in tasks}
+        # Сферы владельца (`techspec/30-spheres.md` §30.2); их чтения — в
+        # `sphere_reads`, а не в `calls`: тесты правки их не пересчитывают.
+        self.book = list(spheres)
+        self.sphere_reads = 0
         self.recent = list(recent)
         self.message_event = message_event
         self.reminder_event = reminder_event
@@ -727,6 +746,12 @@ class FakeEdits:
         self.calls.append((name, *args))
         if name in self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
+
+    async def spheres(self) -> list[Sphere]:
+        self.sphere_reads += 1
+        if "spheres" in self.broken:
+            raise DatabaseError("ConnectTimeout: timed out")
+        return list(self.book)
 
     async def open_tasks(self, limit: int) -> list[TaskDetails]:
         self._touch("open_tasks", limit)

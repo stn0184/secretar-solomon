@@ -37,10 +37,12 @@ from solomon.cli import load_environment
 from solomon.config import ConfigError, Settings
 from solomon.db.facts import Fact
 from solomon.db.rpc import DatabaseError
+from solomon.db.spheres import Sphere
 from solomon.db.tasks import RecentMessage, TaskDetails
 from solomon.handlers import PHOTO_LIMIT
 from solomon.services.batches import Line, conversation_text, is_conversation
 from solomon.services.conversation import recent_block, reply_text, reports_action
+from solomon.services.spheres import settle as settle_spheres
 from solomon.services.tasks import CLOSING_ACTIONS
 from solomon.services.understanding import (
     ANSWER_RULES,
@@ -96,8 +98,10 @@ from solomon.services.understanding import (
     format_open_question,
     format_open_tasks,
     format_recent,
+    open_task_lines,
     searches_of,
     settle_parts,
+    sphere_steps,
     trim_conversation,
     trim_photo,
 )
@@ -1080,7 +1084,7 @@ def test_text_and_voice_answer_is_the_understanding_plus_also() -> None:
     fields = set(MessageUnderstanding.model_fields)
 
     assert issubclass(MessageUnderstanding, Understanding)
-    assert fields - set(Understanding.model_fields) == {"also", "more_searches"}
+    assert fields - set(Understanding.model_fields) == {"also", "more_searches", "more_spheres"}
     assert "also" not in PhotoUnderstanding.model_fields
     assert "also" not in ConversationUnderstanding.model_fields
 
@@ -1118,7 +1122,9 @@ def test_the_first_item_is_the_message_and_the_rest_go_to_also() -> None:
     message = MessageAnswer(items=[first, idea, chat, suit]).as_message()
 
     assert isinstance(message, MessageUnderstanding)
-    assert message.model_dump(exclude={"also", "more_searches"}) == first.model_dump()
+    assert (
+        message.model_dump(exclude={"also", "more_searches", "more_spheres"}) == first.model_dump()
+    )
     assert message.also == [
         make_item(
             kind="idea",
@@ -1150,6 +1156,26 @@ def test_every_answer_schema_fits_the_grammar_limit() -> None:
     for model in (MessageAnswer, PhotoUnderstanding, ConversationUnderstanding):
         fields = own_fields(model.model_json_schema())
         assert fields <= GRAMMAR_FIELD_LIMIT, (model.__name__, fields)
+
+
+def test_sphere_is_one_field_and_the_sphere_edit_is_an_action() -> None:
+    """Сфера (`techspec/30-spheres.md` §30.2) — одно поле разбора; правка сферы —
+    значение `action`, а не поле правки: своих полей после этапа 032 — 38 у
+    текста и голоса, 39 у снимка, 38 у переписки, место под одно поле этапа
+    033 есть у каждой схемы."""
+    counts = {
+        model.__name__: own_fields(model.model_json_schema())
+        for model in (MessageAnswer, PhotoUnderstanding, ConversationUnderstanding)
+    }
+
+    assert "sphere" in Understanding.model_fields
+    assert "sphere" not in TaskEdit.model_fields
+    assert TaskEdit.model_json_schema()["properties"]["action"]["enum"][-1] == "sphere"
+    assert counts == {
+        "MessageAnswer": 38,
+        "PhotoUnderstanding": 39,
+        "ConversationUnderstanding": 38,
+    }
 
 
 def test_an_item_has_the_fields_a_record_needs_and_nothing_else() -> None:
@@ -1385,15 +1411,16 @@ async def test_text_answer_keeps_its_other_tasks() -> None:
 
 # ------------------------------------------------------------ снимок (§14.3)
 
-# Эталоны пересчитаны после этапа 024 (`techspec/24-search.md` §24.1): в
-# блоке 1 — вид `search`, что поиск и что нет, «Интернета у вас нет» ушло, и
-# поиск среди нескольких дел; в схеме `Understanding` — значение `search` у
-# `kind`. Дальше промпт и схема ответа текста и голоса сдвигаются только
-# правкой, которая их меняет, — снимок и прочие ветки их не трогают.
-PROMPT_WITH_EMPTY_TASKS_SHA256 = "a4470b46bb2a016f0b64304c8e97ca24531038881f9fac0e136099216da08da6"
-PROMPT_BARE_SHA256 = "2487ea973df399a69d7c1cbb1afffa5c0d61ff0a7c1f867fa0257ecb0d321973"
-SCHEMA_SHA256 = "9c676ee6efa0794be5704a3e063c9dd49e3babea4f3fd9a9b28aee93152f3f5b"
-MESSAGE_SCHEMA_SHA256 = "d23cd53df543af65b08641e10dfaa21ce6d95b869673e4df044521968dc4ab49"
+# Эталоны пересчитаны после этапа 032 (`techspec/30-spheres.md` §30.2): в
+# блоке 1 — виды `sphere` и `sphere_drop` и поле `sphere`, сферы среди
+# нескольких дел и правка `action = sphere`; в схеме `Understanding` — поле
+# `sphere`, значения вида и действия правки. Дальше промпт и схема ответа
+# текста и голоса сдвигаются только правкой, которая их меняет, — снимок и
+# прочие ветки их не трогают.
+PROMPT_WITH_EMPTY_TASKS_SHA256 = "a8e54174b454a660879a380842e996fa1b95ca1cf4c94783e44d6db29b36ec28"
+PROMPT_BARE_SHA256 = "caeac83128936b36fc663b0ed548d34884b9a19a8a78839a9ded859759adea02"
+SCHEMA_SHA256 = "eeb661f5a86618e847ef6e0e752fc8a21f7a81f535f9729d6e9fff45b10f33c0"
+MESSAGE_SCHEMA_SHA256 = "a287bb3c53c7490573719e1005aee1155ddef986615de5ea4b3e15bd4ef0e209"
 
 # Не настоящая картинка: модели здесь нет, важно только, что байты дошли.
 IMAGE = b"\xff\xd8\xff\xe0 not a real jpeg"
@@ -2183,13 +2210,16 @@ async def test_conversation_part_of_day_gets_the_start_of_the_part() -> None:
 # семнадцать о правке словом (пять — по повторяющейся задаче, четыре — о
 # переносе без потери часа, §12.8) и четыре о дубле (§15), — десять
 # примеров разговора (§17), девять примеров пересланной переписки (§18),
-# восемь примеров нескольких дел (§23) и тринадцать — о поиске (§24.1): что
-# поиск, что нет, вопрос «куда искать», ответ на него и уточнение вдогонку.
+# восемь примеров нескольких дел (§23), тринадцать — о поиске (§24.1): что
+# поиск, что нет, вопрос «куда искать», ответ на него и уточнение вдогонку, —
+# и четырнадцать о сферах (§30.2): завести, убрать, знание, сфера дела по
+# смыслу и по людям, правка словом и ответом на отчёт, разговор о сфере.
 # Этим владелец смотрит, как помощник понимает.
 # Прогон ходит в модель по-настоящему, поэтому в воротах не участвует —
 # `pyproject.toml`, маркер `live`.
 FIXTURES = Path(__file__).parent / "fixtures" / "understanding.jsonl"
-FIXTURE_COUNT = 96
+FIXTURE_COUNT = 110
+SPHERE_COUNT = 14
 SEVERAL_COUNT = 9
 SEARCH_COUNT = 13
 EDIT_COUNT = 21
@@ -2249,6 +2279,15 @@ def known_for(case: dict[str, Any]) -> list[Fact]:
     return facts
 
 
+def spheres_for(case: dict[str, Any]) -> list[Sphere]:
+    """Сферы примера — как их прочитал бы бот (§30.2); без своих — пустой
+    список: у своего сообщения блок сфер есть и тогда, когда сфер нет."""
+    return [
+        Sphere(id=f"sphere-{index}", name=raw["name"], facts=tuple(raw.get("facts", ())))
+        for index, raw in enumerate(case.get("spheres", []))
+    ]
+
+
 def service_for(
     settings: Settings, call: ModelCall, now: datetime, case: dict[str, Any]
 ) -> UnderstandingService:
@@ -2282,6 +2321,7 @@ def tasks_for(case: dict[str, Any]) -> list[TaskDetails]:
     без списка — пустой. Пересланному — тот же список: блок у него короткий,
     только для дубля (§15.2), и это решает сервис разбора."""
     tasks: list[TaskDetails] = []
+    ids = {sphere.name: sphere.id for sphere in spheres_for(case)}
     for index, raw in enumerate(case.get("open_tasks", [])):
         due_at = raw.get("due_at")
         tasks.append(
@@ -2293,6 +2333,7 @@ def tasks_for(case: dict[str, Any]) -> list[TaskDetails]:
                 priority=raw.get("priority", "normal"),
                 people=tuple(raw.get("people", ())),
                 repeat=raw.get("repeat"),
+                sphere_id=ids.get(raw.get("sphere", "")),
             )
         )
     return tasks
@@ -2607,6 +2648,59 @@ def several_mismatch(case: dict[str, Any], got: Understanding, timezone: ZoneInf
     return None
 
 
+def _same_name(expected: str | None, actual: str | None) -> bool:
+    """Название сферы — без учёта регистра; `None` — сферы нет."""
+    if expected is None or actual is None:
+        return expected is actual
+    return expected.casefold() == actual.casefold()
+
+
+def sphere_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
+    """Чем пример сфер разошёлся с ожиданием; `None` — сошёлся (§30.2).
+
+    Сверяется разбор, каким его увидит бот (`settle`): `kind` — вид верха;
+    `name` — сфера верха (`null` — без сферы); `steps` — «+X» завести, «-X»
+    убрать, без порядка; `facts` — сведение записано; `edit` — правка сферы
+    и номер задачи (`any` — любой: ответ на отчёт правит чат, а не задачу);
+    `must` и `forbid` — ответ разговора, как его отправил бы бот.
+    """
+    expected = case["sphere"]
+    text = case["text"]
+    settled = settle_spheres(got, spheres_for(case))
+    kind = expected.get("kind")
+    if kind is not None and settled.kind != kind:
+        return f"{text}: ждали {kind}, получили {settled.kind}"
+    if "name" in expected and not _same_name(expected["name"], settled.sphere):
+        return f"{text}: ждали сферу {expected['name']!r}, получили {settled.sphere!r}"
+    if "steps" in expected:
+        steps = sorted(
+            f"{'-' if step.drop else '+'}{step.name.casefold()}" for step in sphere_steps(settled)
+        )
+        wanted = sorted(step.casefold() for step in expected["steps"])
+        if steps != wanted:
+            return f"{text}: ждали шаги {wanted}, получили {steps}"
+    if expected.get("facts") and not settled.facts:
+        return f"{text}: ждали сведение о сфере, facts пуст"
+    edit = expected.get("edit")
+    if edit is not None:
+        if settled.edit is None or settled.edit.action != edit["action"]:
+            got_action = None if settled.edit is None else settled.edit.action
+            return f"{text}: ждали правку {edit['action']}, получили {got_action}"
+        if edit["task"] != "any" and settled.edit.task != edit["task"]:
+            return f"{text}: ждали задачу {edit['task']}, получили {settled.edit.task}"
+    if kind == "chat":
+        reply = reply_text(settled.reply_hint)
+        if reply is None or reports_action(reply):
+            return f"{text}: ответа нет или он о действии: {settled.reply_hint!r}"
+        for group in expected.get("must", []):
+            if not any(re.search(word, reply, re.IGNORECASE) for word in group):
+                return f"{text}: в ответе нет ни одного из {group}: {reply!r}"
+        for word in expected.get("forbid", []):
+            if re.search(word, reply, re.IGNORECASE):
+                return f"{text}: в ответе запрещённое {word!r}: {reply!r}"
+    return None
+
+
 def memory_mismatch(case: dict[str, Any], got: Understanding) -> str | None:
     """Чем пример памяти разошёлся с ожиданием; `None` — сошёлся."""
     expected = case["facts"]
@@ -2715,7 +2809,8 @@ def test_edit_fixtures_cover_the_cases_of_the_stage() -> None:
     assert not any(
         "open_tasks" in case
         for case in fixtures
-        if not {"edit", "conversation", "undated", "overdue", "several", "search"} & set(case)
+        if not {"edit", "conversation", "undated", "overdue", "several", "search", "sphere"}
+        & set(case)
     )
     assert not any({"facts", "dialog", "repeat"} & set(case) for case in edits)
     expected = [case["edit"] for case in edits if case["edit"] is not None]
@@ -3412,6 +3507,31 @@ def test_search_fixtures_cover_the_cases_of_the_stage() -> None:
     assert any("Соломон: 🔍 Ищу: билеты" in block for block in blocks)
 
 
+def test_sphere_fixtures_cover_the_cases_of_the_stage() -> None:
+    """Сферы (`techspec/30-spheres.md` §30.2): завести несколько и одну,
+    убрать, знание — о заведённой и о новой, компания без «это по» — не сфера,
+    дело по смыслу и по людям, неочевидное — без сферы, правка словом и
+    ответом на отчёт, три вопроса о сферах."""
+    cases = [case for case in load_fixtures() if "sphere" in case]
+
+    assert len(cases) == SPHERE_COUNT
+    assert all("spheres" in case for case in cases)
+    expected = [case["sphere"] for case in cases]
+    assert sorted(len(sphere.get("steps", [])) for sphere in expected)[-1] == 3
+    assert any(step.startswith("-") for sphere in expected for step in sphere.get("steps", []))
+    knowledge = [sphere for sphere in expected if sphere.get("kind") == "about_me"]
+    assert [sphere.get("name") for sphere in knowledge] == ["VoiceFin", "РЕЙВА", None]
+    tasks = [sphere for sphere in expected if sphere.get("kind") == "task"]
+    assert [sphere["name"] for sphere in tasks] == ["VoiceFin", "VoiceFin", None]
+    edits = [sphere["edit"] for sphere in expected if "edit" in sphere]
+    assert [edit["task"] for edit in edits] == [1, "any"]
+    assert sum(sphere.get("kind") == "chat" for sphere in expected) == 3
+    reply = next(case for case in cases if case["sphere"].get("edit", {}).get("task") == "any")
+    assert reply["swipe"].startswith("Ответ на отчёт о переписке")
+    lines = open_task_lines(tasks_for(reply), TZ, spheres_for(reply))
+    assert lines[0].endswith("сфера: VoiceFin)")
+
+
 def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Нет ключа — живой прогон пропускается, а не падает."""
 
@@ -3454,12 +3574,21 @@ async def test_live_model_understands_the_fixtures() -> None:
                 last_tasks=case.get("last_tasks", ()),
                 swipe=case.get("swipe"),
                 recent=recent_for(case, settings.owner_timezone),
+                spheres=spheres_for(case),
             )
 
+    started = time.monotonic()
     try:
         verdicts = await asyncio.gather(*(analyze(case) for case in fixtures))
     finally:
         await client.close()
+    # След прогона (`pytest -m live -s`): время и токены — в отчёт этапа.
+    analyses = [verdict for verdict in verdicts if isinstance(verdict, Analysis)]
+    print(
+        f"Примеров {len(fixtures)}, {time.monotonic() - started:.1f} с, токенов "
+        f"{sum(item.input_tokens for item in analyses)}/"
+        f"{sum(item.output_tokens for item in analyses)}"
+    )
 
     kinds: list[str] = []
     dates: list[str] = []
@@ -3473,6 +3602,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     overdue: list[str] = []
     several: list[str] = []
     searches: list[str] = []
+    spheres: list[str] = []
     general = 0
     for case, verdict in zip(fixtures, verdicts, strict=True):
         assert isinstance(verdict, Analysis), f"{case['text']}: {verdict}"
@@ -3502,6 +3632,16 @@ async def test_live_model_understands_the_fixtures() -> None:
             mismatch = several_mismatch(case, got, settings.owner_timezone)
             if mismatch:
                 several.append(mismatch)
+            continue
+        if "sphere" in case:
+            mismatch = sphere_mismatch(case, got)
+            if mismatch:
+                spheres.append(mismatch)
+            expected_date = case["due_date"]
+            local = got.due_at.astimezone(settings.owner_timezone) if got.due_at else None
+            actual_date = local.date().isoformat() if local else None
+            if expected_date is not None and actual_date != expected_date:
+                dates.append(f"{case['text']}: ждали {expected_date}, получили {actual_date}")
             continue
         mismatch = edit_mismatch({"edit": None, **case}, got, settings.owner_timezone)
         if mismatch:
@@ -3551,6 +3691,7 @@ async def test_live_model_understands_the_fixtures() -> None:
     assert not talks, "Разговор разошёлся:\n" + "\n".join(talks)
     assert not several, "Несколько дел разошлись:\n" + "\n".join(several)
     assert not searches, "Поиск разошёлся: " + "; ".join(searches)
+    assert not spheres, "Сферы разошлись:\n" + "\n".join(spheres)
     matched = general - len(kinds)
     assert matched >= MIN_MATCHING_KINDS, f"Совпало {matched} из {general}:\n" + "\n".join(kinds)
 

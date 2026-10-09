@@ -44,7 +44,7 @@ TASK_COLUMNS = "id, title, status"
 # с правилом повтора и разом (`techspec/13-repeat.md` §13.2).
 DETAIL_COLUMNS = (
     "id, title, kind, status, due_at, due_precision, priority, promise, people, created_at, "
-    "repeat, occurrence_at"
+    "repeat, occurrence_at, sphere_id"
 )
 # Сообщение владельца, на которое ответили свайпом или по которому нажали
 # кнопку кандидата: текст, задача, разбор и ответ бота (§12.2, §12.6).
@@ -108,7 +108,7 @@ class TaskDetails:
     суть, вид, срок, срочность, обещание, люди — и статус, потому что по
     кнопке приходит и закрытая задача. `repeat` и `occurrence_at` — правило
     повтора и раз, который задача сейчас представляет (§13.2); у разовой
-    оба пусты.
+    оба пусты. `sphere_id` — сфера дела (`techspec/30-spheres.md` §30.2).
     """
 
     id: str
@@ -123,6 +123,7 @@ class TaskDetails:
     created_at: datetime
     repeat: Mapping[str, Any] | None = None
     occurrence_at: datetime | None = None
+    sphere_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +303,8 @@ def task_details_from_row(row: Any) -> TaskDetails:
             # Повтор читается мягко: строка без этих колонок — разовая задача.
             repeat=repeat_of(row.get("repeat")),
             occurrence_at=optional_moment(row.get("occurrence_at"), "occurrence_at"),
+            # Сфера читается мягко, как повтор: строка без колонки — без сферы.
+            sphere_id=_optional_text(row.get("sphere_id")),
         )
     except KeyError as error:
         raise DatabaseError(f"В ответе базы нет поля задачи: {error}.") from error
@@ -426,6 +429,7 @@ async def record_understanding(
     edit: Mapping[str, Any] | None = None,
     photo_text: str | None = None,
     same_task: str | None = None,
+    spheres: Mapping[str, Any] | None = None,
 ) -> list[Task]:
     """Шаг второй: разбор, ответ бота, задачи, напоминания и память — одной транзакцией.
 
@@ -471,6 +475,11 @@ async def record_understanding(
     пока модель думала, — отказ базы и откат всего. Уходит, только когда
     есть, как `photo_text`.
 
+    `spheres` — что сообщение делает со сферами (`techspec/30-spheres.md`
+    §30.2): `{drop, add, chat}`; у записи памяти и дела — ключ `sphere`, у
+    правки — `action = sphere`. Уходит, только когда есть, как `photo_text`:
+    вызов без сфер работает и на базе до миграции 032.
+
     Открытые вопросы владельца база снимает сама (§3.4) — любой записью,
     кроме «не расслышал»: без разбора, задачи и поправки вопрос остаётся.
     """
@@ -493,6 +502,8 @@ async def record_understanding(
         params["photo_text"] = photo_text
     if same_task is not None:
         params["same_task"] = same_task
+    if spheres is not None:
+        params["spheres"] = dict(spheres)
     data = await ask(lambda: db.rpc(RECORD_UNDERSTANDING_FUNCTION, params).execute().data)
     # Функция отдаёт набор задач: PostgREST — списком, одну строку — бывает и
     # объектом. Строка без `id` — пустая строка составного типа, «записывать

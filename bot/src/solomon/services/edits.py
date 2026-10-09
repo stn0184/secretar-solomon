@@ -26,7 +26,7 @@ from solomon import texts
 from solomon.db.tasks import TaskDetails, TaskEvent
 from solomon.services import parts
 from solomon.services.repeat import clean_rule, same_rule
-from solomon.services.understanding import TaskEdit
+from solomon.services.understanding import SPHERE_ACTION, TaskEdit
 
 logger = logging.getLogger(__name__)
 
@@ -590,8 +590,13 @@ def apart_label(title: str) -> str:
     return f"{texts.APART_BUTTON}: {_short_title(title)}"
 
 
-def pick_question(edit: TaskEdit, now: datetime, timezone: ZoneInfo) -> str:
-    """Вопрос над кнопками кандидатов — с действием (§12.6)."""
+def pick_question(
+    edit: TaskEdit, now: datetime, timezone: ZoneInfo, sphere: str | None = None
+) -> str:
+    """Вопрос над кнопками кандидатов — с действием (§12.6); у правки сферы —
+    с её названием (`techspec/30-spheres.md` §30.2)."""
+    if edit.action == SPHERE_ACTION:
+        return texts.PICK_SPHERE.format(sphere=sphere) if sphere else texts.PICK_UNSPHERE
     if edit.action == "done":
         return texts.PICK_DONE
     if edit.action == "cancel":

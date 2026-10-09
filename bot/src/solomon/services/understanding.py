@@ -73,11 +73,18 @@ MORE_TASKS_LIMIT = 5
 # Виды картинки, которые уходят модели (§14.1): фото Telegram — всегда jpeg.
 ImageType = Literal["image/jpeg", "image/png", "image/webp"]
 
-Kind = Literal["task", "idea", "wish", "chat", "about_me", "search"]
-# Виды, которые заводят строку в `tasks`; разговор, сведение о себе и поиск —
-# нет (`techspec/24-search.md` §24.1).
+Kind = Literal["task", "idea", "wish", "chat", "about_me", "search", "sphere", "sphere_drop"]
+# Виды, которые заводят строку в `tasks`; разговор, сведение о себе, поиск и
+# сферы — нет (`techspec/24-search.md` §24.1, `techspec/30-spheres.md` §30.2).
 TASK_KINDS: tuple[Kind, ...] = ("task", "idea", "wish")
 SEARCH_KIND: Kind = "search"
+# Завести и убрать сферу (§30.2): значения вида, полей схемы не прибавляют.
+SPHERE_KIND: Kind = "sphere"
+SPHERE_DROP_KIND: Kind = "sphere_drop"
+SPHERE_KINDS: tuple[Kind, ...] = (SPHERE_KIND, SPHERE_DROP_KIND)
+# Правка сферы дела или чата (§30.2): новое значение `action`, а не поле
+# `TaskEdit` — предел полей схемы (§23.2); сфера — в верхнем `sphere`.
+SPHERE_ACTION = "sphere"
 # Запрос поиска в базе — до 500 знаков (`techspec/03-schema.md` §3.10):
 # длиннее режет бот, иначе отказ базы съел бы весь поиск.
 QUERY_LIMIT = 500
@@ -129,12 +136,13 @@ class Repeat(BaseModel):
 
 
 # Правка задачи из списка (`techspec/12-chat-edit.md` §12.1, §12.8, §13.5).
-# `time_removed` — снять час, оставив день (этап 021). Доккомментарий уходит
-# в схему описанием — он для модели.
+# `time_removed` — снять час, оставив день (этап 021); `sphere` — сменить
+# сферу дела или чата, сама сфера — в верхнем `sphere` (этап 032, §30.2).
+# Доккомментарий уходит в схему описанием — он для модели.
 class TaskEdit(BaseModel):
     """Правка задачи из блока «Открытые задачи»: номер и новые значения; пустое — не менял."""
 
-    action: Literal["change", "done", "cancel", "skip"]
+    action: Literal["change", "done", "cancel", "skip", "sphere"]
     task: int | None
     candidates: list[int]
     title: str | None
@@ -164,6 +172,7 @@ class Understanding(BaseModel):
     priority: Literal["low", "normal", "high"]
     promise: Literal["mine", "to_me"] | None
     people: list[str]
+    sphere: str | None
     needs_review: bool
     review_reason: str | None
     reply_hint: str | None
@@ -190,6 +199,9 @@ class TaskItem(BaseModel):
     priority: Literal["low", "normal", "high"]
     promise: Literal["mine", "to_me"] | None
     people: list[str]
+    # Сфера дела (§30.2). Модели `TaskItem` не уходит (её схема —
+    # `MessageAnswer`), а разбор до этапа 032 читается без сферы.
+    sphere: str | None = None
     needs_review: bool
     review_reason: str | None
     question: str | None
@@ -207,6 +219,13 @@ class TaskItem(BaseModel):
         )
 
 
+class SphereStep(BaseModel):
+    """Завести или убрать сферу (§30.2): `drop` — убрать, `name` — название."""
+
+    drop: bool
+    name: str
+
+
 # Разбор текста и голоса (§23.2): верхние поля — первое дело, правка или
 # ответ, как было; `also` — остальные новые дела по порядку. У снимка и
 # переписки схемы свои, `also` в них нет (§14.4, §18.4). Модели уходит не
@@ -221,6 +240,10 @@ class MessageUnderstanding(Understanding):
     # не сдвигают. Модели поле не уходит (её схема — `MessageAnswer`), а
     # разбор до этапа 024 читается без него.
     more_searches: list[str] = Field(default_factory=list)
+    # Сферы среди следующих элементов `items` (§30.2): «мои сферы: A, B, C» —
+    # по элементу на сферу. Делами они не становятся и номеров дел не
+    # сдвигают; разбор до этапа 032 читается без них.
+    more_spheres: list[SphereStep] = Field(default_factory=list)
 
 
 ITEM_KINDS: frozenset[str] = frozenset(("task", "idea", "wish"))
@@ -241,7 +264,8 @@ class MessageAnswer(BaseModel):
         """Разбор сообщения: первый элемент — верхние поля, следующие —
         дела `also` по порядку. У следующих читаются только поля дела; не
         дело — разговор или сведение о себе — не записывается. Поиск среди
-        следующих — суть в `more_searches` (§24.1)."""
+        следующих — суть в `more_searches` (§24.1), сфера — шаг в
+        `more_spheres` (§30.2): название — `sphere`, пусто — `title`."""
         first, *rest = self.items
         fields = set(TaskItem.model_fields)
         also = [
@@ -250,8 +274,18 @@ class MessageAnswer(BaseModel):
             if item.kind in ITEM_KINDS
         ]
         searches = [item.title for item in rest if item.kind == SEARCH_KIND]
+        spheres = [
+            SphereStep(drop=item.kind == SPHERE_DROP_KIND, name=item.sphere or item.title)
+            for item in rest
+            if item.kind in SPHERE_KINDS
+        ]
         return MessageUnderstanding.model_validate(
-            {**first.model_dump(), "also": also, "more_searches": searches}
+            {
+                **first.model_dump(),
+                "also": also,
+                "more_searches": searches,
+                "more_spheres": spheres,
+            }
         )
 
 
@@ -281,6 +315,27 @@ def searches_of(understanding: Understanding) -> list[str]:
     if isinstance(understanding, MessageUnderstanding):
         titles.extend(understanding.more_searches)
     return [title.strip()[:QUERY_LIMIT] for title in titles if title.strip()]
+
+
+def sphere_steps(understanding: Understanding) -> list[SphereStep]:
+    """Сферы, которые сообщение заводит и убирает (§30.2), по порядку: верх,
+    если он такой шаг, потом `more_spheres`.
+
+    Верх — шаг, только когда он новое: у ответа на вопрос и у правки верхние
+    поля заняты ими. Снимок и переписка сфер не заводят — шагов нет.
+    Название — `sphere`, пусто — `title`; чистит и сверяет со списком
+    `services/spheres.py`.
+    """
+    if isinstance(understanding, PhotoUnderstanding | ConversationUnderstanding):
+        return []
+    steps: list[SphereStep] = []
+    top_is_new = understanding.edit is None and not understanding.answers_question
+    if understanding.kind in SPHERE_KINDS and top_is_new:
+        name = understanding.sphere or understanding.title
+        steps.append(SphereStep(drop=understanding.kind == SPHERE_DROP_KIND, name=name))
+    if isinstance(understanding, MessageUnderstanding):
+        steps.extend(understanding.more_spheres)
+    return steps
 
 
 # Ответ на снимок (§14.3): разбор §5.3 и два поля снимка. Доккомментарий —
@@ -364,7 +419,11 @@ RULES = """Вы — Соломон, помощник-секретарь. Вы р
 - search — найти в интернете сейчас: билеты, школу, квартиру, вещь или
   технику и где её купить, контакт организации, расписание; сюда же вопрос,
   на который нужен сегодняшний ответ из интернета: погода, цены, курсы,
-  расписание, новости.
+  расписание, новости;
+- sphere — завести сферу жизни владельца: «заведи сферу VoiceFin»;
+- sphere_drop — убрать сферу: «убери сферу семья».
+sphere — сфера жизни владельца, к которой относится сообщение, по правилам
+блока «Сферы владельца» ниже; блока нет — sphere = null.
 Размышление о возможной поездке — не задача «купить билеты»: пока человек
 взвешивает, это idea или wish. Если в сообщении есть дело, это поручение,
 даже рядом с вопросом или благодарностью: «Спасибо, и напомни завтра
@@ -485,8 +544,8 @@ reply_hint — ответ человеку на разговор (kind = chat) �
   когда человек просит. Простым текстом, без разметки: ни звёздочек, ни
   решёток;
 - вопрос о делах и о самом человеке — отвечайте только по тому, что есть
-  ниже: открытые задачи, сведения о владельце, недавний разговор. Чего там
-  нет, о том так и скажите («На четверг ничего не записано») — не
+  ниже: открытые задачи, сведения о владельце, сферы и что о них известно,
+  недавний разговор. Чего там нет, о том так и скажите («На четверг ничего не записано») — не
   выдумывайте ни дел, ни дней, ни времени. У задачи со строкой «повтор: …»
   стоит ближайший раз, а по правилу видны и следующие;
 - вопрос не о делах — отвечайте из своих знаний, как ассистент. Сегодняшних
@@ -602,8 +661,9 @@ SEVERAL_RULES = """В одном сообщении бывает несколь�
 и желание — тоже дела: «запиши идею подарка и в субботу купи цветы» — идея
 и задача. Поиск — тоже отдельный элемент: «позвони завтра Игорю и найди
 билеты в Москву на 15-е» — задача и поиск, две просьбы найти — два поиска.
-Сведение о себе и реплика разговора — не дела: сведения идут
-в facts, как обычно, а на реплику рядом с делами не отвечайте.
+Сфера — тоже отдельный элемент: «мои сферы: VoiceFin, РЕЙВА» — два
+элемента kind = sphere. Сведение о себе и реплика разговора — не дела:
+сведения идут в facts, как обычно, а на реплику рядом с делами не отвечайте.
 
 Ответ — список items. Первый элемент — разбор сообщения: всё, что в правилах
 сказано о полях верхнего уровня, — о нём. Первое новое дело — в первом
@@ -611,9 +671,9 @@ SEVERAL_RULES = """В одном сообщении бывает несколь�
 порядке, в каком они сказаны. Если сообщение отвечает на открытый вопрос
 (answers_question = true) или правит задачу (edit), первый элемент — о них,
 как всегда, и все новые дела — следующими элементами. Дело одно — в items
-один элемент. У каждого следующего элемента свои kind (task, idea, wish или search),
-суть, срок, повтор, срочность, обещание, люди и признаки — по тем же
-правилам, что у первого. Ответ, правка, память и подсказка бывают
+один элемент. У каждого следующего элемента свои kind (task, idea, wish, search,
+sphere или sphere_drop), суть, срок, повтор, срочность, обещание, люди, сфера и
+признаки — по тем же правилам, что у первого. Ответ, правка, память и подсказка бывают
 только у первого: у следующих answers_question = false, edit = null,
 facts = [], reply_hint = null.
 
@@ -738,8 +798,109 @@ def format_open_question(asked: AskedQuestion | None, timezone: ZoneInfo) -> str
     )
 
 
+class KnownSphere(Protocol):
+    """Живая сфера владельца — то, что нужно блоку сфер (§30.2)."""
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def facts(self) -> Sequence[str]: ...
+
+
+# Блок сфер — до 2000 знаков на все (§30.2): названия всегда, знания — пока
+# влезают.
+SPHERES_LIMIT = 2000
+SPHERES_HEAD = "Сферы владельца:"
+NO_SPHERES = "Сфер у владельца пока нет."
+
+# Правила сфер у текста и голоса (`techspec/30-spheres.md` §30.2): идут за
+# списком сфер, и тогда, когда сфер нет, — заводить их можно и с нуля.
+SPHERE_RULES = """Сфера — часть жизни владельца, которую он назвал сам: бизнес, семья,
+интерес. После названия в списке — что о сфере известно. sphere — сфера
+сообщения: название из списка, как оно в нём написано. Новых сфер не
+придумывайте: название не из списка бывает только там, где владелец назвал его
+сам, — ниже.
+- Поручение, идея, желание — sphere по смыслу: по тому, что о сферах
+  известно, и по людям — «созвон с Игорем» относится к той сфере, где известен
+  Игорь. Сфера неочевидна — sphere = null; не спрашивайте, к какой сфере дело,
+  и не ставьте из-за неё needs_review. Сфера не меняет ни вида, ни сути, ни
+  срока дела.
+- «Заведи сферу X», «мои сферы: A, B, C» — kind = sphere, по элементу items на
+  каждую сферу; название — в sphere и в title, как назвал владелец, в
+  именительном падеже: «по спорту» — «спорт». Сфера уже есть — тоже sphere.
+- «Это по X: …», «по X: …» — сведение о сфере X: kind = about_me, sphere = X, а
+  само сведение одной фразой — в facts, как любое сведение о человеке. Сферы X
+  нет в списке, но владелец прямо сказал «это по X» — sphere = X: он назвал её
+  сам. Упомянутые компания, место или занятие без слов «это по» («я работаю в
+  РЕЙВА») — сфера, только если она есть в списке; иначе sphere = null.
+- «Убери сферу X», «удали сферу X» — kind = sphere_drop, название — в sphere и
+  в title.
+- «Это по X» о записанной задаче — правка, правила — в блоке открытых задач.
+- «Какие у меня сферы?», «что ты знаешь про X?», «что у меня по X?» — разговор
+  (chat): отвечайте по этому списку, по задачам со строкой «сфера: X» и по
+  недавнему разговору.
+- У разговора и поиска sphere = null."""
+
+# У снимка и переписки (§30.2): сфера дела по смыслу, остального нет.
+SPHERE_SHORT_RULES = """sphere — сфера дела из этого списка, как она в нём написана: по смыслу,
+по тому, что о сферах известно, и по людям. Сфера неочевидна — sphere = null,
+не спрашивайте. Сфер здесь не заводят и не убирают: kind = sphere и
+sphere_drop не бывает."""
+
+
+def sphere_lines(spheres: Sequence[KnownSphere], limit: int = SPHERES_LIMIT) -> list[str]:
+    """Строки сфер «- VoiceFin: знание; знание» (§30.2) — не длиннее `limit`
+    вместе с переводами строк.
+
+    Названия — всегда, даже сверх предела. Знания добавляются по кругу: у
+    каждой сферы самое свежее, потом следующее, — пока влезают; не влезло —
+    пропускается, а более короткое ещё может встать. Внутри сферы — от
+    старых к новым, как записаны.
+    """
+    chosen: list[list[int]] = [[] for _ in spheres]
+
+    def render() -> list[str]:
+        lines = []
+        for sphere, picked in zip(spheres, chosen, strict=True):
+            facts = [sphere.facts[index] for index in sorted(picked)]
+            line = f"- {sphere.name}"
+            lines.append(f"{line}: {'; '.join(facts)}" if facts else line)
+        return lines
+
+    depth = max((len(sphere.facts) for sphere in spheres), default=0)
+    for step in range(1, depth + 1):
+        for position, sphere in enumerate(spheres):
+            if step > len(sphere.facts):
+                continue
+            chosen[position].append(len(sphere.facts) - step)
+            if len("\n".join(render())) > limit:
+                chosen[position].pop()
+    return render()
+
+
+def format_spheres(spheres: Sequence[KnownSphere], rules: str) -> str:
+    """Блок «Сферы владельца» (§30.2): строки сфер и правила за ними; сфер нет —
+    строка «Сфер у владельца пока нет.» и те же правила."""
+    lines = sphere_lines(spheres)
+    if not lines:
+        return f"{NO_SPHERES}\n{rules}"
+    return "\n".join((SPHERES_HEAD, *lines, rules))
+
+
+def sphere_names(spheres: Sequence[KnownSphere]) -> dict[str, str]:
+    """Название сферы по её id — для строки «сфера: X» открытой задачи."""
+    return {sphere.id: sphere.name for sphere in spheres}
+
+
 class OpenTask(Protocol):
     """Открытая задача — то, что нужно строке блока 5 (§5.2, §12.2, §13.5)."""
+
+    @property
+    def sphere_id(self) -> str | None: ...
 
     @property
     def title(self) -> str: ...
@@ -777,7 +938,14 @@ EDIT_RULES = """Если сообщение просит поменять уже
 - action = done — дело сделано: «сделал», «отправил», «готово»;
 - action = cancel — делать больше не нужно: «отменилась», «уже не нужно»;
 - action = skip — пропустить этот раз повторяющейся задачи: «в этот раз не
-  надо», «на этой неделе пропускаю», «сегодня не будет».
+  надо», «на этой неделе пропускаю», «сегодня не будет»;
+- action = sphere — дело относится к другой сфере: «это по РЕЙВА», «это не по
+  работе, а по семье», «это без сферы». Новая сфера — в sphere верхнего
+  уровня: название из списка сфер или то, что назвал владелец; «без сферы» —
+  sphere = null. Остальные поля edit — null и false. «Это по X: <сведение>»
+  — не правка, а сведение о сфере (about_me).
+Строка «Ответ на отчёт о переписке» перед текстом и «это по X» — сфера этого
+чата и всех его дел: edit с action = sphere и task = null, сфера — в sphere.
 Задачу называйте её номером в поле task. Подсказки о том, какая это задача:
 строка перед текстом «Ответ на напоминание о задаче №N» или «Ответ на своё
 сообщение о задаче №N» — человек ответил на сообщение об этой задаче; строка
@@ -884,10 +1052,14 @@ def format_recent(recent: str | None) -> str:
     return f"{recent}\n{RECENT_RULES}"
 
 
-def _open_task_line(number: int, task: OpenTask, timezone: ZoneInfo) -> str:
-    """«N. суть (срок: …; повтор: …; люди: …; срочно; идея)» — подробности только те, что есть.
+def _open_task_line(
+    number: int, task: OpenTask, timezone: ZoneInfo, spheres: Mapping[str, str]
+) -> str:
+    """«N. суть (срок: …; повтор: …; люди: …; сфера: …; срочно; идея)» —
+    подробности только те, что есть.
 
-    Повтор — словами без часа: час уже в сроке (§13.5).
+    Повтор — словами без часа: час уже в сроке (§13.5). Сфера — по названию
+    из списка сфер (§30.2); нет её там — строки нет.
     """
     details: list[str] = []
     if task.due_at is not None:
@@ -898,6 +1070,9 @@ def _open_task_line(number: int, task: OpenTask, timezone: ZoneInfo) -> str:
         details.append(f"повтор: {texts.repeat_words(task.repeat)}")
     if task.people:
         details.append(f"люди: {', '.join(task.people)}")
+    sphere = spheres.get(task.sphere_id) if task.sphere_id is not None else None
+    if sphere is not None:
+        details.append(f"сфера: {sphere}")
     if task.priority == "high":
         details.append("срочно")
     if task.kind in KIND_MARKS:
@@ -906,10 +1081,18 @@ def _open_task_line(number: int, task: OpenTask, timezone: ZoneInfo) -> str:
     return f"{line} ({'; '.join(details)})" if details else line
 
 
-def open_task_lines(tasks: Sequence[OpenTask], timezone: ZoneInfo) -> list[str]:
+def open_task_lines(
+    tasks: Sequence[OpenTask],
+    timezone: ZoneInfo,
+    spheres: Sequence[KnownSphere] = (),
+) -> list[str]:
     """Строки открытых задач «N. суть (…)», как в блоке 5 (§5.2): их берёт и
-    разбор личных чатов для дублей (`techspec/25-chats.md` §25.3)."""
-    return [_open_task_line(number, task, timezone) for number, task in enumerate(tasks, start=1)]
+    разбор личных чатов для дублей (`techspec/25-chats.md` §25.3). `spheres` —
+    живые сферы: по ним у задачи строка «сфера: X» (§30.2)."""
+    names = sphere_names(spheres)
+    return [
+        _open_task_line(number, task, timezone, names) for number, task in enumerate(tasks, start=1)
+    ]
 
 
 def last_tasks_line(numbers: Sequence[int]) -> str | None:
@@ -931,6 +1114,7 @@ def format_open_tasks(
     short: bool = False,
     photo: bool = False,
     conversation: bool = False,
+    spheres: Sequence[KnownSphere] = (),
 ) -> str:
     """Блок 5 «Открытые задачи» (§5.2, §12.2, §15.2). `None` — блока нет.
 
@@ -952,7 +1136,7 @@ def format_open_tasks(
         return ""
     if not tasks:
         return f"Открытых задач нет.\n{EDIT_RULES}\n{DUPLICATE_RULES}"
-    lines = ["Открытые задачи:", *open_task_lines(tasks, timezone)]
+    lines = ["Открытые задачи:", *open_task_lines(tasks, timezone, spheres)]
     if short:
         lines.extend((SHORT_BLOCK_NOTE, DUPLICATE_RULES))
         if photo:
@@ -990,10 +1174,17 @@ def build_system_prompt(
     photo: bool = False,
     short: bool = False,
     conversation: bool = False,
+    spheres: Sequence[KnownSphere] | None = None,
 ) -> str:
     """Системный промпт (§5.2): роль и правила, момент, что уже известно,
-    открытый вопрос, открытые задачи, недавний разговор. Пустые блоки не
-    попадают вовсе.
+    сферы, открытый вопрос, открытые задачи, недавний разговор. Пустые блоки
+    не попадают вовсе.
+
+    `spheres` — живые сферы со знаниями (§30.2), `None` — блока нет (сбой
+    чтения или вызов без сфер). У своего текста и голоса блок есть и без
+    сфер — с правилами заводить их; у пересланного, снимка и переписки —
+    только когда сферы есть, с коротким правилом: чужие слова сфер не
+    заводят.
 
     `photo` — разбирается снимок (§14.3): к блоку 1 дописываются правила
     снимка, блок 5 — короткий. `conversation` — переписка, пересланная
@@ -1009,8 +1200,14 @@ def build_system_prompt(
     else:
         rules = f"{RULES}\n\n{SEVERAL_RULES}"
     parts = [rules, format_moment(now, timezone)]
+    sphere_block = ""
+    if spheres is not None and not (photo or conversation or short):
+        sphere_block = format_spheres(spheres, SPHERE_RULES)
+    elif spheres:
+        sphere_block = format_spheres(spheres, SPHERE_SHORT_RULES)
     blocks = (
         format_known(known),
+        sphere_block,
         format_open_question(open_question, timezone),
         format_open_tasks(
             tasks,
@@ -1019,6 +1216,7 @@ def build_system_prompt(
             short=short or photo or conversation,
             photo=photo,
             conversation=conversation,
+            spheres=spheres or (),
         ),
         format_recent(recent),
     )
@@ -1372,6 +1570,7 @@ class UnderstandingService:
         last_tasks: Sequence[int] = (),
         swipe: str | None = None,
         recent: str | None = None,
+        spheres: Sequence[KnownSphere] | None = None,
     ) -> Verdict:
         """Разобрать сообщение или честно сказать, что не вышло.
 
@@ -1390,7 +1589,8 @@ class UnderstandingService:
 
         `recent` — строки недавнего разговора (блок 6, §17.3); у
         пересланного блока нет, даже если строки пришли: чужие слова
-        разговора не ведут (§17.1).
+        разговора не ведут (§17.1). `spheres` — живые сферы со знаниями
+        (§30.2), `None` — блока сфер нет.
         """
         known = await self._known_facts()
         forwarded = forwarded_from is not None
@@ -1403,6 +1603,7 @@ class UnderstandingService:
             () if forwarded else last_tasks,
             None if forwarded else recent,
             short=forwarded,
+            spheres=spheres,
         )
         message = build_user_message(text, forwarded_from, spoken, swipe)
         answer = await self._ask(self._call(system=system, text=message))
@@ -1444,6 +1645,7 @@ class UnderstandingService:
         forwarded_from: str | None = None,
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
+        spheres: Sequence[KnownSphere] | None = None,
     ) -> PhotoVerdict:
         """Разобрать снимок или честно сказать, что не вышло (§14.3).
 
@@ -1464,6 +1666,7 @@ class UnderstandingService:
             open_question,
             tasks,
             photo=True,
+            spheres=spheres,
         )
         content = build_photo_content(image, media_type, build_photo_text(caption, forwarded_from))
         answer = await self._ask(self._photo_call(system=system, content=content))
@@ -1504,6 +1707,7 @@ class UnderstandingService:
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
         recent: str | None = None,
+        spheres: Sequence[KnownSphere] | None = None,
     ) -> ConversationVerdict:
         """Разобрать переписку, пересланную разом, или честно сказать, что не
         вышло (§18.2).
@@ -1527,6 +1731,7 @@ class UnderstandingService:
             tasks,
             recent=recent,
             conversation=True,
+            spheres=spheres,
         )
         answer = await self._ask(self._conversation_call(system=system, text=text))
         if isinstance(answer, NotUnderstood):
