@@ -3409,7 +3409,7 @@ def test_search_fixtures_cover_the_cases_of_the_stage() -> None:
     assert len(follow) == 2
     blocks = [recent_for(case, TZ) or "" for case in follow]
     assert any("Соломон: Куда и на какие числа искать билеты?" in block for block in blocks)
-    assert any("Соломон: Ищу: билеты" in block for block in blocks)
+    assert any("Соломон: 🔍 Ищу: билеты" in block for block in blocks)
 
 
 def test_live_run_is_skipped_without_settings(monkeypatch: pytest.MonkeyPatch) -> None:
