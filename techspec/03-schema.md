@@ -113,6 +113,7 @@ null`.
 | `chat_analysis_id` | uuid, `references chat_analyses(id)`, nullable | разбор переписки, из которого задача записана (этап 025, §3.14, §25.3); у задачи не бывает и сообщения, и разбора (`tasks_chat_source_check`) |
 | `chat_item` | smallint, nullable | номер дела в разборе, 1–5: есть ровно вместе с `chat_analysis_id` (`tasks_chat_item_check`), уникален в паре (`tasks_chat_item_key`); по нему кнопка «Убрать N» (§25.4) |
 | `sphere_id` | uuid, nullable | сфера дела (этап 032, §30, §3.17); пусто — без сферы. Ключ составной: `(owner_telegram_id, sphere_id) references spheres (owner_telegram_id, id) on delete set null (sphere_id)` (`tasks_sphere_fkey`) — сфера только своего владельца |
+| `duration` | smallint, nullable | минуты встречи от `due_at` (этап 033, §31.1): «с 14 до 16» — 120, встреча без конца — 60, простое дело с часом — пусто. Есть только у срока с часом (`tasks_duration_check`: 1–1440 и `due_precision = 'time'`) |
 | `created_at` | timestamptz, `default now()` | |
 | `updated_at` | timestamptz, `default now()` | обновляется триггером при любой правке |
 
@@ -145,6 +146,15 @@ null`.
 Индекс `(owner_telegram_id, status)` — под главный запрос «активные
 задачи владельца»; частичный `(owner_telegram_id) where due_moved_at is
 not null` — под строку «Перенёс» в минутном цикле бота (§11.4).
+
+Длительность (миграция 033, `20261010100000_hours.sql`) решает разбор
+(§5.3), пишет `insert_message_task` (ключ `duration` у дела), правит
+`change_task` (§3.6). Срок уходит с часа — на день, на часть дня или
+снят — длительность снимает триггер `tasks_duration_fit` (`before insert
+or update`), кто бы ни правил: ответ на вопрос, правка словом, приложение.
+Перенос встречи на другой час и следующий раз повтора её держат. Частичный
+индекс `tasks_meetings_idx (owner_telegram_id, due_at) where duration is
+not null` — под часы по сферам (§31.4).
 
 ### 3.4 Приём сообщения: две функции
 
@@ -435,6 +445,13 @@ default null` — прежняя подпись удалена, вызов бе�
   задачи из `edit.sphere`, пусто — снять; нет такой — заводится. Задача
   только активная, как у других действий; `pick_task` идёт тем же путём.
 
+**Этап 033** (§31, миграция `20261010100000_hours.sql`): у дела
+(`tasks[].task`) — ключ `duration`, минуты встречи (`insert_message_task`,
+та же подпись; у срока без часа его снимает триггер §3.3). Правка
+длительности словом — ключ `duration` в `edit.changes` (`change_task`,
+§3.6). Ответ на вопрос (`amend`) длительности не пишет: срок, ушедший
+с часа, её снимет триггер, а новую ответ не ставит (§31.4).
+
 Задачу с напоминаниями `record_understanding` (ветка `task`) и
 `record_separately` вставляют одной внутренней функцией
 `insert_message_task(owner_telegram_id bigint, message_id uuid, task
@@ -699,6 +716,13 @@ Mini App ходит в базу под ролью `authenticated` (§4.1), вл�
   разовой с текущим сроком. Без ключа перенос срока меняет только этот
   раз — правило и раз остаются; снятие срока и смена вида на идею или
   желание снимают правило. Сама смена правила расписание не трогает.
+
+  Ключ `duration` (миграция 033, §31.1): целые минуты 1–1440 —
+  длительность встречи, `null` — снять; другое — исключение `change_task:
+  invalid duration`. Без ключа длительность остаётся, пока срок с часом;
+  срок ушёл с часа — её снимает триггер (§3.3). Расписание длительность не
+  трогает. Ключ шлёт правка словом «созвон до 16» (`services/edits.py`);
+  приложение его пока не шлёт.
 - `advance_task(owner_telegram_id bigint, task_id uuid, occurrence
   bigint default null, next_at timestamptz default null, schedule jsonb
   default null) returns tasks` — ядро «Сделано» и пропуска (§13.3),
@@ -960,7 +984,8 @@ chat_key)`; `chat_threads_waiting_check` — время, фраза и «ком�
 повторная доставка дубля не даёт; `chat_messages_erased_check` — стёртый
 текст пуст. Индексы: `(thread_id, sent_at)` — под куски разбора;
 частичный `(owner_telegram_id, created_at) where erased_at is null` — под
-стирание.
+стирание; `(owner_telegram_id, sent_at)` (`chat_messages_owner_sent_idx`,
+миграция 033) — под сессии переписки в часах по сферам (§31.4).
 
 ### 3.14 `chat_analyses` — разборы переписки
 
