@@ -785,7 +785,9 @@ async def test_first_poll_asks_consent_and_reads_nothing_before_it(tmp_path: Pat
 
     assert await direct_.service.poll(NOW) == 0
 
-    assert direct_.sender.texts == [texts.consent_question("instagram")]
+    assert direct_.sender.texts == [
+        texts.iconed(texts.ICON_CHAT, texts.consent_question("instagram"))
+    ]
     assert direct_.store.sources["instagram"]["connection_id"] == BUSINESS.user_id
     assert "conversations" not in direct_.meta.names(), "до согласия Direct не читается"
     assert direct_.store.messages == []
@@ -798,7 +800,9 @@ async def test_consent_question_is_asked_once_across_restarts(tmp_path: Path) ->
 
     await again.service.poll(NOW + timedelta(minutes=5))
 
-    assert first.sender.texts == [texts.consent_question("instagram")]
+    assert first.sender.texts == [
+        texts.iconed(texts.ICON_CHAT, texts.consent_question("instagram"))
+    ]
 
 
 async def test_after_consent_the_poll_reads_the_last_day(tmp_path: Path) -> None:
@@ -866,7 +870,7 @@ async def test_direct_deal_reaches_the_owner_marked_instagram(tmp_path: Path) ->
     assert await reports.send_reports(QUIET_LATER) == 1
 
     assert direct_.sender.texts == [
-        "Из переписки с @oleg (Instagram) записал: "
+        "💬 Из переписки с @oleg (Instagram) записал: "
         "прислать Олегу расчёт — пятница, 9 октября (вы обещали)"
     ]
     [(_, buttons)] = direct_.sender.sent
@@ -894,7 +898,7 @@ async def test_unanswered_direct_question_is_reminded_with_instagram(tmp_path: P
 
     assert reminded == 1
     assert direct_.sender.texts == [
-        "Вы не ответили @oleg (Instagram) — он спрашивал, во сколько созвон."
+        "⏳ Вы не ответили @oleg (Instagram) — он спрашивал, во сколько созвон."
     ]
     [(_, buttons)] = direct_.sender.sent
     assert [(button.text, button.url) for button in buttons] == [
@@ -1113,7 +1117,7 @@ async def test_rejected_key_stops_polling_and_tells_the_owner_once(tmp_path: Pat
     assert await direct_.service.tick(NOW + timedelta(minutes=10)) == 0
     await direct_.service.wait()
 
-    assert direct_.sender.texts == [texts.INSTAGRAM_REJECTED]
+    assert direct_.sender.texts == [texts.iconed(texts.ICON_TROUBLE, texts.INSTAGRAM_REJECTED)]
     assert len(direct_.meta.calls) == asked, "опрос стоит"
     assert direct_.state().rejected_at == NOW
 
@@ -1181,7 +1185,7 @@ async def test_no_access_to_direct_is_told_once_and_polling_goes_on(tmp_path: Pa
     assert await direct_.service.tick(NOW + timedelta(minutes=5)) == 0
     await direct_.service.wait()
 
-    assert direct_.sender.texts == [texts.INSTAGRAM_NO_ACCESS]
+    assert direct_.sender.texts == [texts.iconed(texts.ICON_TROUBLE, texts.INSTAGRAM_NO_ACCESS)]
     assert direct_.state().rejected_at is None, "ключ не отвергнут"
     assert [row["external_id"] for row in direct_.store.messages] == ["m_1"], "доступ вернулся"
 

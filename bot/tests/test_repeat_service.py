@@ -196,7 +196,7 @@ async def test_rule_is_recorded_with_the_task_and_retold() -> None:
     outcome = await say(rig, "каждый понедельник отправлять отчёт")
 
     assert outcome.message == (
-        "Записал: отправить отчёт. Повтор: каждый понедельник. "
+        "✅ Записал: отправить отчёт. Повтор: каждый понедельник. "
         f"Срок: понедельник, 5 октября. {MONDAY_REMIND}"
     )
     task = saved(rig.understandings, "task")
@@ -221,7 +221,8 @@ async def test_rule_with_an_hour_leaves_the_hour_to_the_database() -> None:
     outcome = await say(rig, "по будням в 9 планёрка")
 
     assert (
-        outcome.message == "Записал: планёрка. Повтор: по будням. Срок: среда, 30 сентября, 09:00"
+        outcome.message
+        == "✅ Записал: планёрка. Повтор: по будням. Срок: среда, 30 сентября, 09:00"
     )
     task = saved(rig.understandings, "task")
     assert task["due_precision"] == "time"
@@ -240,7 +241,7 @@ async def test_rule_by_voice_is_recorded_as_by_text() -> None:
         load_audio=load_audio,
     )
 
-    assert outcome.message.startswith("Записал: отправить отчёт. Повтор: каждый понедельник.")
+    assert outcome.message.startswith("✅ Записал: отправить отчёт. Повтор: каждый понедельник.")
     assert saved(rig.understandings, "task")["repeat"] == MONDAYS
 
 
@@ -276,7 +277,7 @@ async def test_rule_out_of_form_gives_a_one_off_task_with_a_mark() -> None:
 
     assert outcome.ok
     assert outcome.message == (
-        f"Записал: отправить отчёт. Срок: понедельник, 5 октября. {MONDAY_REMIND}. "
+        f"✅ Записал: отправить отчёт. Срок: понедельник, 5 октября. {MONDAY_REMIND}. "
         "Не разобрал повтор — записал разовой"
     )
     task = saved(rig.understandings, "task")
@@ -303,7 +304,7 @@ async def test_rule_out_of_form_is_said_before_the_question() -> None:
     outcome = await say(rig)
 
     assert outcome.message == (
-        "Записал: отправить отчёт. Срок: понедельник, 5 октября. "
+        "❓ Записал: отправить отчёт. Срок: понедельник, 5 октября. "
         "Не разобрал повтор — записал разовой. К какому часу?"
     )
     task = saved(rig.understandings, "task")
@@ -346,7 +347,7 @@ async def test_rule_without_a_first_time_is_asked_about() -> None:
 
     outcome = await say(rig, "каждый месяц платить за квартиру")
 
-    assert outcome.message == f"Записал: {RENT}. Какого числа каждый месяц?"
+    assert outcome.message == f"❓ Записал: {RENT}. Какого числа каждый месяц?"
     task = saved(rig.understandings, "task")
     assert task["repeat"] is None
     assert task["due_at"] is None
@@ -371,7 +372,7 @@ async def test_answer_gives_the_task_its_due_and_its_rule() -> None:
     outcome = await say(rig, "десятого")
 
     assert outcome.message == (
-        f"Понял: {RENT}. Повтор: каждый месяц 10-го. Срок: суббота, 10 октября. "
+        f"✅ Понял: {RENT}. Повтор: каждый месяц 10-го. Срок: суббота, 10 октября. "
         "Напомню: 9 октября в 18:00"
     )
     assert saved(rig.understandings, "task") is None
@@ -458,7 +459,7 @@ async def test_done_moves_a_repeating_task_to_its_next_time() -> None:
     ]
     assert saved_edit(rig.understandings) == advanced_edit("done", PAST_MONDAY, MONDAY_UTC)
     assert outcome.message == (
-        f"Отметил: отправить отчёт. Следующий раз: понедельник, 5 октября. {MONDAY_REMIND}"
+        f"✏️ Отметил: отправить отчёт. Следующий раз: понедельник, 5 октября. {MONDAY_REMIND}"
     )
     back = f"back:{REPORT_ID}:{seconds(PAST_MONDAY)}:{seconds(MONDAY)}"
     assert outcome.buttons == (Button(text=texts.REOPEN_BUTTON, data=back),)
@@ -473,7 +474,7 @@ async def test_skip_moves_a_repeating_task_too() -> None:
 
     assert saved_edit(rig.understandings) == advanced_edit("skip", PAST_MONDAY, MONDAY_UTC)
     assert outcome.message == (
-        f"Пропускаю этот раз: отправить отчёт. Следующий раз: понедельник, 5 октября. "
+        f"✏️ Пропускаю этот раз: отправить отчёт. Следующий раз: понедельник, 5 октября. "
         f"{MONDAY_REMIND}"
     )
     assert [button.data for button in outcome.buttons] == [
@@ -493,7 +494,7 @@ async def test_done_ahead_of_time_counts_from_the_time_itself() -> None:
     outcome = await say(rig)
 
     assert rig.following.calls[0]["after"] == MONDAY
-    assert outcome.message == "Отметил: отправить отчёт. Следующий раз: понедельник, 12 октября"
+    assert outcome.message == "✏️ Отметил: отправить отчёт. Следующий раз: понедельник, 12 октября"
 
 
 async def test_moved_time_counts_from_the_time_not_from_the_due() -> None:
@@ -513,7 +514,7 @@ async def test_next_time_unknown_means_nothing_is_recorded() -> None:
 
     outcome = await say(rig)
 
-    assert outcome == RecordOutcome(ok=False, message=texts.NOT_SAVED)
+    assert outcome == RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
     assert rig.understandings.calls == []
 
 
@@ -527,7 +528,7 @@ async def test_time_gone_during_the_parse_is_a_failed_record() -> None:
 
     outcome = await say(rig)
 
-    assert outcome == RecordOutcome(ok=False, message=texts.NOT_SAVED)
+    assert outcome == RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
 
 
 async def test_skip_of_a_one_off_task_removes_it() -> None:
@@ -536,7 +537,7 @@ async def test_skip_of_a_one_off_task_removes_it() -> None:
 
     outcome = await say(rig, "лампочку в этот раз не надо")
 
-    assert outcome.message == "Убрал из списка: купить лампочку."
+    assert outcome.message == "✏️ Убрал из списка: купить лампочку."
     assert outcome.buttons == (Button(text=texts.REOPEN_BUTTON, data=f"reopen:{LAMP_ID}"),)
     assert saved_edit(rig.understandings)["action"] == "skip"
     assert rig.following.calls == []
@@ -547,7 +548,7 @@ async def test_cancel_of_a_repeating_task_removes_the_whole_series() -> None:
 
     outcome = await say(rig, "отчёт больше не нужен совсем")
 
-    assert outcome.message == "Убрал из списка со всеми повторами: отправить отчёт."
+    assert outcome.message == "✏️ Убрал из списка со всеми повторами: отправить отчёт."
     assert outcome.buttons == (Button(text=texts.REOPEN_BUTTON, data=f"reopen:{REPORT_ID}"),)
     assert saved_edit(rig.understandings) == {
         "task_id": REPORT_ID,
@@ -575,7 +576,7 @@ async def test_moving_the_time_keeps_the_rule() -> None:
 
     assert saved_edit(rig.understandings)["changes"] == {"due_date": "2026-09-30"}
     assert outcome.message == (
-        "Перенёс: отправить отчёт. Повтор: каждый понедельник. Срок: среда, 30 сентября. "
+        "✏️ Перенёс: отправить отчёт. Повтор: каждый понедельник. Срок: среда, 30 сентября. "
         "Напомню: 30 сентября в 09:00"
     )
 
@@ -601,7 +602,7 @@ async def test_moving_a_time_to_a_day_keeps_its_hour() -> None:
     assert rig.planner.calls[0]["due_at"] == datetime(2026, 10, 7, 9, 0, tzinfo=TZ)
     assert rig.planner.calls[0]["due_precision"] == "time"
     assert rig.following.calls == []
-    assert outcome.message.startswith("Перенёс: планёрка. Повтор: каждый понедельник")
+    assert outcome.message.startswith("✏️ Перенёс: планёрка. Повтор: каждый понедельник")
     assert "Срок: среда, 7 октября, 09:00" in outcome.message
 
 
@@ -613,7 +614,7 @@ async def test_same_time_of_a_repeating_task_is_as_recorded_with_its_rule() -> N
     assert saved_edit(rig.understandings)["changes"] == {}
     assert rig.planner.calls == []
     assert outcome.message == (
-        "Так и записано: отправить отчёт. Повтор: каждый понедельник. "
+        "✏️ Так и записано: отправить отчёт. Повтор: каждый понедельник. "
         "Срок: понедельник, 28 сентября"
     )
 
@@ -633,7 +634,7 @@ async def test_new_rule_goes_with_its_first_time() -> None:
         "repeat": TUESDAYS,
     }
     assert outcome.message == (
-        "Поправил: отправить отчёт. Повтор: каждый вторник. Срок: вторник, 6 октября. "
+        "✏️ Поправил: отправить отчёт. Повтор: каждый вторник. Срок: вторник, 6 октября. "
         "Напомню: 5 октября в 18:00"
     )
 
@@ -661,7 +662,7 @@ async def test_new_hour_sends_the_same_rule_again() -> None:
         "repeat": WORKDAYS,
     }
     assert outcome.message == (
-        "Поправил: планёрка. Повтор: по будням. Срок: среда, 30 сентября, 11:00"
+        "✏️ Поправил: планёрка. Повтор: по будням. Срок: среда, 30 сентября, 11:00"
     )
 
 
@@ -675,7 +676,7 @@ async def test_rule_for_a_one_off_task_starts_from_its_due() -> None:
     assert saved_edit(rig.understandings)["schedule"] == []
     assert rig.planner.calls == []
     assert outcome.message == (
-        "Поправил: позвонить маме. Повтор: каждый понедельник. Срок: пятница, 2 октября"
+        "✏️ Поправил: позвонить маме. Повтор: каждый понедельник. Срок: пятница, 2 октября"
     )
 
 
@@ -685,7 +686,7 @@ async def test_rule_for_a_task_without_a_due_asks_where_to_start() -> None:
 
     outcome = await say(rig, "лампочку каждый понедельник")
 
-    assert outcome.message == "Купить лампочку — с какого дня начать повтор?"
+    assert outcome.message == "❓ Купить лампочку — с какого дня начать повтор?"
     assert saved_edit(rig.understandings) == {
         "task_id": LAMP_ID,
         "action": "change",
@@ -702,7 +703,9 @@ async def test_removed_rule_leaves_a_one_off_task() -> None:
 
     assert saved_edit(rig.understandings)["changes"] == {"repeat": None}
     assert rig.planner.calls == []
-    assert outcome.message == "Больше не повторяю: отправить отчёт. Срок: понедельник, 28 сентября"
+    assert (
+        outcome.message == "✏️ Больше не повторяю: отправить отчёт. Срок: понедельник, 28 сентября"
+    )
 
 
 async def test_removed_due_removes_the_rule_too() -> None:
@@ -712,7 +715,7 @@ async def test_removed_due_removes_the_rule_too() -> None:
     outcome = await say(rig, "у отчёта нет срока")
 
     assert saved_edit(rig.understandings)["changes"] == {"due_at": None}
-    assert outcome.message == "Убрал срок и повтор: отправить отчёт. Напоминать не буду."
+    assert outcome.message == "✏️ Убрал срок и повтор: отправить отчёт. Напоминать не буду."
 
 
 async def test_rule_out_of_form_in_an_edit_is_dropped_the_rest_goes() -> None:
@@ -721,7 +724,7 @@ async def test_rule_out_of_form_in_an_edit_is_dropped_the_rest_goes() -> None:
     outcome = await say(rig, "отчёт срочный и через раз")
 
     assert saved_edit(rig.understandings)["changes"] == {"priority": "high"}
-    assert outcome.message.startswith("Поправил: отправить отчёт. Повтор: каждый понедельник.")
+    assert outcome.message.startswith("✏️ Поправил: отправить отчёт. Повтор: каждый понедельник.")
 
 
 # ------------------------------------------------------ кнопка кандидата
@@ -754,7 +757,7 @@ async def test_pick_of_a_repeating_task_moves_it_to_the_next_time() -> None:
     back = f"back:{REPORT_ID}:{seconds(PAST_MONDAY)}:{seconds(MONDAY)}"
     assert outcome == PressOutcome(
         message=(
-            f"Отметил: отправить отчёт. Следующий раз: понедельник, 5 октября. {MONDAY_REMIND}"
+            f"✏️ Отметил: отправить отчёт. Следующий раз: понедельник, 5 октября. {MONDAY_REMIND}"
         ),
         replace=True,
         buttons=(Button(text=texts.REOPEN_BUTTON, data=back),),
@@ -811,7 +814,7 @@ async def test_back_returns_the_task_to_its_time() -> None:
 
     assert outcome == PressOutcome(
         message=(
-            "Вернул в работу: отправить отчёт. Повтор: каждый понедельник. "
+            "✏️ Вернул в работу: отправить отчёт. Повтор: каждый понедельник. "
             f"Срок: понедельник, 5 октября. {MONDAY_REMIND}"
         ),
         replace=True,
@@ -833,7 +836,7 @@ async def test_second_back_says_the_same_and_writes_nothing() -> None:
 
     assert outcome.replace
     assert outcome.message.startswith(
-        "Вернул в работу: отправить отчёт. Повтор: каждый понедельник."
+        "✏️ Вернул в работу: отправить отчёт. Повтор: каждый понедельник."
     )
     assert store.returns == []
 
@@ -898,7 +901,7 @@ async def test_reopened_series_names_its_rule() -> None:
     outcome = await rig.service.reopen(task_id=REPORT_ID)
 
     assert outcome.message == (
-        "Вернул в работу: отправить отчёт. Повтор: каждый понедельник. "
+        "✏️ Вернул в работу: отправить отчёт. Повтор: каждый понедельник. "
         "Срок: понедельник, 28 сентября"
     )
 
@@ -999,8 +1002,8 @@ async def test_reminder_of_a_repeating_task_carries_its_time() -> None:
     assert await service.tick() == 2
     assert notifier.occurrences == [seconds(FRIDAY_END_OF_DAY), None]
     assert [text for _, text in notifier.sent] == [
-        "Напоминаю: отправить расчёт\nСрок: сегодня",
-        "Напоминаю: отправить расчёт\nСрок: сегодня",
+        "🔔 Напоминаю: отправить расчёт\nСрок: сегодня",
+        "🔔 Напоминаю: отправить расчёт\nСрок: сегодня",
     ]
 
 
@@ -1010,7 +1013,7 @@ async def test_moved_line_of_a_repeating_task_names_the_rule() -> None:
 
     assert await service.tick(MONDAY_MORNING) == 1
     assert announcer.sent == [
-        "Перенёс: отправить расчёт клиенту. Повтор: каждую пятницу. Срок: пятница, 2 октября. "
+        "✏️ Перенёс: отправить расчёт клиенту. Повтор: каждую пятницу. Срок: пятница, 2 октября. "
         "Напомню: 2 октября в 09:00"
     ]
 

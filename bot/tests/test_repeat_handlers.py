@@ -197,7 +197,7 @@ async def test_reminder_of_a_repeating_task_goes_with_its_time(
     assert await service.tick(FRIDAY_END_OF_DAY) == 1
     sent = session.sent[0]
     assert isinstance(sent, SendMessage)
-    assert sent.text == "Напоминаю: отправить расчёт\nСрок: сегодня"
+    assert sent.text == "🔔 Напоминаю: отправить расчёт\nСрок: сегодня"
     assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
     data = sent.reply_markup.inline_keyboard[0][0].callback_data
     assert data == f"done:0e2f:{seconds(FRIDAY_END_OF_DAY)}"
@@ -237,7 +237,7 @@ async def test_word_done_comes_with_the_back_button(
 
     await dispatcher.feed_update(bot, make_update("отчёт отправил"))
 
-    assert session.texts[-1].startswith("Отметил: отправить отчёт. Следующий раз:")
+    assert session.texts[-1].startswith("✏️ Отметил: отправить отчёт. Следующий раз:")
     back = f"back:{REPORT_ID}:{seconds(PAST_MONDAY)}:{seconds(MONDAY)}"
     assert rows(sent_markups(session)[-1]) == [[("Вернуть", back)]]
 
@@ -252,7 +252,7 @@ async def test_back_writes_first_and_then_says_back_in_work(
 
     assert store.returns == [(REPORT_ID, seconds(MONDAY), seconds(NEXT_MONDAY), MONDAY_PLAN)]
     assert [edit.text for edit in session.edits] == [
-        "Вернул в работу: отправить отчёт. Повтор: каждый понедельник. "
+        "✏️ Вернул в работу: отправить отчёт. Повтор: каждый понедельник. "
         f"Срок: понедельник, 5 октября. {MONDAY_REMIND}"
     ]
     assert session.edits[0].reply_markup is None

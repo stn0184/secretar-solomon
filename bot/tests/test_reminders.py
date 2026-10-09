@@ -220,7 +220,7 @@ async def test_talk_without_a_task_does_not_ask_for_a_plan() -> None:
     message, _, planner = await record(make_understanding(kind="chat", title=""), MONDAY_MORNING)
 
     assert planner.calls == []
-    assert message == texts.NO_ERRAND
+    assert message == texts.iconed(texts.ICON_TROUBLE, texts.NO_ERRAND)
 
 
 async def test_plan_failure_is_a_failed_record() -> None:
@@ -236,7 +236,7 @@ async def test_plan_failure_is_a_failed_record() -> None:
     )
 
     assert outcome.ok is False
-    assert outcome.message == texts.NOT_SAVED
+    assert outcome.message == texts.NOT_SAVED_MESSAGE
     assert understandings.calls == []
 
 
@@ -534,7 +534,7 @@ async def test_ripe_reminder_is_sent_and_marked() -> None:
     assert lister.calls == [(OWNER_ID, FRIDAY_END_OF_DAY)]
     task_id, text = notifier.sent[0]
     assert task_id == "0e2f"
-    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня"
+    assert text == "🔔 Напоминаю: отправить расчёт\nСрок: сегодня"
     assert notifier.buttons == [True]
     assert marks.calls == [(OWNER_ID, ["0e2f-due"], 41)]
 
@@ -608,7 +608,7 @@ async def test_overdue_task_says_the_due_date_has_passed() -> None:
 
     assert await service.tick() == 1
     _, text = notifier.sent[0]
-    assert text == "Напоминаю: отправить расчёт\nСрок был: понедельник, 21 сентября"
+    assert text == "🔔 Напоминаю: отправить расчёт\nСрок был: понедельник, 21 сентября"
 
 
 async def test_loop_stops_on_cancel() -> None:
@@ -655,6 +655,28 @@ async def test_done_button_closes_the_task_and_marks_the_message(
     assert edit.text == "Напоминаю: отправить расчёт\n\n✓ Сделано"
     assert edit.reply_markup is None
     assert session.answers == [texts.DONE_ANSWER]
+
+
+async def test_done_keeps_the_icon_of_the_reminder(bot: Bot, session: RecordingSession) -> None:
+    """Значок — первый символ, отметка — внизу: «Сделано» его не теряет
+    (`techspec/29-icons.md` §29.2, приёмка 6 этапа 031)."""
+    closer = FakeCloser(make_details(id="0e2f", title="отправить расчёт", status="done"))
+    dispatcher = build_dispatcher_with(closer)
+    text = "🔔 Напоминаю: отправить расчёт\nСрок: сегодня"
+
+    await dispatcher.feed_update(bot, make_callback_update("done:0e2f", text=text))
+
+    assert session.edits[0].text == f"{text}\n\n✓ Сделано"
+
+
+def test_repeated_done_mark_keeps_the_icon() -> None:
+    """Повтор нажатия меняет только отметку: значок впереди остаётся (§29.2)."""
+    marked = "❓ Вчера вы просили записать: купить фильтр. Когда займётесь?\n\n✓ Сделано"
+
+    later = texts.done_message(marked, "✓ Сделано. Следующий раз: пятница, 9 октября")
+
+    assert later.startswith("❓ Вчера вы просили записать")
+    assert later.endswith("\n\n✓ Сделано. Следующий раз: пятница, 9 октября")
 
 
 async def test_second_press_changes_nothing(bot: Bot, session: RecordingSession) -> None:
@@ -734,7 +756,7 @@ async def test_reminder_goes_to_the_owner_with_the_button(
     sent = session.sent[0]
     assert isinstance(sent, SendMessage)
     assert sent.chat_id == OWNER_ID
-    assert sent.text == "Напоминаю: отправить расчёт\nСрок: сегодня"
+    assert sent.text == "🔔 Напоминаю: отправить расчёт\nСрок: сегодня"
     assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
     assert sent.reply_markup.inline_keyboard[0][0].callback_data == "done:0e2f"
     # Тик сначала перекатывает пропущенные разы (§13.4), потом отбирает созревшее.
@@ -765,7 +787,7 @@ async def test_reminder_of_a_task_with_an_hour_goes_without_the_button(
     service, _, marks, notifier = build_reminders(due=FakeDue(ripe))
 
     assert await service.tick(fire_at) == 1
-    assert notifier.sent == [("0e2f", "Напоминаю: созвон с Игорем\nСрок: сегодня, 15:00")]
+    assert notifier.sent == [("0e2f", "📅 Напоминаю: созвон с Игорем\nСрок: сегодня, 15:00")]
     assert notifier.buttons == [False]
     assert marks.calls == [(OWNER_ID, [f"0e2f-{stage}"], 41)]
 
@@ -779,7 +801,7 @@ async def test_catch_up_reminder_of_a_meeting_goes_without_the_button() -> None:
     service, _, marks, notifier = build_reminders(due=FakeDue(ripe))
 
     assert await service.tick(MEETING.replace(hour=16)) == 1
-    assert notifier.sent == [("0e2f", "Напоминаю: отправить расчёт\nСрок был: сегодня, 15:00")]
+    assert notifier.sent == [("0e2f", "📅 Напоминаю: отправить расчёт\nСрок был: сегодня, 15:00")]
     assert notifier.buttons == [False]
     assert marks.calls == [(OWNER_ID, ["0e2f-before", "0e2f-due"], 41)]
 
@@ -846,7 +868,7 @@ async def test_meeting_reminder_goes_to_the_owner_without_a_keyboard(
     sent = session.sent[0]
     assert isinstance(sent, SendMessage)
     assert sent.chat_id == OWNER_ID
-    assert sent.text == "Напоминаю: созвон с Игорем\nСрок: сегодня, 15:00"
+    assert sent.text == "📅 Напоминаю: созвон с Игорем\nСрок: сегодня, 15:00"
     assert sent.reply_markup is None
 
 
@@ -857,7 +879,7 @@ async def test_late_reminder_does_not_age_the_due_date() -> None:
 
     assert await service.tick(FRIDAY_END_OF_DAY.replace(hour=12)) == 1
     _, text = notifier.sent[0]
-    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня"
+    assert text == "🔔 Напоминаю: отправить расчёт\nСрок: сегодня"
 
 
 # Срок в напоминании и «Срок был» (`techspec/21-part-of-day.md` §21.3).
@@ -914,7 +936,7 @@ async def test_reminder_in_the_minute_of_the_due_says_due() -> None:
 
     assert await service.tick(local(15, 0, 37)) == 1
     _, text = notifier.sent[0]
-    assert text == "Напоминаю: отправить расчёт\nСрок: сегодня, 15:00"
+    assert text == "📅 Напоминаю: отправить расчёт\nСрок: сегодня, 15:00"
 
 
 async def test_reminder_after_the_minute_of_the_due_says_it_was() -> None:
@@ -923,7 +945,7 @@ async def test_reminder_after_the_minute_of_the_due_says_it_was() -> None:
 
     assert await service.tick(local(15, 1)) == 1
     _, text = notifier.sent[0]
-    assert text == "Напоминаю: отправить расчёт\nСрок был: сегодня, 15:00"
+    assert text == "📅 Напоминаю: отправить расчёт\nСрок был: сегодня, 15:00"
 
 
 @pytest.mark.parametrize(
@@ -939,7 +961,7 @@ async def test_part_reminder_after_downtime_the_same_day_says_due(
 
     assert await service.tick(local(23, 30)) == 1
     _, text = notifier.sent[0]
-    assert text == f"Напоминаю: отправить расчёт\nСрок: сегодня {words}"
+    assert text == f"🔔 Напоминаю: отправить расчёт\nСрок: сегодня {words}"
 
 
 async def test_part_reminder_the_next_day_says_it_was() -> None:
@@ -948,7 +970,7 @@ async def test_part_reminder_the_next_day_says_it_was() -> None:
 
     assert await service.tick(local(9, day=SATURDAY)) == 1
     _, text = notifier.sent[0]
-    assert text == "Напоминаю: отправить расчёт\nСрок был: пятница, 25 сентября, утром"
+    assert text == "🔔 Напоминаю: отправить расчёт\nСрок был: пятница, 25 сентября, утром"
 
 
 # Строка «Перенёс» (`techspec/11-edit.md` §11.4). Срок сдвинули в приложении
@@ -981,7 +1003,7 @@ async def test_moved_due_is_announced_and_then_cleared() -> None:
     assert await service.tick(MONDAY_MORNING) == 1
     assert moved.calls == [OWNER_ID]
     assert announcer.sent == [
-        "Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября. Напомню: 2 октября в 09:00"
+        "✏️ Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября. Напомню: 2 октября в 09:00"
     ]
     assert clear.calls == [(OWNER_ID, "0e2f", MOVED_AT)]
     # Это не напоминание: кнопки «Сделано» под строкой нет.
@@ -1007,7 +1029,7 @@ async def test_due_with_an_hour_is_named_with_the_hour() -> None:
     await service.tick(MONDAY_MORNING)
 
     assert announcer.sent == [
-        "Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября, 15:00. "
+        "✏️ Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября, 15:00. "
         "Напомню: 2 октября в 14:00"
     ]
 
@@ -1052,7 +1074,7 @@ async def test_edit_between_read_and_clear_is_not_lost(
     assert await service.tick(MONDAY_MORNING) == 1
 
     assert announcer.sent[1] == (
-        "Перенёс: отправить расчёт клиенту. Срок: пятница, 9 октября. Напомню: 9 октября в 09:00"
+        "✏️ Перенёс: отправить расчёт клиенту. Срок: пятница, 9 октября. Напомню: 9 октября в 09:00"
     )
     assert [call[2] for call in clear.calls] == [MOVED_AT, second_mark]
 
@@ -1079,7 +1101,7 @@ async def test_past_due_has_no_remind_line() -> None:
 
     await service.tick(MONDAY_MORNING)
 
-    assert announcer.sent == ["Перенёс: отправить расчёт клиенту. Срок: воскресенье, 20 сентября"]
+    assert announcer.sent == ["✏️ Перенёс: отправить расчёт клиенту. Срок: воскресенье, 20 сентября"]
 
 
 async def test_reminder_already_due_is_not_promised() -> None:
@@ -1092,7 +1114,7 @@ async def test_reminder_already_due_is_not_promised() -> None:
 
     await service.tick(MONDAY_MORNING)
 
-    assert announcer.sent == ["Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября"]
+    assert announcer.sent == ["✏️ Перенёс: отправить расчёт клиенту. Срок: пятница, 2 октября"]
 
 
 async def test_removed_due_says_so() -> None:
@@ -1105,7 +1127,7 @@ async def test_removed_due_says_so() -> None:
 
     await service.tick(MONDAY_MORNING)
 
-    assert announcer.sent == ["Убрал срок: отправить расчёт клиенту. Напоминать не буду."]
+    assert announcer.sent == ["✏️ Убрал срок: отправить расчёт клиенту. Напоминать не буду."]
     assert texts.moved_reply(title="купить лампочку", due=None, remind_at=None) == (
         "Убрал срок: купить лампочку. Напоминать не буду."
     )
@@ -1168,7 +1190,7 @@ async def test_moved_line_goes_to_the_owner_without_a_button(
     sent = session.sent[0]
     assert isinstance(sent, SendMessage)
     assert sent.chat_id == OWNER_ID
-    assert sent.text.startswith("Перенёс: отправить расчёт клиенту.")
+    assert sent.text.startswith("✏️ Перенёс: отправить расчёт клиенту.")
     assert sent.reply_markup is None
     assert client.calls == [
         "roll_repeats",
@@ -1283,7 +1305,7 @@ async def test_undated_question_is_sent_with_the_button_and_then_recorded() -> N
     assert await service.tick(SATURDAY_NOON) == 1
     assert undated.calls == [(OWNER_ID, asks.bounds(SATURDAY_NOON, TZ))]
     assert notifier.sent == [
-        (UNDATED_ID, "Вчера вы просили записать: купить фильтр для воды. Когда займётесь?")
+        (UNDATED_ID, "❓ Вчера вы просили записать: купить фильтр для воды. Когда займётесь?")
     ]
     # Кнопка «Сделано» — та же, что под напоминанием; раза у дела без срока нет.
     assert notifier.occurrences == [None]
@@ -1304,7 +1326,7 @@ async def test_repeat_question_says_still_without_due() -> None:
     service, _, notifier = build_asking(FakeUndated(make_undated(asked_at=asked)))
 
     assert await service.tick(SATURDAY_NOON) == 1
-    assert notifier.sent[0][1].startswith("Всё ещё без срока: купить фильтр для воды.")
+    assert notifier.sent[0][1].startswith("❓ Всё ещё без срока: купить фильтр для воды.")
 
 
 @pytest.mark.parametrize(
@@ -1504,7 +1526,7 @@ async def test_undated_question_goes_to_the_owner_with_the_button(
     sent = session.sent[0]
     assert isinstance(sent, SendMessage)
     assert sent.chat_id == OWNER_ID
-    assert sent.text == "Вчера вы просили записать: купить фильтр для воды. Когда займётесь?"
+    assert sent.text == "❓ Вчера вы просили записать: купить фильтр для воды. Когда займётесь?"
     assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
     assert sent.reply_markup.inline_keyboard[0][0].callback_data == f"done:{UNDATED_ID}"
     # В полдень шаг о прошедшем деле уже открыт: дел нет — очередь вопроса
@@ -1562,7 +1584,7 @@ def make_day_tasks() -> list[DayTask]:
 
 PLAN_TEXT = "\n".join(
     [
-        "Доброе утро! На сегодня:",
+        "☀️ Доброе утро! На сегодня:",
         "09:00 — встреча с Ольгой",
         "В течение дня — купить лампочку в коридор",
     ]
@@ -1674,7 +1696,7 @@ async def test_empty_day_plan_says_there_is_nothing() -> None:
     service, _, _, recorder, announcer = build_planning(day_tasks=FakeDayTasks([]))
 
     assert await service.tick(PLAN_MORNING) == 1
-    assert announcer.sent == ["Доброе утро! На сегодня дел нет."]
+    assert announcer.sent == ["☀️ Доброе утро! На сегодня дел нет."]
     assert len(recorder.calls) == 1
 
 
@@ -1710,7 +1732,7 @@ async def test_late_start_catches_up_with_the_whole_day() -> None:
     service, _, _, _, announcer = build_planning(day_tasks=FakeDayTasks([passed]))
 
     assert await service.tick(late) == 1
-    assert announcer.sent == ["Доброе утро! На сегодня:\n10:00 — встреча с Ольгой"]
+    assert announcer.sent == ["☀️ Доброе утро! На сегодня:\n10:00 — встреча с Ольгой"]
 
 
 async def test_start_at_noon_waits_for_tomorrow_morning() -> None:
@@ -1808,8 +1830,8 @@ async def test_morning_part_goes_in_the_plan_and_reminds_right_after_it() -> Non
 
     assert await service.tick(PLAN_MORNING) == 2
     assert events == ["plan", "reminder"]
-    assert announcer.sent == ["Доброе утро! На сегодня:\nУтром — встреча с Ренатой"]
-    assert notifier.sent == [(MEETING_ID, "Напоминаю: встреча с Ренатой\nСрок: сегодня утром")]
+    assert announcer.sent == ["☀️ Доброе утро! На сегодня:\nУтром — встреча с Ренатой"]
+    assert notifier.sent == [(MEETING_ID, "🔔 Напоминаю: встреча с Ренатой\nСрок: сегодня утром")]
 
 
 async def test_no_undated_question_in_the_plan_tick() -> None:
@@ -1966,7 +1988,7 @@ async def test_morning_plan_goes_to_the_owner_without_a_button(
     assert isinstance(reminder, SendMessage)
     # Следом — напоминание о встрече за час; у дела с часом оно тоже без
     # кнопки (этап 029, §6.3).
-    assert reminder.text == "Напоминаю: встреча с Ольгой\nСрок: сегодня, 09:00"
+    assert reminder.text == "📅 Напоминаю: встреча с Ольгой\nСрок: сегодня, 09:00"
     assert reminder.reply_markup is None
     # Прошедших дел нет: план без абзаца, записывать вопрос нечего (§22.4).
     assert client.calls == [
@@ -2003,6 +2025,8 @@ MONDAY_AFTERNOON = datetime(2026, 10, 5, 14, 0, tzinfo=TZ)
 YESTERDAY_EVENING = datetime(2026, 10, 4, 18, 0, tzinfo=TZ)
 OCTOBER_SECOND = datetime(2026, 10, 2, 10, 0, tzinfo=TZ)
 QUESTION_YESTERDAY = "Вчера осталось: позвонить в сервис. Получилось?"
+# Отдельным сообщением вопрос — со значком; абзацем в плане — без него (§29.2).
+ASKED_YESTERDAY = f"❓ {QUESTION_YESTERDAY}"
 
 
 def make_overdue(
@@ -2106,6 +2130,23 @@ def build_overdue(
     return service, record, sender, speaker
 
 
+async def test_open_questions_go_with_the_icon_and_are_stored_without_it() -> None:
+    """Значок — оформление (`techspec/29-icons.md` §29.2): вопрос уходит с «❓»,
+    а открытым вопросом задачи пишется голая константа — по ней бот узнаёт
+    свой вопрос в ответе (§19.5, §22.5)."""
+    undated_service, asked, undated_sender = build_asking(FakeUndated(make_undated()))
+    overdue_service, overdue_asked, overdue_sender, _ = build_overdue(FakeOverdue(make_overdue()))
+
+    assert await undated_service.tick(SATURDAY_NOON) == 1
+    assert await overdue_service.tick(MONDAY_AFTERNOON) == 1
+
+    sent = [text for _, text in undated_sender.sent + overdue_sender.sent]
+    assert [text.startswith(f"{texts.ICON_QUESTION} ") for text in sent] == [True, True]
+    stored = [str(asked.calls[0]["question"]), str(overdue_asked.calls[0]["question"])]
+    assert stored == [texts.UNDATED_QUESTION, texts.OVERDUE_QUESTION]
+    assert not any(texts.ICON_QUESTION in question for question in stored)
+
+
 async def test_overdue_question_is_sent_with_the_button_and_then_recorded() -> None:
     """Отдельный вопрос: ушёл с кнопкой «Сделано» — и только потом записан (§22.4)."""
     events: list[str] = []
@@ -2116,7 +2157,7 @@ async def test_overdue_question_is_sent_with_the_button_and_then_recorded() -> N
 
     assert await service.tick(MONDAY_AFTERNOON) == 1
     assert finder.calls == [(OWNER_ID, overdue.step_bounds(MONDAY_AFTERNOON, TZ))]
-    assert notifier.sent == [(OVERDUE_ID, QUESTION_YESTERDAY)]
+    assert notifier.sent == [(OVERDUE_ID, ASKED_YESTERDAY)]
     # Кнопка «Сделано» — та же, что под напоминанием; задача разовая. Это
     # вопрос, а не напоминание: кнопка есть и у дела с часом (этап 029).
     assert notifier.occurrences == [None]
@@ -2138,7 +2179,7 @@ async def test_earlier_due_is_named_by_date() -> None:
     service, _, notifier, _ = build_overdue(finder)
 
     assert await service.tick(MONDAY_AFTERNOON) == 1
-    assert notifier.sent[0][1] == "Срок был 2 октября: позвонить в сервис. Получилось?"
+    assert notifier.sent[0][1] == "❓ Срок был 2 октября: позвонить в сервис. Получилось?"
 
 
 async def test_next_question_of_the_day_says_more() -> None:
@@ -2153,9 +2194,9 @@ async def test_next_question_of_the_day_says_more() -> None:
     assert await service.tick(MONDAY_AFTERNOON.replace(minute=40)) == 1
 
     assert [text for _, text in notifier.sent] == [
-        QUESTION_YESTERDAY,
-        "Ещё вчера осталось: отправить расчёт. Получилось?",
-        "Ещё одно, срок был 2 октября: забрать посылку. Получилось?",
+        ASKED_YESTERDAY,
+        "❓ Ещё вчера осталось: отправить расчёт. Получилось?",
+        "❓ Ещё одно, срок был 2 октября: забрать посылку. Получилось?",
     ]
     assert [call["task_id"] for call in recorder.calls] == [OVERDUE_ID, NEXT_OVERDUE_ID, "5f60"]
 
@@ -2168,7 +2209,7 @@ async def test_repeated_question_offers_to_remove_the_task() -> None:
 
     assert await service.tick(MONDAY_AFTERNOON) == 1
     assert notifier.sent[0][1] == (
-        "Срок был 1 октября: позвонить в сервис. Получилось? "
+        "❓ Срок был 1 октября: позвонить в сервис. Получилось? "
         "Если уже не нужно, скажите — уберу из списка."
     )
 
@@ -2223,7 +2264,9 @@ async def test_after_the_plan_the_step_goes_before_noon() -> None:
     assert await service.tick(later) == 1
 
     assert announcer.sent[0].endswith("\n\n" + QUESTION_YESTERDAY)
-    assert notifier.sent == [(NEXT_OVERDUE_ID, "Ещё вчера осталось: отправить расчёт. Получилось?")]
+    assert notifier.sent == [
+        (NEXT_OVERDUE_ID, "❓ Ещё вчера осталось: отправить расчёт. Получилось?")
+    ]
     assert finder.calls[1] == (OWNER_ID, overdue.step_bounds(later, TZ))
     assert [call["telegram_message_id"] for call in recorder.calls] == [None, 41]
 
@@ -2237,7 +2280,7 @@ async def test_plan_found_in_the_database_lets_the_step_go() -> None:
 
     assert await service.tick(PLAN_MORNING.replace(hour=9)) == 1
     assert announcer.sent == []
-    assert notifier.sent == [(OVERDUE_ID, QUESTION_YESTERDAY)]
+    assert notifier.sent == [(OVERDUE_ID, ASKED_YESTERDAY)]
 
 
 async def test_no_overdue_question_when_a_reminder_went_out_this_tick() -> None:
@@ -2305,7 +2348,7 @@ async def test_failed_overdue_send_records_nothing_and_next_tick_asks_again(
 
     notifier.broken = False
     assert await service.tick(MONDAY_AFTERNOON.replace(minute=1)) == 1
-    assert notifier.sent == [(OVERDUE_ID, QUESTION_YESTERDAY)]
+    assert notifier.sent == [(OVERDUE_ID, ASKED_YESTERDAY)]
     assert len(recorder.calls) == 1
 
 
@@ -2328,7 +2371,7 @@ async def test_unrecorded_question_is_not_repeated_today(
 
     assert await service.tick(datetime(2026, 10, 6, 12, 0, tzinfo=TZ)) == 1
     assert len(notifier.sent) == 2
-    assert notifier.sent[1][1] == "Срок был 4 октября: позвонить в сервис. Получилось?"
+    assert notifier.sent[1][1] == "❓ Срок был 4 октября: позвонить в сервис. Получилось?"
 
 
 async def test_overdue_task_changed_between_pick_and_record_is_a_warning(
@@ -2428,7 +2471,7 @@ async def test_empty_day_plan_keeps_the_overdue_question() -> None:
 
     assert await service.tick(PLAN_MORNING) == 1
     assert announcer.sent == [
-        "Доброе утро! На сегодня дел нет.\n\nСрок был 2 октября: позвонить в сервис. Получилось?"
+        "☀️ Доброе утро! На сегодня дел нет.\n\nСрок был 2 октября: позвонить в сервис. Получилось?"
     ]
 
 
@@ -2549,7 +2592,7 @@ async def test_overdue_question_in_the_plan_goes_through_the_runner(
     assert await service.tick(PLAN_MORNING) == 1
     plan = session.sent[0]
     assert isinstance(plan, SendMessage)
-    assert plan.text == "Доброе утро! На сегодня дел нет.\n\n" + QUESTION_YESTERDAY
+    assert plan.text == "☀️ Доброе утро! На сегодня дел нет.\n\n" + QUESTION_YESTERDAY
     assert plan.reply_markup is None
     assert client.calls == [
         "roll_repeats",
@@ -2596,7 +2639,7 @@ async def test_separate_overdue_question_goes_through_the_runner(
     sent = session.sent[0]
     assert isinstance(sent, SendMessage)
     assert sent.chat_id == OWNER_ID
-    assert sent.text == QUESTION_YESTERDAY
+    assert sent.text == ASKED_YESTERDAY
     assert isinstance(sent.reply_markup, InlineKeyboardMarkup)
     assert sent.reply_markup.inline_keyboard[0][0].callback_data == f"done:{OVERDUE_ID}"
     assert client.calls == [

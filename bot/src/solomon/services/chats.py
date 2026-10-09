@@ -636,7 +636,8 @@ def report_message(
     """Сообщение о разборе и кнопки «Убрать» (§25.4) — из задач, какими они
     стали сейчас: им же сообщение правится после нажатия. Кнопка — только у
     дела в работе. Последней — «Открыть чат»: она остаётся и тогда, когда
-    убраны все дела."""
+    убраны все дела. Значок 💬 (`techspec/29-icons.md`) собирается здесь
+    же — и правка после «Убрать» его не теряет."""
     local_now = now.astimezone(timezone)
     deals: list[tuple[int, str]] = []
     for line in report.lines:
@@ -653,7 +654,8 @@ def report_message(
     ) + open_chat_buttons(report.platform, report.chat_key, report.username)
     # Заметки владельца — «из ваших заметок», а не «из переписки с …» (§27.3).
     notes = report.chat_name == texts.MAX_NOTES
-    return texts.chat_report(whom, report.platform, deals, notes=notes), buttons
+    text = texts.chat_report(whom, report.platform, deals, notes=notes)
+    return texts.iconed(texts.ICON_CHAT, text), buttons
 
 
 class ChatStore(Protocol):
@@ -1080,7 +1082,10 @@ class ChatService:
         for source in sources:
             try:
                 await self._send(
-                    text=texts.consent_question(source.platform, relay=relayed(source)),
+                    text=texts.iconed(
+                        texts.ICON_CHAT,
+                        texts.consent_question(source.platform, relay=relayed(source)),
+                    ),
                     buttons=consent_buttons(source.platform),
                 )
             except Exception as error:  # noqa: BLE001 - отказ Telegram не роняет приём
@@ -1118,7 +1123,10 @@ class ChatService:
         else:
             button = Button(texts.CONSENT_YES, consent_data(platform, agreed=True))
         return PressOutcome(
-            message=texts.consent_answered(platform, agreed=agreed, relay=relayed(source)),
+            message=texts.iconed(
+                texts.ICON_CHAT,
+                texts.consent_answered(platform, agreed=agreed, relay=relayed(source)),
+            ),
             replace=True,
             buttons=(button,),
         )
@@ -1446,7 +1454,9 @@ class ChatService:
             return 0
         sent = 0
         for chat in chats:
-            text = texts.not_answered(chat.to, chat.platform, chat.about)
+            text = texts.iconed(
+                texts.ICON_WAITING, texts.not_answered(chat.to, chat.platform, chat.about)
+            )
             buttons = open_chat_buttons(chat.platform, chat.chat_key, chat.username)
             try:
                 await self._send(text=text, buttons=buttons)

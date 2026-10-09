@@ -923,7 +923,7 @@ async def test_search_is_taken_found_recorded_sent_and_finished() -> None:
     assert trace == SearchTrace(
         input_tokens=300, output_tokens=800, web_searches=1, web_fetches=0, duration_ms=20000
     )
-    assert replier.sent == [(OWNER_ID, 4242, ANSWER)]
+    assert replier.sent == [(OWNER_ID, 4242, texts.iconed(texts.ICON_SEARCH, ANSWER))]
     assert store.finished == {SEARCH_ID: 9001}
     system, messages = model.calls[0]
     assert system.startswith(search.SEARCH_RULES)
@@ -978,7 +978,9 @@ async def test_third_failed_attempt_says_so_and_then_fails_the_search() -> None:
     await service.wait()
 
     assert store.names() == ["take", "previous", "release", "fail"]
-    assert replier.sent == [(OWNER_ID, 4242, texts.search_failed(QUERY))]
+    assert replier.sent == [
+        (OWNER_ID, 4242, texts.iconed(texts.ICON_SEARCH, texts.search_failed(QUERY)))
+    ]
     assert store.status[SEARCH_ID] == "failed"
 
 
@@ -1055,7 +1057,7 @@ async def test_searches_go_one_at_a_time_in_order() -> None:
     await service.wait()
 
     assert model.most == 1
-    assert [sent[2] for sent in replier.sent] == ["1. первый", "1. второй"]
+    assert [sent[2] for sent in replier.sent] == ["🔍 1. первый", "🔍 1. второй"]
 
 
 async def test_the_same_search_is_launched_once() -> None:
@@ -1088,7 +1090,7 @@ async def test_tick_sends_a_recorded_answer_without_a_new_search() -> None:
 
     assert sent == 1
     assert store.calls[0] == ("to_resume", (NOW - timedelta(minutes=10),))
-    assert replier.sent == [(OWNER_ID, 4242, ANSWER)]
+    assert replier.sent == [(OWNER_ID, 4242, texts.iconed(texts.ICON_SEARCH, ANSWER))]
     assert store.finished == {SEARCH_ID: 9001}
     assert model.calls == []
 
@@ -1101,7 +1103,9 @@ async def test_tick_says_late_after_six_hours_and_fails_the_search() -> None:
 
     assert await service.resume() == 1
 
-    assert replier.sent == [(OWNER_ID, 4242, texts.search_late(QUERY))]
+    assert replier.sent == [
+        (OWNER_ID, 4242, texts.iconed(texts.ICON_SEARCH, texts.search_late(QUERY)))
+    ]
     assert store.status[SEARCH_ID] == "failed"
     assert model.calls == []
 
@@ -1115,7 +1119,9 @@ async def test_tick_says_failed_after_three_attempts_without_searching() -> None
 
     assert await service.resume() == 1
 
-    assert replier.sent == [(OWNER_ID, 4242, texts.search_failed(QUERY))]
+    assert replier.sent == [
+        (OWNER_ID, 4242, texts.iconed(texts.ICON_SEARCH, texts.search_failed(QUERY)))
+    ]
     assert store.status[SEARCH_ID] == "failed"
     assert model.calls == []
 
@@ -1130,7 +1136,7 @@ async def test_tick_launches_an_abandoned_search_and_does_not_wait() -> None:
     assert model.calls == []
 
     await service.wait()
-    assert replier.sent == [(OWNER_ID, 4242, ANSWER)]
+    assert replier.sent == [(OWNER_ID, 4242, texts.iconed(texts.ICON_SEARCH, ANSWER))]
     assert store.rows[SEARCH_ID].attempts == 2
 
 
@@ -1223,7 +1229,7 @@ async def test_search_row_is_written_before_the_reply_says_searching() -> None:
     outcome = await say(service, "найди билеты в Москву на 15-е")
 
     assert outcome.ok
-    assert outcome.message == f"Ищу: {QUERY}. Пришлю, как найду."
+    assert outcome.message == f"🔍 Ищу: {QUERY}. Пришлю, как найду."
     assert outcome.search_id == SEARCH_ID
     assert starter.calls == [("9a71", QUERY)]
     assert starter.seen == [0]
@@ -1239,9 +1245,11 @@ async def test_search_not_written_is_not_announced() -> None:
 
     outcome = await say(service, "найди билеты в Москву на 15-е")
 
-    assert outcome.message == texts.SEARCH_NOT_SAVED
+    assert outcome.message == texts.iconed(texts.ICON_SEARCH, texts.SEARCH_NOT_SAVED)
     assert outcome.search_id is None
-    assert understandings.calls[0]["reply"] == texts.SEARCH_NOT_SAVED
+    assert understandings.calls[0]["reply"] == texts.iconed(
+        texts.ICON_SEARCH, texts.SEARCH_NOT_SAVED
+    )
 
 
 async def test_tasks_are_recorded_and_the_search_is_started() -> None:
@@ -1251,7 +1259,7 @@ async def test_tasks_are_recorded_and_the_search_is_started() -> None:
 
     outcome = await say(service, "позвони Игорю и найди билеты в Москву на 15-е")
 
-    assert outcome.message == f"Записал: позвонить Игорю\n\nИщу: {QUERY}. Пришлю, как найду."
+    assert outcome.message == f"✅ Записал: позвонить Игорю\n\nИщу: {QUERY}. Пришлю, как найду."
     assert outcome.search_id == SEARCH_ID
     rows = cast(list[dict[str, Any]], understandings.calls[0]["tasks"])
     assert [entry["item"] for entry in rows] == [1]
@@ -1265,7 +1273,7 @@ async def test_second_search_of_the_message_is_not_started() -> None:
     outcome = await say(service, "найди билеты и школу с математикой")
 
     assert outcome.message == (
-        f"Ищу: {QUERY}. Пришлю, как найду.\n\n"
+        f"🔍 Ищу: {QUERY}. Пришлю, как найду.\n\n"
         "Ищу по одному: «школа с математикой» поищу, если попросите отдельно."
     )
     assert starter.calls == [("9a71", QUERY)]
@@ -1281,7 +1289,7 @@ async def test_question_stays_the_last_paragraph_after_the_search() -> None:
     outcome = await say(service, "позвонить и найди билеты")
 
     assert outcome.message == (
-        f"Записал: позвонить\n\nИщу: {QUERY}. Пришлю, как найду.\n\nКому позвонить?"
+        f"❓ Записал: позвонить\n\nИщу: {QUERY}. Пришлю, как найду.\n\nКому позвонить?"
     )
     rows = cast(list[dict[str, Any]], understandings.calls[0]["tasks"])
     assert rows[0]["task"]["open_question"] == "Кому позвонить?"
@@ -1294,7 +1302,7 @@ async def test_forwarded_request_does_not_search() -> None:
 
     outcome = await say(service, "найди мне билеты", forwarded_from="Олег")
 
-    assert outcome.message == texts.SEARCH_TEXT_ONLY
+    assert outcome.message == texts.iconed(texts.ICON_SEARCH, texts.SEARCH_TEXT_ONLY)
     assert outcome.search_id is None
     assert starter.calls == []
 
@@ -1309,7 +1317,7 @@ async def test_message_not_recorded_starts_no_search() -> None:
     outcome = await say(service, "найди билеты в Москву на 15-е")
 
     assert outcome.ok is False
-    assert outcome.message == texts.NOT_SAVED
+    assert outcome.message == texts.NOT_SAVED_MESSAGE
     assert outcome.search_id is None
     assert starter.calls == [("9a71", QUERY)]
 
@@ -1337,7 +1345,7 @@ async def test_voice_request_searches_too() -> None:
         load_audio=load_audio,
     )
 
-    assert outcome.message == f"Ищу: {QUERY}. Пришлю, как найду."
+    assert outcome.message == f"🔍 Ищу: {QUERY}. Пришлю, как найду."
     assert outcome.search_id == SEARCH_ID
     assert starter.calls == [("9a71", QUERY)]
 
@@ -1358,7 +1366,7 @@ async def test_photo_request_does_not_search() -> None:
         load_image=load_image,
     )
 
-    assert outcome.message == texts.SEARCH_TEXT_ONLY
+    assert outcome.message == texts.iconed(texts.ICON_SEARCH, texts.SEARCH_TEXT_ONLY)
     assert outcome.search_id is None
     assert starter.calls == []
     assert understandings.calls[0]["tasks"] == []
@@ -1374,7 +1382,7 @@ async def test_forwarded_conversation_does_not_search() -> None:
 
     replies = await send(service, *CHAT)
 
-    assert replies[-1] == texts.SEARCH_TEXT_ONLY
+    assert replies[-1] == texts.iconed(texts.ICON_SEARCH, texts.SEARCH_TEXT_ONLY)
     assert record_of(understandings, HEAD)["tasks"] == []
 
 
@@ -1412,7 +1420,7 @@ async def test_handler_launches_the_search_after_the_reply(
 
     await dispatcher.feed_update(bot, make_update("найди билеты в Москву на 15-е"))
 
-    assert session.texts == [f"Ищу: {QUERY}. Пришлю, как найду."]
+    assert session.texts == [f"🔍 Ищу: {QUERY}. Пришлю, как найду."]
     assert searches.launched == [(SEARCH_ID, 1)]
 
 
@@ -1441,7 +1449,7 @@ async def test_voice_handler_launches_the_search_after_the_reply(
 
     await dispatcher.feed_update(bot, make_voice_update())
 
-    assert session.texts == [f"Ищу: {QUERY}. Пришлю, как найду."]
+    assert session.texts == [f"🔍 Ищу: {QUERY}. Пришлю, как найду."]
     assert searches.launched == [(SEARCH_ID, 1)]
 
 

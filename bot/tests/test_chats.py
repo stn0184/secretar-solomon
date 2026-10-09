@@ -1501,7 +1501,7 @@ async def test_owner_connection_is_recorded_and_consent_is_asked_once() -> None:
     await connect_owner(service)
     await connect_owner(service)
 
-    assert sender.texts == [texts.consent_question("telegram")]
+    assert sender.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("telegram"))]
     _, buttons = sender.sent[0]
     assert [button.text for button in buttons] == [texts.CONSENT_YES, texts.CONSENT_NO]
     assert [button.data for button in buttons] == ["consent:telegram:yes", "consent:telegram:no"]
@@ -1531,7 +1531,7 @@ async def test_unsent_consent_question_is_asked_again_later() -> None:
 
     sender.broken = False
     assert await service.ask_consents() == 1
-    assert sender.texts == [texts.consent_question("telegram")]
+    assert sender.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("telegram"))]
 
 
 async def test_disabled_connection_asks_nothing() -> None:
@@ -1564,7 +1564,9 @@ async def test_consent_yes_stores_and_leaves_a_button_to_stop() -> None:
     stored = await service.receive(incoming())
 
     assert outcome.replace is True
-    assert outcome.message == texts.consent_answered("telegram", agreed=True)
+    assert outcome.message == texts.iconed(
+        texts.ICON_CHAT, texts.consent_answered("telegram", agreed=True)
+    )
     assert [(button.text, button.data) for button in outcome.buttons] == [
         (texts.CONSENT_STOP, "consent:telegram:no")
     ]
@@ -1580,7 +1582,9 @@ async def test_consent_no_keeps_nothing_and_offers_to_agree() -> None:
     outcome = await service.answer_consent("telegram", False)
     await service.receive(incoming())
 
-    assert outcome.message == texts.consent_answered("telegram", agreed=False)
+    assert outcome.message == texts.iconed(
+        texts.ICON_CHAT, texts.consent_answered("telegram", agreed=False)
+    )
     assert "Автоматизация чатов" in outcome.message
     assert [button.data for button in outcome.buttons] == ["consent:telegram:yes"]
     assert store.messages == []
@@ -1609,7 +1613,7 @@ async def test_unknown_connection_of_the_owner_is_adopted_and_asked_about() -> N
 
     assert lookup.calls == [CONNECTION]
     assert store.sources["telegram"]["connection_id"] == CONNECTION
-    assert sender.texts == [texts.consent_question("telegram")]
+    assert sender.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("telegram"))]
     assert stored == Stored("no_consent", None)
 
 
@@ -1743,7 +1747,7 @@ async def test_owner_connection_through_telegram_asks_consent_in_the_owner_chat(
 
     await dispatcher.feed_update(bot, connection_update())
 
-    assert session.texts == [texts.consent_question("telegram")]
+    assert session.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("telegram"))]
     nothing_to_business_chats(session)
 
 
@@ -1809,7 +1813,7 @@ async def test_business_message_before_consent_is_lost_silently(
     await dispatcher.feed_update(bot, business_update(business_message(), 2))
 
     assert store.messages == []
-    assert session.texts == [texts.consent_question("telegram")]
+    assert session.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("telegram"))]
     nothing_to_business_chats(session)
 
 
@@ -1887,7 +1891,7 @@ async def test_consent_button_edits_the_question(bot: Bot, session: RecordingSes
 
     assert store.sources["telegram"]["consented_at"] is not None
     assert [edit.text for edit in session.edits] == [
-        texts.consent_answered("telegram", agreed=True)
+        texts.iconed(texts.ICON_CHAT, texts.consent_answered("telegram", agreed=True))
     ]
     markup = session.edits[0].reply_markup
     assert isinstance(markup, InlineKeyboardMarkup)
@@ -1928,7 +1932,7 @@ async def test_platform_without_a_connection_is_enabled_by_the_same_path() -> No
         )
     )
 
-    assert sender.texts == [texts.consent_question("max")]
+    assert sender.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("max"))]
     assert stored is not None and stored.outcome == "stored"
 
 
@@ -2771,7 +2775,7 @@ def test_report_message_of_two_deals_has_a_button_per_active_deal() -> None:
     )
 
     assert text == (
-        "Из переписки с Игорем (Telegram) записал:\n"
+        "💬 Из переписки с Игорем (Telegram) записал:\n"
         "1. Прислать Игорю расчёт — пятница, 9 октября (вы обещали)\n"
         "2. Игорь пришлёт договор (обещали вам)"
     )
@@ -2786,7 +2790,7 @@ def test_report_message_of_one_deal_has_one_plain_button() -> None:
     text, buttons = chats.report_message(report_of(report_line()), ANALYSIS_ID, NOW, TZ)
 
     assert text == (
-        "Из переписки с Игорем (Telegram) записал: "
+        "💬 Из переписки с Игорем (Telegram) записал: "
         "прислать Игорю расчёт — пятница, 9 октября (вы обещали)"
     )
     assert buttons_of(buttons) == [("Убрать", f"drop:{ANALYSIS_ID}:1", None), IGOR_LINK]
@@ -2840,7 +2844,7 @@ def test_report_message_links_the_chat_by_platform(report: ChatReport, link: str
 def test_report_message_without_a_dative_form_uses_the_chat_name() -> None:
     text, _ = chats.report_message(report_of(report_line(), chat_with=None), ANALYSIS_ID, NOW, TZ)
 
-    assert text.startswith("Из переписки с Игорь Петров (Telegram) записал:")
+    assert text.startswith("💬 Из переписки с Игорь Петров (Telegram) записал:")
 
 
 # ------------------------------------------------- что видит владелец: сервис
@@ -2873,7 +2877,7 @@ async def test_report_goes_once_with_drop_buttons() -> None:
 
     [(text, buttons)] = sender.sent
     assert text == (
-        "Из переписки с Игорем (Telegram) записал:\n"
+        "💬 Из переписки с Игорем (Telegram) записал:\n"
         "1. Прислать Игорю расчёт — пятница, 9 октября (вы обещали)\n"
         "2. Игорь пришлёт договор (обещали вам)"
     )
@@ -2927,6 +2931,17 @@ async def test_drop_cancels_the_task_and_marks_the_line() -> None:
     assert buttons_of(outcome.buttons) == [("Убрать 2", f"drop:{analysis_id}:2", None), IGOR_LINK]
 
 
+async def test_drop_keeps_the_icon_of_the_report() -> None:
+    """Сообщение после «Убрать» собирается заново — со значком «💬», как было
+    (`techspec/29-icons.md` §29.2, приёмка 6 этапа 031)."""
+    store = FakeChatStore()
+    service = await analyzed_with_two_deals(store)
+
+    outcome = await service.drop(store.analyses[0]["id"], 1)
+
+    assert outcome.message.startswith(f"{texts.ICON_CHAT} Из переписки с Игорем (Telegram)")
+
+
 async def test_drop_of_an_unknown_deal_or_without_the_database_is_a_popup() -> None:
     store = FakeChatStore()
     service = await analyzed_with_two_deals(store)
@@ -2953,7 +2968,7 @@ async def test_waiting_reminder_goes_once_after_three_hours() -> None:
     assert await service.remind_waiting(MORNING + timedelta(hours=3)) == 1
     assert await service.remind_waiting(MORNING + timedelta(hours=5)) == 0
 
-    assert sender.texts == ["Вы не ответили Игорю (Telegram) — он спрашивал, во сколько созвон."]
+    assert sender.texts == ["⏳ Вы не ответили Игорю (Telegram) — он спрашивал, во сколько созвон."]
     [(_, buttons)] = sender.sent
     assert buttons_of(buttons) == [IGOR_LINK], "приёмка 1: под «Вы не ответили» — «Открыть чат»"
 
@@ -3103,7 +3118,7 @@ async def test_waiting_reminder_with_a_refused_profile_link_goes_without_buttons
 
     [sent] = session.sent
     assert isinstance(sent, SendMessage)
-    assert sent.text == "Вы не ответили Игорю (Telegram) — он спрашивал, во сколько созвон."
+    assert sent.text == "⏳ Вы не ответили Игорю (Telegram) — он спрашивал, во сколько созвон."
     assert sent.reply_markup is None
     assert store.thread()["waiting_reminded_at"] is not None
     await bot.session.close()
@@ -3224,7 +3239,7 @@ async def test_tick_in_the_day_analyzes_then_reports_on_the_next_tick() -> None:
     assert len(store.analyses) == 1, "разбор — в фоне, тик его не ждёт"
     assert await service.tick(QUIET_LATER + timedelta(minutes=1)) == 1
 
-    assert sender.texts[0].startswith("Из переписки с Игорем (Telegram) записал:")
+    assert sender.texts[0].startswith("💬 Из переписки с Игорем (Telegram) записал:")
 
 
 async def test_night_report_waits_for_eight_in_the_morning() -> None:
@@ -3259,7 +3274,7 @@ async def test_night_waiting_reminder_waits_for_the_morning() -> None:
     assert await service.tick(datetime(2026, 10, 8, 8, 0, tzinfo=TZ)) == 1
 
     assert sender.texts == [
-        "Вы не ответили Игорю (Telegram) — он спрашивал, во сколько завтра созвон."
+        "⏳ Вы не ответили Игорю (Telegram) — он спрашивал, во сколько завтра созвон."
     ]
 
 
@@ -3273,7 +3288,7 @@ async def test_tick_asks_the_consent_that_did_not_go_out() -> None:
 
     assert await service.tick(datetime(2026, 10, 7, 23, 0, tzinfo=TZ)) == 1
 
-    assert sender.texts == [texts.consent_question("telegram")]
+    assert sender.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("telegram"))]
 
 
 async def test_tick_erases_text_older_than_seven_days_once_an_hour() -> None:

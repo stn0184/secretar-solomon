@@ -82,7 +82,7 @@ from tests.conftest import (
     make_voice_update,
 )
 
-RECORDED = "Записал: купить лампочку в коридор"
+RECORDED = "✅ Записал: купить лампочку в коридор"
 
 
 def build_tasks(
@@ -185,7 +185,7 @@ async def test_voice_is_heard_and_recorded_as_a_task(
 
     await dispatcher.feed_update(bot, make_voice_update(update_id=6, duration=32))
 
-    assert session.texts == ["Записал: отправить расчёт клиенту"]
+    assert session.texts == ["✅ Записал: отправить расчёт клиенту"]
     saved = messages.calls[0]
     assert saved["kind"] == "voice"
     assert saved["telegram_file_id"] == "voice-1"
@@ -208,7 +208,7 @@ async def test_video_note_is_heard_the_same_way(
         bot, make_voice_update(update_id=7, kind="video_note", duration=15)
     )
 
-    assert session.texts == ["Записал: отправить расчёт клиенту"]
+    assert session.texts == ["✅ Записал: отправить расчёт клиенту"]
     assert messages.calls[0]["kind"] == "video_note"
     assert messages.calls[0]["telegram_file_id"] == "note-1"
     assert messages.calls[0]["duration_seconds"] == 15
@@ -222,7 +222,7 @@ async def test_forwarded_voice_names_the_sender(
 
     await dispatcher.feed_update(bot, make_voice_update(update_id=8, sender="Аня"))
 
-    assert session.texts == ["Записал: принять смету от Ани"]
+    assert session.texts == ["✅ Записал: принять смету от Ани"]
     assert analyst.calls == [(SPOKEN, "Аня", "fine")]
 
 
@@ -235,7 +235,7 @@ async def test_not_heard_voice_answers_honestly(
 
     await dispatcher.feed_update(bot, make_voice_update(update_id=9))
 
-    assert session.texts == [texts.NOT_HEARD]
+    assert session.texts == [texts.iconed(texts.ICON_TROUBLE, texts.NOT_HEARD)]
     assert messages.calls[0]["telegram_file_id"] == "voice-1"
     assert analyst.calls == []
 
@@ -247,7 +247,7 @@ async def test_voice_without_database_says_nothing_was_saved(
 
     await dispatcher.feed_update(bot, make_voice_update(update_id=10))
 
-    assert session.texts == [texts.NOT_SAVED]
+    assert session.texts == [texts.NOT_SAVED_MESSAGE]
 
 
 # --- Снимки (`techspec/14-photo.md` §14.1) -----------------------------------
@@ -364,7 +364,7 @@ async def test_photo_is_saved_downloaded_and_recorded(
         bot, make_photo_update(update_id=11, sizes=sizes, caption="не забыть")
     )
 
-    assert session.texts == ["Записал: сходить на родительское собрание"]
+    assert session.texts == ["✅ Записал: сходить на родительское собрание"]
     saved = messages.calls[0]
     assert saved["kind"] == "photo"
     assert saved["telegram_file_id"] == "photo-1280"
@@ -410,8 +410,8 @@ async def test_refused_image_says_so_and_nothing_is_saved(
 
     await dispatcher.feed_update(bot, make_document_update("image/heic", update_id=14))
 
-    assert session.texts == ["Этот файл не открою — пришлите снимок как фото, а не файлом."]
-    assert session.texts == [texts.FILE_REFUSED]
+    assert session.texts == ["⚠️ Этот файл не открою — пришлите снимок как фото, а не файлом."]
+    assert session.texts == [texts.iconed(texts.ICON_TROUBLE, texts.FILE_REFUSED)]
     assert messages.calls == []
     assert analyst.photos == []
 
@@ -430,10 +430,10 @@ async def test_not_a_photo_is_refused_and_nothing_is_saved(
     await dispatcher.feed_update(bot, update)
 
     assert session.texts == [
-        "Понимаю текст, голос и фото. Файлы, стикеры и видео пока не разбираю — "
+        "⚠️ Понимаю текст, голос и фото. Файлы, стикеры и видео пока не разбираю — "
         "напишите или надиктуйте."
     ]
-    assert session.texts == [texts.NOT_TEXT]
+    assert session.texts == [texts.iconed(texts.ICON_TROUBLE, texts.NOT_TEXT)]
     assert messages.calls == []
     assert analyst.calls == []
     assert analyst.photos == []
@@ -446,7 +446,7 @@ async def test_photo_without_database_says_nothing_was_saved(
 
     await dispatcher.feed_update(bot, make_photo_update(update_id=17))
 
-    assert session.texts == [texts.NOT_SAVED]
+    assert session.texts == [texts.NOT_SAVED_MESSAGE]
 
 
 async def test_help_tells_about_photos(
@@ -535,7 +535,7 @@ async def test_voice_is_heard_after_a_network_failure(
         await dispatcher.feed_update(bot, make_voice_update(update_id=21))
 
     # Вторая попытка прошла — дальше всё как обычно.
-    assert session.texts == ["Записал: отправить расчёт клиенту"]
+    assert session.texts == ["✅ Записал: отправить расчёт клиенту"]
     assert messages.calls[0]["telegram_file_id"] == "voice-1"
     assert transcriber.calls == [AUDIO]
     assert analyst.calls == [(SPOKEN, None, "fine")]
@@ -562,7 +562,7 @@ async def test_voice_is_not_heard_when_every_attempt_fails(
         await dispatcher.feed_update(bot, make_voice_update(update_id=22))
 
     # Как без повтора: сообщение с файлом в базе, честный ответ, без распознавания.
-    assert session.texts == [texts.NOT_HEARD]
+    assert session.texts == [texts.iconed(texts.ICON_TROUBLE, texts.NOT_HEARD)]
     assert messages.calls[0]["telegram_file_id"] == "voice-1"
     assert transcriber.calls == []
     assert analyst.calls == []
@@ -590,7 +590,7 @@ async def test_refusal_of_telegram_is_not_retried(
     with caplog.at_level(logging.WARNING, logger="solomon.handlers"):
         await dispatcher.feed_update(bot, make_voice_update(update_id=23))
 
-    assert session.texts == [texts.NOT_HEARD]
+    assert session.texts == [texts.iconed(texts.ICON_TROUBLE, texts.NOT_HEARD)]
     assert transcriber.calls == []
     assert session.file_requests == ["voice-1"]
     assert pauses == []
@@ -646,7 +646,7 @@ async def test_failure_while_downloading_the_file_is_retried(
 
     await dispatcher.feed_update(bot, make_voice_update(update_id=25))
 
-    assert session.texts == ["Записал: отправить расчёт клиенту"]
+    assert session.texts == ["✅ Записал: отправить расчёт клиенту"]
     assert transcriber.calls == [AUDIO]
     # Новая попытка начинается сначала — с пути к файлу.
     assert session.file_requests == ["voice-1", "voice-1"]
@@ -686,7 +686,7 @@ async def test_photo_is_downloaded_with_the_same_retry(
 
     await dispatcher.feed_update(bot, make_photo_update(update_id=27))
 
-    assert session.texts == ["Записал: сходить на родительское собрание"]
+    assert session.texts == ["✅ Записал: сходить на родительское собрание"]
     assert analyst.photos == [(IMAGE, "image/jpeg", "", None)]
     assert session.file_requests == ["photo-90", "photo-90"]
     assert pauses == [DOWNLOAD_PAUSE]
@@ -701,7 +701,7 @@ async def test_photo_is_not_opened_when_every_attempt_fails(
 
     await dispatcher.feed_update(bot, make_photo_update(update_id=28))
 
-    assert session.texts == [texts.PHOTO_NOT_OPENED]
+    assert session.texts == [texts.iconed(texts.ICON_TROUBLE, texts.PHOTO_NOT_OPENED)]
     assert messages.calls[0]["telegram_file_id"] == "photo-90"
     assert analyst.photos == []
     assert session.file_requests == ["photo-90"] * DOWNLOAD_ATTEMPTS
@@ -734,7 +734,10 @@ def test_only_network_failures_are_retried(error: Exception, retried: bool) -> N
 
 @pytest.mark.parametrize(
     ("make", "reply"),
-    [(make_voice_update, texts.NOT_HEARD), (make_photo_update, texts.PHOTO_NOT_OPENED)],
+    [
+        (make_voice_update, texts.iconed(texts.ICON_TROUBLE, texts.NOT_HEARD)),
+        (make_photo_update, texts.iconed(texts.ICON_TROUBLE, texts.PHOTO_NOT_OPENED)),
+    ],
 )
 async def test_download_refusal_leaves_no_token_in_the_log(
     make: Callable[..., Update],
@@ -771,7 +774,7 @@ async def test_broken_database_is_not_called_recorded(
     await dispatcher.feed_update(bot, make_update("купить лампочку", update_id=7))
 
     # Инвариант 4: о записи сообщается только после ответа базы.
-    assert session.texts == [texts.NOT_SAVED]
+    assert session.texts == [texts.NOT_SAVED_MESSAGE]
     assert "Записал" not in session.texts[0]
 
 
@@ -800,7 +803,7 @@ async def test_owner_id_is_the_only_gate(
 
     # Владельцу текст записывается, чужому уходит короткий отказ, и дальше
     # обновление не идёт — до слоя данных оно не доходит.
-    assert session.texts == ["Записал: привет", texts.STRANGER]
+    assert session.texts == ["✅ Записал: привет", texts.STRANGER]
 
 
 async def test_bot_without_database_says_nothing_was_saved(
@@ -810,7 +813,7 @@ async def test_bot_without_database_says_nothing_was_saved(
 
     await dispatcher.feed_update(bot, make_update("купить лампочку", update_id=9))
 
-    assert session.texts == [texts.NOT_SAVED]
+    assert session.texts == [texts.NOT_SAVED_MESSAGE]
 
 
 async def test_forwarded_message_is_an_errand_with_a_named_sender(
@@ -825,7 +828,7 @@ async def test_forwarded_message_is_an_errand_with_a_named_sender(
 
     # Пересланное с текстом — обычное поручение, а имя отправителя уходит
     # в разбор отдельно: чьё это обещание (`spec.md` §3.3).
-    assert session.texts == ["Записал: принять смету от Ани"]
+    assert session.texts == ["✅ Записал: принять смету от Ани"]
     assert messages.calls[0]["text"] == "пришлю смету завтра"
     assert analyst.calls == [("пришлю смету завтра", "Аня", None)]
 
@@ -951,7 +954,7 @@ async def test_forwarded_conversation_gets_one_reply(
         ),
     )
 
-    assert session.texts == ["Из переписки записал: ответить Ане"]
+    assert session.texts == ["✅ Из переписки записал: ответить Ане"]
     assert analyst.calls == []
     assert analyst.conversations == [
         chr(10).join(
@@ -980,7 +983,7 @@ async def test_voice_in_a_conversation_sends_no_reply_of_its_own(
         ),
     )
 
-    assert session.texts == ["Из переписки записал: ответить Ане"]
+    assert session.texts == ["✅ Из переписки записал: ответить Ане"]
     assert analyst.conversations == [
         chr(10).join(
             [
@@ -1009,4 +1012,5 @@ async def test_sticker_and_command_beside_a_forwarded_go_their_own_way(
 
     assert analyst.conversations == []
     assert analyst.calls == [("Во сколько встреча?", "Аня", None)]
-    assert sorted(session.texts) == sorted([texts.NOT_TEXT, texts.HELP, "Записал: купить лампочку"])
+    not_text = texts.iconed(texts.ICON_TROUBLE, texts.NOT_TEXT)
+    assert sorted(session.texts) == sorted([not_text, texts.HELP, "✅ Записал: купить лампочку"])

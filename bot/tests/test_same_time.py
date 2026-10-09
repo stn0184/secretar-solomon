@@ -95,7 +95,7 @@ async def test_new_task_on_a_taken_minute_is_recorded_with_the_warning() -> None
     outcome = await say(service, "созвон с Кириллом в пятницу в пять")
 
     assert outcome.ok
-    assert paragraphs_of(outcome.message) == [f"Записал: созвон с Кириллом. {FRIDAY}", CLASH]
+    assert paragraphs_of(outcome.message) == [f"✅ Записал: созвон с Кириллом. {FRIDAY}", CLASH]
     assert saved(understandings, "task")["title"] == "созвон с Кириллом"
     assert saved(understandings, "reply") == outcome.message
     assert store.minutes == [(FRIDAY_FIVE, None)]
@@ -189,7 +189,7 @@ async def test_failed_minute_query_is_logged_and_the_task_still_recorded(
         outcome = await say(service)
 
     assert outcome.ok
-    assert outcome.message == f"Записал: созвон с Кириллом. {FRIDAY}"
+    assert outcome.message == f"✅ Записал: созвон с Кириллом. {FRIDAY}"
     assert saved(understandings, "task")["title"] == "созвон с Кириллом"
     assert "Накладка не проверена" in caplog.text
 
@@ -211,7 +211,7 @@ async def test_photo_warning_goes_before_the_rest_of_the_photo() -> None:
     outcome = await send_photo(service)
 
     assert paragraphs_of(outcome.message) == [
-        f"Записал: созвон с Кириллом. {FRIDAY}",
+        f"✅ Записал: созвон с Кириллом. {FRIDAY}",
         CLASH,
         MORE_HINT,
     ]
@@ -229,7 +229,7 @@ async def test_move_onto_a_taken_minute_warns_and_leaves_the_task_itself_out() -
 
     outcome = await say(service, "отчёт перенеси на пятницу на пять")
 
-    assert paragraphs_of(outcome.message) == [f"Перенёс: отправить отчёт. {FRIDAY}", CLASH]
+    assert paragraphs_of(outcome.message) == [f"✏️ Перенёс: отправить отчёт. {FRIDAY}", CLASH]
     assert saved(understandings, "reply") == outcome.message
     assert store.minutes == [(FRIDAY_FIVE, REPORT_ID)]
 
@@ -253,7 +253,7 @@ async def test_pick_onto_a_taken_minute_warns_too() -> None:
         chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=REPORT_ID
     )
 
-    reply = f"Перенёс: отправить отчёт. {FRIDAY}{chr(10) * 2}{CLASH}"
+    reply = f"✏️ Перенёс: отправить отчёт. {FRIDAY}{chr(10) * 2}{CLASH}"
     assert outcome == PressOutcome(message=reply, replace=True)
     assert store.picks[0][2] == reply
     assert store.minutes == [(FRIDAY_FIVE, REPORT_ID)]
@@ -274,7 +274,7 @@ async def test_unfound_move_onto_a_taken_minute_warns() -> None:
     outcome = await say(service, "созвон с Кириллом переехал на пятницу в пять")
 
     assert paragraphs_of(outcome.message) == [
-        f"Не нашёл открытой задачи — записал новую: созвон с Кириллом. {FRIDAY}",
+        f"✅ Не нашёл открытой задачи — записал новую: созвон с Кириллом. {FRIDAY}",
         CLASH,
     ]
     assert store.minutes == [(FRIDAY_FIVE, None)]
@@ -308,7 +308,7 @@ async def test_answer_that_gives_a_taken_minute_warns() -> None:
     outcome = await say(service, "в пять")
 
     first, clash = paragraphs_of(outcome.message)
-    assert first.startswith("Понял: отправить отчёт")
+    assert first.startswith("✅ Понял: отправить отчёт")
     assert clash == CLASH
     assert saved(understandings, "amend")["task_id"] == REPORT_ID
     assert store.minutes == [(FRIDAY_FIVE, REPORT_ID)]
@@ -320,7 +320,7 @@ async def test_answer_without_a_new_due_is_not_compared() -> None:
 
     outcome = await say(service, "это срочно")
 
-    assert outcome.message.startswith("Понял: отправить отчёт")
+    assert outcome.message.startswith("✅ Понял: отправить отчёт")
     assert store.minutes == []
 
 
@@ -352,7 +352,7 @@ async def test_reopen_does_not_compare() -> None:
 
     outcome = await service.reopen(task_id=MEETING_ID)
 
-    assert outcome.message.startswith("Вернул в работу: встреча с Ренатой")
+    assert outcome.message.startswith("✏️ Вернул в работу: встреча с Ренатой")
     assert len(paragraphs_of(outcome.message)) == 1
     assert store.minutes == []
 
@@ -364,7 +364,7 @@ async def test_next_time_of_a_series_does_not_compare() -> None:
 
     outcome = await say_series(rig, "планёрка прошла")
 
-    assert outcome.message.startswith("Отметил: планёрка")
+    assert outcome.message.startswith("✏️ Отметил: планёрка")
     assert store.minutes == []
 
 
@@ -377,5 +377,5 @@ async def test_back_of_a_series_does_not_compare() -> None:
         task_id=REPORT_ID, back_to=seconds(WEDNESDAY_NINE), moved_from=seconds(THURSDAY_NINE)
     )
 
-    assert outcome.message.startswith("Вернул в работу: планёрка")
+    assert outcome.message.startswith("✏️ Вернул в работу: планёрка")
     assert store.minutes == []

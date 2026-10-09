@@ -210,7 +210,9 @@ async def test_service_without_a_store_sees_an_empty_list() -> None:
 
     assert analyst.tasks == [[]]
     assert saved_edit(understandings) is None
-    assert outcome.message == texts.NOT_FOUND.format(title="встреча")
+    assert outcome.message == texts.iconed(
+        texts.ICON_TROUBLE, texts.NOT_FOUND.format(title="встреча")
+    )
 
 
 async def test_forwarded_message_gets_only_the_list_and_its_edit_is_dropped() -> None:
@@ -228,7 +230,7 @@ async def test_forwarded_message_gets_only_the_list_and_its_edit_is_dropped() ->
     assert store.calls == [("open_tasks", 50)]
     assert saved_edit(understandings) is None
     assert saved(understandings, "task")["title"] == "прислать смету"
-    assert outcome.message.startswith("Записал: прислать смету")
+    assert outcome.message.startswith("✅ Записал: прислать смету")
     assert outcome.buttons == ()
 
 
@@ -409,7 +411,7 @@ async def test_voice_edit_carries_the_swipe_and_closes_the_task() -> None:
 
     assert analyst.swipes == ["Ответ на напоминание о задаче №1"]
     assert saved_edit(understandings)["action"] == "done"
-    assert outcome.message == "Закрыл: встреча с Ренатой."
+    assert outcome.message == "✏️ Закрыл: встреча с Ренатой."
 
 
 # ------------------------------------------------------------- задача узнана
@@ -443,7 +445,7 @@ async def test_move_writes_the_due_and_the_plan_and_says_moved() -> None:
     assert saved(understandings, "amend") is None
     assert outcome.ok
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: вторник, 29 сентября, 17:00. Напомню: сегодня в 16:00"
+        "✏️ Перенёс: встреча с Ренатой. Срок: вторник, 29 сентября, 17:00. Напомню: сегодня в 16:00"
     )
     assert outcome.buttons == ()
 
@@ -457,7 +459,7 @@ async def test_move_into_the_past_has_no_remind_line() -> None:
     outcome = await say(service, "встреча была в восемь")
 
     assert saved_edit(understandings)["schedule"] == []
-    assert outcome.message == "Перенёс: встреча с Ренатой. Срок: вторник, 29 сентября, 08:00"
+    assert outcome.message == "✏️ Перенёс: встреча с Ренатой. Срок: вторник, 29 сентября, 08:00"
 
 
 async def test_move_to_a_day_sends_the_date() -> None:
@@ -473,7 +475,7 @@ async def test_move_to_a_day_sends_the_date() -> None:
     assert planner.calls[0]["due_at"] == datetime(2026, 10, 5, 18, 0, tzinfo=TZ)
     assert planner.calls[0]["due_precision"] == "day"
     assert outcome.message == (
-        "Перенёс: отправить отчёт. Срок: понедельник, 5 октября. Напомню: 4 октября в 18:00"
+        "✏️ Перенёс: отправить отчёт. Срок: понедельник, 5 октября. Напомню: 4 октября в 18:00"
     )
 
 
@@ -500,7 +502,8 @@ async def test_move_to_a_part_of_day_sends_its_start_and_the_part() -> None:
         "due_precision": "morning",
     }
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: среда, 30 сентября, утром. Напомню: 30 сентября в 08:00"
+        "✏️ Перенёс: встреча с Ренатой. Срок: среда, 30 сентября, утром. "
+        "Напомню: 30 сентября в 08:00"
     )
 
 
@@ -531,7 +534,7 @@ async def test_other_fields_keep_the_reminders_and_say_fixed() -> None:
         "schedule": [],
         "question": None,
     }
-    assert outcome.message == "Поправил: отправить отчёт. Срок: пятница, 2 октября. Люди: Петров"
+    assert outcome.message == "✏️ Поправил: отправить отчёт. Срок: пятница, 2 октября. Люди: Петров"
 
 
 async def test_fixed_task_without_a_due_has_no_due_line() -> None:
@@ -539,7 +542,7 @@ async def test_fixed_task_without_a_due_has_no_due_line() -> None:
 
     outcome = await say(service, "лампочек две")
 
-    assert outcome.message == "Поправил: купить две лампочки"
+    assert outcome.message == "✏️ Поправил: купить две лампочки"
 
 
 async def test_removed_due_drops_the_reminders() -> None:
@@ -550,7 +553,7 @@ async def test_removed_due_drops_the_reminders() -> None:
     assert planner.calls == []
     assert saved_edit(understandings)["changes"] == {"due_at": None}
     assert saved_edit(understandings)["schedule"] == []
-    assert outcome.message == "Убрал срок: встреча с Ренатой. Напоминать не буду."
+    assert outcome.message == "✏️ Убрал срок: встреча с Ренатой. Напоминать не буду."
 
 
 async def test_done_closes_the_task_with_a_back_button() -> None:
@@ -566,7 +569,7 @@ async def test_done_closes_the_task_with_a_back_button() -> None:
         "schedule": [],
         "question": None,
     }
-    assert outcome.message == "Закрыл: встреча с Ренатой."
+    assert outcome.message == "✏️ Закрыл: встреча с Ренатой."
     assert outcome.buttons == (Button(text="Вернуть", data=f"reopen:{MEETING_ID}"),)
 
 
@@ -576,7 +579,7 @@ async def test_cancel_removes_the_task_from_the_list_with_a_back_button() -> Non
     outcome = await say(service, "отчёт уже не нужен")
 
     assert saved_edit(understandings)["action"] == "cancel"
-    assert outcome.message == "Убрал из списка: отправить отчёт."
+    assert outcome.message == "✏️ Убрал из списка: отправить отчёт."
     assert outcome.buttons == (Button(text="Вернуть", data=f"reopen:{REPORT_ID}"),)
 
 
@@ -596,7 +599,7 @@ async def test_unclear_value_asks_and_changes_nothing() -> None:
         "schedule": [],
         "question": "На какое время перенести?",
     }
-    assert outcome.message == "Встреча с Ренатой — на какое время перенести?"
+    assert outcome.message == "❓ Встреча с Ренатой — на какое время перенести?"
 
 
 async def test_answer_to_the_edit_question_goes_the_008_way() -> None:
@@ -628,7 +631,7 @@ async def test_answer_to_the_edit_question_goes_the_008_way() -> None:
 
     assert saved_edit(understandings) is None
     assert saved(understandings, "amend")["task_id"] == MEETING_ID
-    assert outcome.message.startswith("Понял: встреча с Ренатой")
+    assert outcome.message.startswith("✅ Понял: встреча с Ренатой")
 
 
 async def test_change_without_values_says_nothing_to_change() -> None:
@@ -645,7 +648,7 @@ async def test_change_without_values_says_nothing_to_change() -> None:
         "question": None,
     }
     assert outcome.message == (
-        "Не понял, что поменять в задаче «встреча с Ренатой» — ничего не менял."
+        "⚠️ Не понял, что поменять в задаче «встреча с Ренатой» — ничего не менял."
     )
 
 
@@ -660,7 +663,7 @@ async def test_same_values_are_as_recorded() -> None:
     assert planner.calls == []
     assert saved_edit(understandings)["changes"] == {}
     assert outcome.message == (
-        "Так и записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. Приоритет: высокий"
+        "✏️ Так и записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. Приоритет: высокий"
     )
 
 
@@ -673,7 +676,7 @@ async def test_task_closed_meanwhile_is_refused_by_the_base() -> None:
     outcome = await say(service, "сделал")
 
     assert not outcome.ok
-    assert outcome.message == texts.NOT_SAVED
+    assert outcome.message == texts.NOT_SAVED_MESSAGE
     assert outcome.buttons == ()
 
 
@@ -684,7 +687,7 @@ async def test_model_failure_records_as_is_and_edits_nothing() -> None:
 
     assert saved_edit(understandings) is None
     assert saved(understandings, "task")["needs_review"] is True
-    assert outcome.message.startswith("Записал как есть")
+    assert outcome.message.startswith("⚠️ Записал как есть")
 
 
 async def test_repeated_update_answers_the_saved_text_without_buttons() -> None:
@@ -713,7 +716,7 @@ async def test_candidates_ask_with_buttons_and_change_nothing() -> None:
     assert planner.calls == []
     assert saved_edit(understandings) is None
     assert saved(understandings, "task") is None
-    assert outcome.message == "Какую задачу перенести на понедельник, 5 октября?"
+    assert outcome.message == "❓ Какую задачу перенести на понедельник, 5 октября?"
     assert outcome.buttons == (
         Button(text="отправить отчёт — 2 окт", data=f"pick:{MESSAGE_ID}:{REPORT_ID}"),
         Button(text="встреча с Ренатой — 2 окт, 17:00", data=f"pick:{MESSAGE_ID}:{MEETING_ID}"),
@@ -727,7 +730,7 @@ async def test_candidates_of_a_move_to_a_part_of_day_hear_the_part() -> None:
 
     outcome = await say(service, "перенеси на вечер")
 
-    assert outcome.message == "Какую задачу перенести на сегодня вечером?"
+    assert outcome.message == "❓ Какую задачу перенести на сегодня вечером?"
 
 
 async def test_single_candidate_still_asks() -> None:
@@ -735,7 +738,7 @@ async def test_single_candidate_still_asks() -> None:
 
     outcome = await say(service, "купил")
 
-    assert outcome.message == "Какую задачу закрыть?"
+    assert outcome.message == "❓ Какую задачу закрыть?"
     assert outcome.buttons == (Button(text="купить лампочку", data=f"pick:{MESSAGE_ID}:{LAMP_ID}"),)
 
 
@@ -750,7 +753,7 @@ async def test_candidates_are_capped_at_five() -> None:
 
     outcome = await say(service, "убери")
 
-    assert outcome.message == "Какую задачу убрать из списка?"
+    assert outcome.message == "❓ Какую задачу убрать из списка?"
     assert len(outcome.buttons) == 5
 
 
@@ -784,7 +787,7 @@ async def test_unfound_move_records_a_new_task_without_the_question() -> None:
     assert understandings.calls[0]["reminders"] == [item.as_row() for item in plan]
     assert planner.calls[0]["due_at"] == datetime(2026, 10, 1, 15, 0, tzinfo=TZ)
     assert outcome.message == (
-        "Не нашёл открытой задачи — записал новую: встреча с Кириллом. "
+        "✅ Не нашёл открытой задачи — записал новую: встреча с Кириллом. "
         "Срок: четверг, 1 октября, 15:00. Напомню: 1 октября в 14:00"
     )
 
@@ -798,7 +801,7 @@ async def test_unfound_other_edit_records_nothing() -> None:
 
     assert saved(understandings, "task") is None
     assert saved_edit(understandings) is None
-    assert outcome.message == "Не нашёл открытой задачи «забрать посылку» — ничего не менял."
+    assert outcome.message == "⚠️ Не нашёл открытой задачи «забрать посылку» — ничего не менял."
 
 
 async def test_number_outside_the_list_is_not_found() -> None:
@@ -809,7 +812,7 @@ async def test_number_outside_the_list_is_not_found() -> None:
     outcome = await say(service, "сделал")
 
     assert saved_edit(understandings) is None
-    assert outcome.message == "Не нашёл открытой задачи «встреча» — ничего не менял."
+    assert outcome.message == "⚠️ Не нашёл открытой задачи «встреча» — ничего не менял."
 
 
 async def test_unfound_move_of_a_chat_records_nothing() -> None:
@@ -821,7 +824,7 @@ async def test_unfound_move_of_a_chat_records_nothing() -> None:
     outcome = await say(service, "перенеси на пять")
 
     assert saved(understandings, "task") is None
-    assert outcome.message.startswith("Не нашёл открытой задачи «")
+    assert outcome.message.startswith("⚠️ Не нашёл открытой задачи «")
 
 
 # ------------------------------------------------------------ кнопка кандидата
@@ -857,7 +860,7 @@ async def test_pick_writes_the_edit_for_the_chosen_task() -> None:
     )
 
     reply = (
-        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00. "
+        "✏️ Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00. "
         "Напомню: 5 октября в 16:00"
     )
     assert outcome == PressOutcome(message=reply, replace=True)
@@ -889,7 +892,7 @@ async def test_pick_of_done_gets_the_back_button() -> None:
     )
 
     assert outcome == PressOutcome(
-        message="Закрыл: отправить отчёт.",
+        message="✏️ Закрыл: отправить отчёт.",
         replace=True,
         buttons=(Button(text="Вернуть", data=f"reopen:{REPORT_ID}"),),
     )
@@ -906,7 +909,7 @@ async def test_pick_with_a_question_asks_about_the_chosen_task() -> None:
         chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=MEETING_ID
     )
 
-    assert outcome.message == "Встреча с Ренатой — на какое время?"
+    assert outcome.message == "❓ Встреча с Ренатой — на какое время?"
     assert store.picks[0][1]["question"] == "На какое время?"
 
 
@@ -1078,7 +1081,7 @@ async def test_reopen_plans_by_the_due_and_says_back_in_work() -> None:
     assert store.reopens == [(MEETING_ID, MEETING_PLAN)]
     assert outcome == PressOutcome(
         message=(
-            "Вернул в работу: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. "
+            "✏️ Вернул в работу: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. "
             "Напомню: 2 октября в 16:00"
         ),
         replace=True,
@@ -1094,7 +1097,7 @@ async def test_reopen_with_a_past_due_has_no_remind_line() -> None:
 
     assert store.reopens == [(MEETING_ID, [])]
     assert outcome == PressOutcome(
-        message="Вернул в работу: встреча с Ренатой. Срок: понедельник, 28 сентября, 17:00",
+        message="✏️ Вернул в работу: встреча с Ренатой. Срок: понедельник, 28 сентября, 17:00",
         replace=True,
     )
 
@@ -1106,7 +1109,7 @@ async def test_reopen_of_an_active_task_answers_the_same_without_a_write() -> No
 
     assert store.reopens == []
     assert outcome.replace
-    assert outcome.message.startswith("Вернул в работу: встреча с Ренатой.")
+    assert outcome.message.startswith("✏️ Вернул в работу: встреча с Ренатой.")
 
 
 async def test_reopen_of_a_deleted_task_finds_nothing() -> None:
@@ -1300,7 +1303,7 @@ async def test_failed_talk_read_is_logged_and_the_message_understood(
     assert analyst.recents == [None]
     assert analyst.tasks == [[MEETING, REPORT, LAMP]]
     assert outcome.ok
-    assert outcome.message.startswith("Записал: купить лампочку")
+    assert outcome.message.startswith("✅ Записал: купить лампочку")
     assert saved(understandings, "task") is not None
     assert "Недавний разговор не прочитан" in caplog.text
 
@@ -1389,7 +1392,7 @@ def test_nothing_to_beat_without_a_question_an_edit_or_a_list() -> None:
 
 @pytest.mark.parametrize(
     ("action", "reply"),
-    [("done", "Закрыл: купить лампочку."), ("cancel", "Убрал из списка: купить лампочку.")],
+    [("done", "✏️ Закрыл: купить лампочку."), ("cancel", "✏️ Убрал из списка: купить лампочку.")],
 )
 async def test_answer_and_closing_edit_of_the_asked_task_make_an_edit(
     action: str, reply: str
@@ -1420,7 +1423,7 @@ async def test_answer_and_done_of_another_task_stay_an_answer() -> None:
 
     assert saved_edit(understandings) is None
     assert saved(understandings, "amend")["task_id"] == LAMP_ID
-    assert outcome.message == texts.ASK_LATER
+    assert outcome.message == texts.iconed(texts.ICON_RECORDED, texts.ASK_LATER)
 
 
 async def test_forwarded_answer_hears_no_closing_edit() -> None:
@@ -1484,14 +1487,14 @@ async def test_answer_and_move_of_the_overdue_task_make_a_move(question: str) ->
     assert saved_edit(understandings)["task_id"] == MEETING_ID
     assert saved_edit(understandings)["changes"] == {"due_at": "2026-10-05T17:00:00+05:00"}
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00. "
+        "✏️ Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00. "
         "Напомню: 5 октября в 16:00"
     )
 
 
 @pytest.mark.parametrize(
     ("action", "reply"),
-    [("done", "Закрыл: встреча с Ренатой."), ("cancel", "Убрал из списка: встреча с Ренатой.")],
+    [("done", "✏️ Закрыл: встреча с Ренатой."), ("cancel", "✏️ Убрал из списка: встреча с Ренатой.")],
 )
 async def test_answer_and_closing_of_the_overdue_task_make_an_edit(action: str, reply: str) -> None:
     """«Да», «уже не нужно» на «Получилось?» — закрыть или убрать, с «Вернуть»."""
@@ -1542,7 +1545,7 @@ async def test_move_to_a_day_keeps_the_hour() -> None:
     assert planner.calls[0]["due_at"] == datetime(2026, 10, 5, 17, 0, tzinfo=TZ)
     assert planner.calls[0]["due_precision"] == "time"
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00. "
+        "✏️ Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00. "
         "Напомню: 5 октября в 16:00"
     )
 
@@ -1565,7 +1568,7 @@ async def test_move_of_a_part_task_to_a_day_keeps_the_part() -> None:
     }
     assert planner.calls[0]["due_precision"] == "morning"
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: пятница, 9 октября, утром. Напомню: 9 октября в 08:00"
+        "✏️ Перенёс: встреча с Ренатой. Срок: пятница, 9 октября, утром. Напомню: 9 октября в 08:00"
     )
 
 
@@ -1592,7 +1595,7 @@ async def test_move_to_an_evening_keeps_only_an_evening_hour(
     outcome = await say(service, "встречу на понедельник вечером")
 
     assert saved_edit(understandings)["changes"] == changes
-    assert outcome.message == f"Перенёс: встреча с Ренатой. Срок: {due}"
+    assert outcome.message == f"✏️ Перенёс: встреча с Ренатой. Срок: {due}"
 
 
 async def test_time_unknown_makes_the_new_day_a_day() -> None:
@@ -1612,7 +1615,7 @@ async def test_time_unknown_makes_the_new_day_a_day() -> None:
     assert planner.calls[0]["due_at"] == datetime(2026, 10, 5, 18, 0, tzinfo=TZ)
     assert planner.calls[0]["due_precision"] == "day"
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября. Напомню: 5 октября в 09:00"
+        "✏️ Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября. Напомню: 5 октября в 09:00"
     )
 
 
@@ -1622,7 +1625,7 @@ async def test_time_unknown_without_a_day_keeps_the_day() -> None:
     outcome = await say(service, "время встречи пока не знаю")
 
     assert saved_edit(understandings)["changes"] == {"due_date": "2026-10-02"}
-    assert outcome.message == "Перенёс: встреча с Ренатой. Срок: пятница, 2 октября"
+    assert outcome.message == "✏️ Перенёс: встреча с Ренатой. Срок: пятница, 2 октября"
 
 
 async def test_named_hour_wins_over_time_unknown() -> None:
@@ -1657,7 +1660,7 @@ async def test_today_with_a_passed_hour_asks_what_time() -> None:
     assert saved(understandings, "task") is None
     assert planner.calls[0]["due_precision"] == "day"
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября. "
+        "❓ Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября. "
         "Напомню: сегодня в 18:00. 09:00 уже прошло — во сколько?"
     )
 
@@ -1686,7 +1689,8 @@ async def test_hour_after_the_question_moves_the_same_task() -> None:
     assert saved_edit(understandings)["task_id"] == MEETING_ID
     assert saved_edit(understandings)["changes"] == {"due_at": "2026-10-04T16:00:00+05:00"}
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября, 16:00. Напомню: сегодня в 15:00"
+        "✏️ Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября, 16:00. "
+        "Напомню: сегодня в 15:00"
     )
 
 
@@ -1700,7 +1704,7 @@ async def test_today_with_the_hour_ahead_keeps_it_without_a_question() -> None:
     outcome = await say(service, "встречу на сегодня")
 
     assert saved_edit(understandings)["changes"] == {"due_at": "2026-10-04T15:00:00+05:00"}
-    assert outcome.message == "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября, 15:00"
+    assert outcome.message == "✏️ Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября, 15:00"
 
 
 @pytest.mark.parametrize(
@@ -1723,7 +1727,7 @@ async def test_today_after_the_part_ended_asks_what_time(
 
     assert saved_edit(understandings)["changes"] == {"due_date": "2026-10-04"}
     assert outcome.message == (
-        f"Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября. {question}"
+        f"❓ Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября. {question}"
     )
 
 
@@ -1741,7 +1745,7 @@ async def test_today_evening_with_a_passed_hour_is_the_evening_and_a_question() 
         "due_precision": "evening",
     }
     assert outcome.message == (
-        "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября, вечером. "
+        "❓ Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября, вечером. "
         "19:00 уже прошло — во сколько?"
     )
 
@@ -1764,7 +1768,7 @@ async def test_same_due_is_as_recorded_and_leaves_the_reminders() -> None:
         "question": None,
     }
     assert outcome.message == (
-        "Так и записано: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00"
+        "✏️ Так и записано: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00"
     )
 
 
@@ -1774,7 +1778,7 @@ async def test_as_recorded_names_the_priority_and_people_it_was_told() -> None:
     outcome = await say(service, "встреча с Ренатой срочная")
 
     assert outcome.message == (
-        "Так и записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. "
+        "✏️ Так и записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. "
         "Приоритет: высокий. Люди: Рената"
     )
 
@@ -1795,7 +1799,7 @@ async def test_pick_keeps_the_hour_and_counts_passed_from_the_press() -> None:
     assert store.picks[0][1]["changes"] == {"due_date": "2026-10-04"}
     assert outcome == PressOutcome(
         message=(
-            "Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября. "
+            "❓ Перенёс: встреча с Ренатой. Срок: воскресенье, 4 октября. "
             "09:00 уже прошло — во сколько?"
         ),
         replace=True,
@@ -1827,5 +1831,6 @@ async def test_unfound_move_to_a_day_takes_no_hour() -> None:
     assert task["due_precision"] == "day"
     assert task["due_at"] == "2026-10-05T18:00:00+05:00"
     assert outcome.message == (
-        "Не нашёл открытой задачи — записал новую: встреча с Кириллом. Срок: понедельник, 5 октября"
+        "✅ Не нашёл открытой задачи — записал новую: встреча с Кириллом. "
+        "Срок: понедельник, 5 октября"
     )

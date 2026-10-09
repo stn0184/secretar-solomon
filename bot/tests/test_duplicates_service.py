@@ -63,7 +63,7 @@ from tests.test_chat_edit_service import (
 TZ = ZoneInfo(OWNER_TIMEZONE)
 FRIDAY_FIVE = datetime(2026, 10, 2, 17, 0, tzinfo=TZ)
 
-MEETING_REPLY = "Это уже записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00"
+MEETING_REPLY = "✅ Это уже записано: встреча с Ренатой. Срок: пятница, 2 октября, 17:00"
 APART = (Button(text="Записать отдельно", data=f"apart:{MESSAGE_ID}"),)
 MORE_HINT = "На снимке ещё: «купить хлеб». Нужны — напишите или надиктуйте отдельно."
 # Задача из дубля встаёт на ту же минуту, что найденная (§15.5).
@@ -137,7 +137,7 @@ async def test_duplicate_of_a_repeating_task_names_its_rule_and_nearest_time() -
     outcome = await say(service, "планёрка во вторник в десять")
 
     assert outcome.message == (
-        "Это уже записано: планёрка. Повтор: каждый вторник. Срок: вторник, 6 октября, 10:00"
+        "✅ Это уже записано: планёрка. Повтор: каждый вторник. Срок: вторник, 6 октября, 10:00"
     )
 
 
@@ -148,7 +148,7 @@ async def test_duplicate_of_a_task_without_a_due_has_no_due_line() -> None:
 
     outcome = await say(service, "лампочку купить надо")
 
-    assert outcome.message == "Это уже записано: купить лампочку"
+    assert outcome.message == "✅ Это уже записано: купить лампочку"
     assert saved(understandings, "same_task") == LAMP.id
 
 
@@ -188,7 +188,7 @@ async def test_number_outside_the_list_is_logged_and_recorded_new(
 
     assert saved(understandings, "same_task") is None
     assert saved(understandings, "task")["title"] == "созвон с Ренатой"
-    assert outcome.message.startswith("Записал: созвон с Ренатой")
+    assert outcome.message.startswith("✅ Записал: созвон с Ренатой")
     assert outcome.buttons == ()
     assert "Дубль №7 не принят" in caplog.text
 
@@ -231,7 +231,7 @@ async def test_answer_to_the_open_question_beats_the_duplicate() -> None:
 
     assert saved(understandings, "same_task") is None
     assert saved(understandings, "amend")["task_id"] == REPORT_ID
-    assert outcome.message.startswith("Понял:")
+    assert outcome.message.startswith("✅ Понял:")
 
 
 async def test_edit_beats_the_duplicate() -> None:
@@ -251,7 +251,7 @@ async def test_refused_duplicate_is_not_saved() -> None:
     outcome = await say(service)
 
     assert not outcome.ok
-    assert outcome.message == texts.NOT_SAVED
+    assert outcome.message == texts.NOT_SAVED_MESSAGE
     assert outcome.buttons == ()
 
 
@@ -308,7 +308,7 @@ async def test_forwarded_message_is_checked_against_the_list_but_edits_nothing()
     assert store.calls == [("open_tasks", 50)]
     assert saved(understandings, "edit") is None
     assert saved(understandings, "same_task") == REPORT_ID
-    assert outcome.message == "Это уже записано: отправить отчёт. Срок: пятница, 2 октября"
+    assert outcome.message == "✅ Это уже записано: отправить отчёт. Срок: пятница, 2 октября"
     assert outcome.buttons == APART
 
 
@@ -379,7 +379,7 @@ async def test_photo_with_the_list_still_edits_nothing() -> None:
 
     assert saved(understandings, "edit") is None
     assert saved(understandings, "task")["title"] == "встреча с Ренатой"
-    assert outcome.message.startswith("Записал: встреча с Ренатой")
+    assert outcome.message.startswith("✅ Записал: встреча с Ренатой")
 
 
 async def test_photo_without_the_list_is_recorded_new() -> None:
@@ -430,7 +430,7 @@ async def test_apart_records_the_task_as_the_usual_path_would() -> None:
     outcome = await press(service)
 
     reply = (
-        "Записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. "
+        "✅ Записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. "
         f"Напомню: 2 октября в 16:00{chr(10) * 2}{SAME_TIME}"
     )
     assert outcome == PressOutcome(message=reply, replace=True)
@@ -452,7 +452,7 @@ async def test_apart_keeps_the_question_of_the_model() -> None:
 
     outcome = await press(service)
 
-    assert outcome.message == "Записал: созвон с Ренатой. Во сколько?"
+    assert outcome.message == "❓ Записал: созвон с Ренатой. Во сколько?"
     [(_, task, _, _)] = store.separates
     assert task["open_question"] == "Во сколько?"
     assert task["needs_review"] is True
@@ -478,7 +478,7 @@ async def test_apart_of_a_photo_keeps_the_rest_of_the_photo() -> None:
     outcome = await press(service)
 
     assert outcome.message.split(chr(10) * 2) == [
-        "Записал: встреча с Ренатой. Срок: пятница, 2 октября, 17:00",
+        "✅ Записал: встреча с Ренатой. Срок: пятница, 2 октября, 17:00",
         SAME_TIME,
         MORE_HINT,
     ]
@@ -561,7 +561,7 @@ async def test_pick_reads_an_analysis_from_before_the_stage() -> None:
         chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID, task_id=REPORT_ID
     )
 
-    assert outcome.message == "Закрыл: отправить отчёт."
+    assert outcome.message == "✏️ Закрыл: отправить отчёт."
     assert len(store.picks) == 1
 
 
@@ -645,7 +645,7 @@ async def test_conversation_same_time_comes_before_the_rest() -> None:
     outcome = await forward(service)
 
     assert outcome.message.split(chr(10) * 2) == [
-        "Из переписки записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. "
+        "✅ Из переписки записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. "
         "Напомню: 2 октября в 16:00",
         SAME_TIME,
         CONVERSATION_HINT,
@@ -660,7 +660,7 @@ async def test_apart_of_a_conversation_answers_from_the_conversation() -> None:
     outcome = await press(service)
 
     reply = [
-        "Из переписки записал: встреча с Ренатой. Срок: пятница, 2 октября, 17:00",
+        "✅ Из переписки записал: встреча с Ренатой. Срок: пятница, 2 октября, 17:00",
         SAME_TIME,
         CONVERSATION_HINT,
     ]

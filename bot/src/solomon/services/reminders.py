@@ -167,6 +167,13 @@ def carries_done(precision: str | None) -> bool:
     return precision != TIME_PRECISION
 
 
+def reminder_icon(precision: str | None) -> str:
+    """Значок напоминания (`techspec/29-icons.md` §29.1): о деле с часом — 📅,
+    о деле на день и на часть дня — 🔔. Граница та же, что у кнопки
+    «Сделано» (`carries_done`)."""
+    return texts.ICON_REMINDER if carries_done(precision) else texts.ICON_MEETING
+
+
 class Notifier(Protocol):
     """Отправка напоминания владельцу. Возвращает id сообщения в Telegram.
 
@@ -639,7 +646,9 @@ class ReminderService:
         question = None if asked is None else self._overdue_question(asked, now)
         try:
             message_id = await self._announce(
-                text=morning.plan_text(tasks, timezone, question=question)
+                text=texts.iconed(
+                    texts.ICON_MORNING, morning.plan_text(tasks, timezone, question=question)
+                )
             )
         except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
             logger.warning("Утренний план не ушёл: %s", error)
@@ -689,7 +698,9 @@ class ReminderService:
             return False
         question = self._overdue_question(task, now)
         try:
-            message_id = await self._notify(text=question, task_id=task.task_id)
+            message_id = await self._notify(
+                text=texts.iconed(texts.ICON_QUESTION, question), task_id=task.task_id
+            )
         except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
             logger.warning("Вопрос о прошедшем деле %s не ушёл: %s", task.task_id, error)
             return False
@@ -796,7 +807,8 @@ class ReminderService:
             return False
         try:
             message_id = await self._notify(
-                text=asks.question_text(task, now, timezone), task_id=task.task_id
+                text=texts.iconed(texts.ICON_QUESTION, asks.question_text(task, now, timezone)),
+                task_id=task.task_id,
             )
         except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
             logger.warning("Вопрос о задаче %s не ушёл: %s", task.task_id, error)
@@ -841,7 +853,7 @@ class ReminderService:
         вышло — строка в журнал и, возможно, повтор: дубль лучше потери.
         """
         try:
-            await self._announce(text=self._moved_text(task, now))
+            await self._announce(text=texts.iconed(texts.ICON_EDIT, self._moved_text(task, now)))
         except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет тик
             logger.warning("Строка о переносе задачи %s не ушла: %s", task.id, error)
             return False
@@ -913,7 +925,11 @@ class ReminderService:
         return True
 
     def _text_for(self, reminder: DueReminder, now: datetime) -> str:
-        """Текст напоминания: суть и срок в поясе владельца (§6.2, §21.3)."""
+        """Текст напоминания: суть и срок в поясе владельца (§6.2, §21.3).
+
+        Значок — по точности срока (`techspec/29-icons.md` §29.1): о деле с
+        часом — 📅, о деле на день и часть дня — 🔔 (`reminder_icon`).
+        """
         timezone = self._settings.owner_timezone
         due = None
         overdue = False
@@ -923,7 +939,10 @@ class ReminderService:
             due = texts.format_due_moment(local, precision, now.astimezone(timezone))
             # «Срок был» — о сроке, а не об опоздании самого напоминания.
             overdue = past_due(reminder.due_at, precision, now, timezone)
-        return texts.reminder(title=reminder.title, due=due, overdue=overdue)
+        return texts.iconed(
+            reminder_icon(reminder.due_precision),
+            texts.reminder(title=reminder.title, due=due, overdue=overdue),
+        )
 
     async def tick_quietly(self) -> None:
         """Тик, который не роняет бота: любая ошибка — строка в лог (§6.2)."""

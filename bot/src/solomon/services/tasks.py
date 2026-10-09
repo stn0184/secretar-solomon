@@ -69,7 +69,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -163,12 +163,21 @@ NAME_FACTS_LIMIT = 200
 # проверяет callback «Записать отдельно» с номером дела (§23.5).
 MAX_ITEMS = edits.ITEM_LIMIT
 
+# Виды записи под значком 💡 (`techspec/29-icons.md` §29.1); дело — ✅.
+IDEA_KINDS = ("idea", "wish")
+
 
 def summarize(text: str) -> str:
     """Пересказ поручения для ответа: длинное обрезается, целое уже в базе."""
     if len(text) <= SUMMARY_LIMIT:
         return text
     return text[:SUMMARY_LIMIT] + "…"
+
+
+def as_is_reply(text: str) -> str:
+    """«Записал как есть» при отказе модели (`techspec/05-ai.md` §5.4): задача
+    есть, а разбора нет — значок «не получилось» (`techspec/29-icons.md`)."""
+    return texts.iconed(texts.ICON_TROUBLE, texts.RECORDED_AS_IS.format(text=summarize(text)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -864,7 +873,9 @@ class Edited:
     суть правленой задачи для накладки с сутью. `unclear` — итог и есть
     вопрос неясной правки; `asks` — итог кончается вопросом о прошедшем
     часе (§12.8). `stays` — срок задачи после правки, если она остаётся в
-    работе: с ним сравниваются новые дела того же сообщения.
+    работе: с ним сравниваются новые дела того же сообщения. `icon` —
+    значок итога (`techspec/29-icons.md` §29.1): правка — ✏️, «ничего не
+    менял» — ⚠️; вопрос меняет значок на ❓ сам (`message_icon`).
     """
 
     edit: dict[str, Any]
@@ -875,11 +886,16 @@ class Edited:
     unclear: bool = False
     asks: bool = False
     stays: tuple[datetime | None, str | None] | None = None
+    icon: str = texts.ICON_EDIT
 
     @property
     def reply(self) -> str:
-        """Ответ об одном деле — как был: итог и абзац накладки (§12.5, §15.5)."""
-        return paragraphs(self.head, texts.same_time(self.clash) if self.clash else None)
+        """Ответ об одном деле — как был: итог и абзац накладки (§12.5, §15.5),
+        со значком впереди (§29.2)."""
+        return texts.iconed(
+            message_icon(self.icon, asks=self.unclear or self.asks),
+            paragraphs(self.head, texts.same_time(self.clash) if self.clash else None),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -907,10 +923,12 @@ class _Top:
     `exclude` — задача ответа или правки: в накладку с базой она не входит,
     а её срок после правки (`minute`) сравнивается с новыми делами.
     `first` — верхние поля, когда они новое дело номер 1 (или дубль);
-    `unfound` — перенос ненайденной задачи, тоже дело номер 1.
+    `unfound` — перенос ненайденной задачи, тоже дело номер 1. `icon` —
+    значок итога `head` (`techspec/29-icons.md` §29.1).
     """
 
     head: str | None = None
+    icon: str | None = None
     title: str = ""
     clash: tuple[str, ...] = ()
     question: str | None = None
@@ -971,6 +989,28 @@ def fact_rows(understanding: Understanding) -> list[dict[str, Any]]:
         {"category": item.category, "text": item.text, "status": status}
         for item in understanding.facts
     ]
+
+
+def record_icon(kinds: Iterable[str]) -> str:
+    """Значок записи (`techspec/29-icons.md` §29.2): только идеи и желания —
+    💡; есть среди записанного дело — ✅: дело ждёт действия, оно главнее."""
+    listed = list(kinds)
+    if listed and all(kind in IDEA_KINDS for kind in listed):
+        return texts.ICON_IDEA
+    return texts.ICON_RECORDED
+
+
+def message_icon(*parts: str | None, asks: bool = False) -> str | None:
+    """Значок ответа из нескольких абзацев (§29.2): одно сообщение — один значок.
+
+    Ждёт ответа владельца (уточняющий вопрос, «какую задачу», неясная правка,
+    «во сколько?», «На когда перенести?») — ❓; иначе — значок первого
+    абзаца, какой есть. `parts` — значки абзацев по порядку, у отсутствующего
+    абзаца — `None`.
+    """
+    if asks:
+        return texts.ICON_QUESTION
+    return next((icon for icon in parts if icon is not None), None)
 
 
 def paragraphs(*parts: str | None) -> str:
@@ -1196,7 +1236,7 @@ class TaskService:
         except DatabaseError as error:
             # Инвариант 4: не отвечаем «Записал», пока база не подтвердила.
             logger.warning("Сообщение не записано: %s", error)
-            return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+            return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
 
         if saved.reply:
             return self._repeated(saved.id, saved.reply)
@@ -1255,7 +1295,7 @@ class TaskService:
             )
         except DatabaseError as error:
             logger.warning("Голосовое не записано: %s", error)
-            return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+            return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
 
         if saved.reply:
             return self._repeated(saved.id, saved.reply)
@@ -1323,7 +1363,7 @@ class TaskService:
             )
         except DatabaseError as error:
             logger.warning("Снимок не записан: %s", error)
-            return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+            return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
 
         if saved.reply:
             return self._repeated(saved.id, saved.reply)
@@ -1348,7 +1388,7 @@ class TaskService:
                 return await self._unrecorded(saved, texts.PHOTO_NOT_UNDERSTOOD, verdict.reason)
             # Подпись — слова человека: как текст при отказе модели (§5.4).
             decision = Decision(
-                reply=texts.RECORDED_AS_IS.format(text=summarize(said)),
+                reply=as_is_reply(said),
                 task=literal_fields(said),
                 reminders=[],
             )
@@ -1365,12 +1405,12 @@ class TaskService:
         if (asked is None or not photo.answers_question) and photo.kind not in TASK_KINDS:
             # Поручения нет — задачи и подсказки тоже. Разбор записывается:
             # вопрос снимается, как любым другим сообщением (§10.3).
-            reply = texts.PHOTO_NO_ERRAND
+            reply = texts.iconed(texts.ICON_TROUBLE, texts.PHOTO_NO_ERRAND)
             if photo.kind == "about_me":
-                reply = texts.PHOTO_ABOUT_ME
+                reply = texts.iconed(texts.ICON_TROUBLE, texts.PHOTO_ABOUT_ME)
             elif photo.kind == SEARCH_KIND:
                 # Снимок поиска не запускает (`techspec/24-search.md` §24.1).
-                reply = texts.SEARCH_TEXT_ONLY
+                reply = texts.iconed(texts.ICON_SEARCH, texts.SEARCH_TEXT_ONLY)
             decision = Decision(reply=reply, task=None, reminders=[])
         else:
             try:
@@ -1379,7 +1419,7 @@ class TaskService:
                 )
             except DatabaseError as error:
                 logger.warning("Расписание не получено, разбор снимка не записан: %s", error)
-                return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+                return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
             if photo.more_tasks and any(
                 part is not None for part in (decision.task, decision.amend, decision.same_task)
             ):
@@ -1467,7 +1507,7 @@ class TaskService:
             # Отказ модели (§5.4): одна задача «как есть» — кто писал и подпись.
             title = batches.as_is_title(lines)
             decision = Decision(
-                reply=texts.RECORDED_AS_IS.format(text=summarize(title)),
+                reply=as_is_reply(title),
                 task=literal_fields(title),
                 reminders=[],
             )
@@ -1488,7 +1528,7 @@ class TaskService:
             )
         except DatabaseError as error:
             logger.warning("Расписание не получено, разбор переписки не записан: %s", error)
-            return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+            return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
         return await self._write(
             saved,
             decision,
@@ -1518,14 +1558,14 @@ class TaskService:
         """
         if (asked is None or not read.answers_question) and read.kind not in TASK_KINDS:
             if read.kind == "about_me":
-                reply = texts.CONVERSATION_ABOUT_ME
+                reply = texts.iconed(texts.ICON_TROUBLE, texts.CONVERSATION_ABOUT_ME)
             elif read.kind == SEARCH_KIND:
                 # Переписка поиска не запускает (`techspec/24-search.md` §24.1).
-                reply = texts.SEARCH_TEXT_ONLY
+                reply = texts.iconed(texts.ICON_SEARCH, texts.SEARCH_TEXT_ONLY)
             elif caption:
                 reply = self._talk_reply(read.reply_hint, fallback=texts.CONVERSATION_NO_ERRAND)
             else:
-                reply = texts.CONVERSATION_NO_ERRAND
+                reply = texts.iconed(texts.ICON_TROUBLE, texts.CONVERSATION_NO_ERRAND)
             return Decision(reply=reply, task=None, reminders=[])
         decision = await self._decide(read, asked, self._clock(), context, telegram_message_id)
         if read.more_tasks and any(
@@ -1699,8 +1739,9 @@ class TaskService:
         подписи, который модель не разобрала. Открытый вопрос остаётся:
         запись без разбора, задачи и поправки база его не снимает (§3.4), и
         повтор, о котором бот просит, дойдёт до модели вместе с вопросом
-        (§10.3).
+        (§10.3). Ответ — со значком «не получилось» (`techspec/29-icons.md`).
         """
+        reply = texts.iconed(texts.ICON_TROUBLE, reply)
         try:
             await self._record_understanding(
                 message_id=saved.id,
@@ -1805,7 +1846,7 @@ class TaskService:
                 # Без плана «Напомню» было бы неправдой, а задача без
                 # напоминаний — тихой потерей: честнее не записать (§11.3).
                 logger.warning("Расписание не получено, разбор не записан: %s", error)
-                return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+                return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
             outcome = await self._write(
                 saved,
                 decision,
@@ -1820,7 +1861,7 @@ class TaskService:
         # Разбора не случилось: записываем буквально и говорим об этом.
         # Срока у такой задачи нет, значит и напоминать не о чем.
         decision = Decision(
-            reply=texts.RECORDED_AS_IS.format(text=summarize(text)),
+            reply=as_is_reply(text),
             task=literal_fields(text),
             reminders=[],
         )
@@ -1904,7 +1945,7 @@ class TaskService:
             # удалили, пока модель думала (§12.3, §15.3): откат целиком,
             # честное «не смог».
             logger.warning("Разбор не записан: %s", error)
-            return RecordOutcome(ok=False, message=texts.NOT_SAVED)
+            return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
 
         if facts:
             logger.info("Записано сведений о владельце: %s", len(facts))
@@ -1990,9 +2031,15 @@ class TaskService:
         top = await self._top(understanding, asked, now, context, telegram_message_id)
         if top.first is None:
             unfound = top.unfound
+            icon = message_icon(
+                top.icon if top.head else None, asks=top.question is not None or top.asks
+            )
             return Decision(
-                reply=paragraphs(
-                    top.head, texts.same_time(top.clash) if top.clash else None, top.question
+                reply=texts.iconed(
+                    icon,
+                    paragraphs(
+                        top.head, texts.same_time(top.clash) if top.clash else None, top.question
+                    ),
                 ),
                 task=unfound.task if unfound is not None else None,
                 reminders=unfound.planned if unfound is not None else [],
@@ -2003,10 +2050,13 @@ class TaskService:
 
         same = self._duplicate_of(understanding, context.tasks)
         if same is not None:
-            reply = texts.duplicate_reply(
-                title=same.title,
-                due=self._due_words(same.due_at, same.due_precision),
-                repeat=rule_words(same.repeat),
+            reply = texts.iconed(
+                texts.ICON_RECORDED,
+                texts.duplicate_reply(
+                    title=same.title,
+                    due=self._due_words(same.due_at, same.due_precision),
+                    repeat=rule_words(same.repeat),
+                ),
             )
             apart = Button(text=texts.APART_BUTTON, data=edits.apart_data(telegram_message_id))
             return Decision(
@@ -2092,6 +2142,8 @@ class TaskService:
                 head = texts.ASK_LATER
         return _Top(
             head=head,
+            # «Понял» и «спрошу через неделю» — ответ записан (§29.1).
+            icon=record_icon([changed.kind]),
             title=changed.title,
             clash=tuple(clash),
             question=question,
@@ -2120,6 +2172,7 @@ class TaskService:
             edited = await self._edit_known(understanding, edit, task, now)
             return _Top(
                 head=None if edited.unclear else edited.head,
+                icon=edited.icon,
                 title=edited.title,
                 clash=edited.clash,
                 question=edited.head if edited.unclear else None,
@@ -2144,12 +2197,14 @@ class TaskService:
             unfound = await self._unfound_task(understanding, edit.due_at, edit.due_precision, now)
             return _Top(
                 head=unfound.line,
+                # «Не нашёл открытой задачи — записал новую» — запись (§29.1).
+                icon=record_icon([understanding.kind]),
                 title=understanding.title,
                 clash=unfound.clash,
                 minute=unfound.minute,
                 unfound=unfound,
             )
-        return _Top(head=texts.NOT_FOUND.format(title=understanding.title))
+        return _Top(head=texts.NOT_FOUND.format(title=understanding.title), icon=texts.ICON_TROUBLE)
 
     async def _decide_several(
         self,
@@ -2278,15 +2333,27 @@ class TaskService:
             len(dups),
             len(beyond),
         )
+        # Один значок на всё сообщение (`techspec/29-icons.md` §29.2): ждёт
+        # ответа — ❓, иначе значок первого абзаца.
+        icon = message_icon(
+            top.icon if top.head else None,
+            record_icon(line.item.kind for line in lines) if lines else None,
+            texts.ICON_RECORDED if dups else None,
+            texts.ICON_SEARCH if search_note else None,
+            asks=asking,
+        )
         return Decision(
-            reply=paragraphs(
-                top.head,
-                record,
-                *(said for _, _, said in dups),
-                *clashes,
-                more,
-                search_note,
-                question,
+            reply=texts.iconed(
+                icon,
+                paragraphs(
+                    top.head,
+                    record,
+                    *(said for _, _, said in dups),
+                    *clashes,
+                    more,
+                    search_note,
+                    question,
+                ),
             ),
             task=first.task if first is not None else None,
             reminders=first.reminders if first is not None else [],
@@ -2387,12 +2454,18 @@ class TaskService:
                 repeat=rule_words(rule.rule),
                 heads=self._heads(understanding),
             )
+            # Открытый вопрос задачи хранится без значка: по тексту бот и
+            # модель узнают его в ответе (`techspec/29-icons.md` §29.2).
             task = {
                 **task_fields(understanding, rule),
                 "needs_review": True,
                 "open_question": question,
             }
-            return Decision(reply=paragraphs(reply, clash), task=task, reminders=planned)
+            return Decision(
+                reply=texts.iconed(texts.ICON_QUESTION, paragraphs(reply, clash)),
+                task=task,
+                reminders=planned,
+            )
 
         return Decision(
             reply=paragraphs(self._reply_for(understanding, planned, now, rule, talk=talk), clash),
@@ -2680,8 +2753,10 @@ class TaskService:
             # активна, и сообщение станет «о ней» (решение 6 плана). Правка
             # что-то назвала — «Так и записано» тем же видом, что «Поправил»,
             # без «Напомню»: напоминания не трогались (§12.8).
+            icon = texts.ICON_EDIT
             if not change.named:
                 reply = texts.NOTHING_TO_CHANGE.format(title=task.title)
+                icon = texts.ICON_TROUBLE
             else:
                 reply = texts.edited_reply(
                     texts.SAME_AS_RECORDED.format(title=task.title),
@@ -2690,7 +2765,13 @@ class TaskService:
                     people=change.people if edit.people is not None else None,
                     repeat=rule_words(change.repeat),
                 )
-            return Edited(edit=edit_row(task, "change"), head=reply, title=task.title, stays=stays)
+            return Edited(
+                edit=edit_row(task, "change"),
+                head=reply,
+                title=task.title,
+                stays=stays,
+                icon=icon,
+            )
         priority = change.priority if "priority" in change.changes else None
         people = change.people if "people" in change.changes else None
         planned: list[Planned] = []
@@ -2954,7 +3035,8 @@ class TaskService:
             self._remind_words(planned, now),
             repeat=rule_words(reopened.repeat),
         )
-        return PressOutcome(message=reply, replace=True)
+        # «Вернул в работу» — правка, значок тот же, что у «Закрыл» (§29.2).
+        return PressOutcome(message=texts.iconed(texts.ICON_EDIT, reply), replace=True)
 
     async def reopen_in_message(self, *, chat_id: int, telegram_message_id: int) -> PressOutcome:
         """«Вернуть» под ответом о нескольких делах (`techspec/23-several-tasks.md`
@@ -3060,7 +3142,7 @@ class TaskService:
             self._remind_words(planned, now),
             repeat=rule_words(returned.repeat),
         )
-        return PressOutcome(message=reply, replace=True)
+        return PressOutcome(message=texts.iconed(texts.ICON_EDIT, reply), replace=True)
 
     def _due_words(self, due_at: datetime | None, precision: str | None) -> str | None:
         """Срок словами в поясе владельца; нет срока — нет и строки."""
@@ -3085,33 +3167,39 @@ class TaskService:
         *,
         talk: bool = False,
     ) -> str:
-        """Ответ человеку по видам. Дословно из модели — причина, текст записи
-        и ответ разговора.
+        """Ответ человеку по видам, со значком (`techspec/29-icons.md`). Дословно
+        из модели — причина, текст записи и ответ разговора.
 
         Строка «Напомню» берётся из того же плана, который уходит в базу
         (§6.4): бот обещает ровно то, что записал, — и ничего сверх того
         (инвариант 4). Сведение о себе подтверждается словами «Запомнил: …»
         (`techspec/08-memory.md` §8.2); предположения из поручения в ответ
         не попадают — они видны в приложении. Разговор своего сообщения
-        (`talk`) отвечает текстом модели (§17.2), у других видов поле не
-        слушается.
+        (`talk`) отвечает текстом модели (§17.2) без значка, у других видов
+        поле не слушается.
         """
         if understanding.kind == "about_me":
             if understanding.facts:
-                return texts.remembered([item.text for item in understanding.facts])
+                said = texts.remembered([item.text for item in understanding.facts])
+                return texts.iconed(texts.ICON_RECORDED, said)
             # Сведение есть, а нового нет — значит, оно уже в памяти (§8.2).
-            return texts.ALREADY_KNOWN
+            return texts.iconed(texts.ICON_RECORDED, texts.ALREADY_KNOWN)
         if understanding.kind not in TASK_KINDS:
-            return self._talk_reply(understanding.reply_hint) if talk else texts.NO_ERRAND
-        return texts.recorded_reply(
-            kind=understanding.kind,
-            title=understanding.title,
-            due=self._due_words(understanding.due_at, understanding.due_precision),
-            review_reason=review_reason(understanding, rule),
-            priority=understanding.priority,
-            remind_at=self._remind_words(planned, now),
-            repeat=rule_words(rule.rule),
-            heads=self._heads(understanding),
+            if talk:
+                return self._talk_reply(understanding.reply_hint)
+            return texts.iconed(texts.ICON_TROUBLE, texts.NO_ERRAND)
+        return texts.iconed(
+            record_icon([understanding.kind]),
+            texts.recorded_reply(
+                kind=understanding.kind,
+                title=understanding.title,
+                due=self._due_words(understanding.due_at, understanding.due_precision),
+                review_reason=review_reason(understanding, rule),
+                priority=understanding.priority,
+                remind_at=self._remind_words(planned, now),
+                repeat=rule_words(rule.rule),
+                heads=self._heads(understanding),
+            ),
         )
 
     @staticmethod
@@ -3129,11 +3217,14 @@ class TaskService:
 
         Разговор ничего не меняет: ответ, который сообщает о сделанном,
         заменяется на `fallback` (инвариант 4). В журнал — только длина.
+
+        Ответ разговора — без значка: бот отвечает как человек; `fallback` —
+        «ничего не записал», со значком «не получилось» (`techspec/29-icons.md`).
         """
         reply = conversation.reply_text(hint)
         if reply is None:
-            return fallback
+            return texts.iconed(texts.ICON_TROUBLE, fallback)
         if conversation.reports_action(reply):
             logger.warning("Ответ разговора говорит о действии — заменён: знаков %s", len(reply))
-            return fallback
+            return texts.iconed(texts.ICON_TROUBLE, fallback)
         return reply

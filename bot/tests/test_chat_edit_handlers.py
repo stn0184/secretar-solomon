@@ -201,7 +201,7 @@ async def test_text_swipe_on_a_reminder_reaches_the_prompt(
     )
 
     assert analyst.swipes == ["Ответ на напоминание о задаче №2"]
-    assert session.texts == ["Закрыл: отправить отчёт."]
+    assert session.texts == ["✏️ Закрыл: отправить отчёт."]
 
 
 async def test_voice_swipe_on_own_message_reaches_the_prompt(
@@ -239,7 +239,7 @@ async def test_candidates_come_with_pick_buttons(
 
     await dispatcher.feed_update(bot, make_update("перенеси на понедельник", update_id=41))
 
-    assert session.texts == ["Какую задачу перенести на понедельник, 5 октября?"]
+    assert session.texts == ["❓ Какую задачу перенести на понедельник, 5 октября?"]
     assert rows(sent_markups(session)[0]) == [
         [("отправить отчёт — 2 окт", f"pick:41:{REPORT_ID}")],
         [("встреча с Ренатой — 2 окт, 17:00", f"pick:41:{MEETING_ID}")],
@@ -290,7 +290,7 @@ async def test_pick_writes_first_and_then_replaces_the_question(
 
     assert store.picks[0][1]["task_id"] == MEETING_ID
     assert [edit.text for edit in session.edits] == [
-        "Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00"
+        "✏️ Перенёс: встреча с Ренатой. Срок: понедельник, 5 октября, 17:00"
     ]
     assert session.edits[0].message_id == 7
     assert session.edits[0].reply_markup is None
@@ -307,7 +307,7 @@ async def test_pick_of_done_leaves_the_back_button(
 
     await dispatcher.feed_update(bot, pick_press(REPORT_ID))
 
-    assert session.edits[0].text == "Закрыл: отправить отчёт."
+    assert session.edits[0].text == "✏️ Закрыл: отправить отчёт."
     assert rows(session.edits[0].reply_markup) == [[("Вернуть", f"reopen:{REPORT_ID}")]]
 
 
@@ -400,7 +400,7 @@ async def test_reopen_writes_first_and_then_says_back_in_work(
 
     assert store.reopens == [(MEETING_ID, MEETING_PLAN)]
     assert [edit.text for edit in session.edits] == [
-        "Вернул в работу: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. "
+        "✏️ Вернул в работу: встреча с Ренатой. Срок: пятница, 2 октября, 17:00. "
         "Напомню: 2 октября в 16:00"
     ]
     assert session.edits[0].reply_markup is None
@@ -512,7 +512,7 @@ async def test_apart_writes_first_and_then_replaces_the_duplicate_answer(
 
     assert len(store.separates) == 1
     assert [edit.text for edit in session.edits] == [
-        "Записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. Напомню: 2 октября в 16:00"
+        "✅ Записал: созвон с Ренатой. Срок: пятница, 2 октября, 17:00. Напомню: 2 октября в 16:00"
         + chr(10) * 2
         + "В это же время у вас: «встреча с Ренатой»."
     ]

@@ -731,10 +731,17 @@ class SearchService:
         return 1
 
     async def _send(self, row: SearchRow, text: str) -> int | None:
-        """Ответом на просьбу; не ушло — `None` и строка в журнал без текста."""
+        """Ответом на просьбу; не ушло — `None` и строка в журнал без текста.
+
+        Ответ поиска и отказ — со значком поиска (`techspec/29-icons.md`
+        §29.1); в базе ответ лежит без него: это данные для прошлого поиска
+        (§24.2), а не оформление.
+        """
         try:
             return await self._reply(
-                chat_id=row.chat_id, reply_to=row.request_message_id, text=text
+                chat_id=row.chat_id,
+                reply_to=row.request_message_id,
+                text=texts.iconed(texts.ICON_SEARCH, text),
             )
         except Exception as error:  # noqa: BLE001 - любой отказ Telegram не роняет поиск
             logger.warning("Сообщение поиска %s не ушло: %s", row.id, type(error).__name__)

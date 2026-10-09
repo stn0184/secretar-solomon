@@ -216,7 +216,9 @@ async def test_tick_asks_the_relayed_consent_with_the_partner_note() -> None:
 
     assert await chat_service(store, sender).tick(QUIET_LATER) == 1
 
-    assert sender.texts == [texts.consent_question("telegram", relay=True)]
+    assert sender.texts == [
+        texts.iconed(texts.ICON_CHAT, texts.consent_question("telegram", relay=True))
+    ]
     _, buttons = sender.sent[0]
     assert [button.data for button in buttons] == ["consent:telegram:yes", "consent:telegram:no"]
     assert store.sources["telegram"]["asked_at"] is not None
@@ -229,9 +231,15 @@ async def test_relayed_consent_answer_keeps_the_note_and_says_where_to_stop() ->
     agreed = await service.answer_consent("telegram", True)
     refused = await service.answer_consent("telegram", False)
 
-    assert agreed.message == texts.consent_answered("telegram", agreed=True, relay=True)
-    assert agreed.message.startswith(texts.consent_question("telegram", relay=True))
-    assert refused.message == texts.consent_answered("telegram", agreed=False, relay=True)
+    assert agreed.message == texts.iconed(
+        texts.ICON_CHAT, texts.consent_answered("telegram", agreed=True, relay=True)
+    )
+    assert agreed.message.startswith(
+        texts.iconed(texts.ICON_CHAT, texts.consent_question("telegram", relay=True))
+    )
+    assert refused.message == texts.iconed(
+        texts.ICON_CHAT, texts.consent_answered("telegram", agreed=False, relay=True)
+    )
     assert "в Partner Assistant" in refused.message
     assert "Автоматизация чатов" not in refused.message
 
@@ -251,7 +259,7 @@ async def test_consent_button_through_telegram_edits_the_relayed_question(
 
     assert store.sources["telegram"]["consented_at"] is not None
     assert [edit.text for edit in session.edits] == [
-        texts.consent_answered("telegram", agreed=True, relay=True)
+        texts.iconed(texts.ICON_CHAT, texts.consent_answered("telegram", agreed=True, relay=True))
     ]
 
 
@@ -311,7 +319,7 @@ async def test_relayed_promise_is_reported_like_a_direct_one() -> None:
     assert await analyzing_service(store, sender=sender).send_reports(QUIET_LATER) == 1
 
     [(text, buttons)] = sender.sent
-    assert text.startswith("Из переписки с Игорем (Telegram) записал:")
+    assert text.startswith("💬 Из переписки с Игорем (Telegram) записал:")
     # Имени пользователя Partner Assistant не передаёт — «Открыть чат» по id
     # (этап 030).
     assert [(button.text, button.url) for button in buttons] == [

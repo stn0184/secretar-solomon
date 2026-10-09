@@ -488,7 +488,7 @@ async def handle_text(
         # Бота запустили без клиента базы — записывать некуда, и молчать о
         # этом нельзя (инвариант 4).
         logger.error("Поручение некуда записать: бот собран без базы")
-        await message.answer(texts.NOT_SAVED)
+        await message.answer(texts.NOT_SAVED_MESSAGE)
         return
 
     outcome = await tasks.record_from_message(
@@ -525,7 +525,7 @@ async def handle_speech(
     """
     if tasks is None:
         logger.error("Голосовое некуда записать: бот собран без базы")
-        await message.answer(texts.NOT_SAVED)
+        await message.answer(texts.NOT_SAVED_MESSAGE)
         return
 
     async def load_audio() -> bytes:
@@ -798,7 +798,7 @@ async def handle_photo(message: Message, bot: Bot, tasks: TaskService | None, ph
     """
     if tasks is None:
         logger.error("Снимок некуда записать: бот собран без базы")
-        await message.answer(texts.NOT_SAVED)
+        await message.answer(texts.NOT_SAVED_MESSAGE)
         return
 
     async def load_image() -> bytes:
@@ -825,13 +825,13 @@ async def handle_refused_image(message: Message) -> None:
         document.mime_type if document is not None else "photo",
         document.file_size if document is not None else None,
     )
-    await message.answer(texts.FILE_REFUSED)
+    await message.answer(texts.iconed(texts.ICON_TROUBLE, texts.FILE_REFUSED))
 
 
 async def handle_not_text(message: Message) -> None:
     """Ни текст, ни речь, ни снимок — вежливый отказ, и ничего не сохраняется."""
     logger.info("Сообщение не текстом, не голосом и не снимком: %s", message.content_type)
-    await message.answer(texts.NOT_TEXT)
+    await message.answer(texts.iconed(texts.ICON_TROUBLE, texts.NOT_TEXT))
 
 
 # --- Личные чаты (`techspec/25-chats.md`) ------------------------------------

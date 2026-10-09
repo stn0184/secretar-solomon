@@ -212,7 +212,7 @@ def three_tasks() -> Any:
 
 
 THREE_TASKS_REPLY = (
-    "Записал:\n"
+    "✅ Записал:\n"
     "1. Позвонить Игорю. Срок: среда, 30 сентября, 10:00. Напомню: 30 сентября в 09:00\n"
     "2. Забрать костюм из химчистки. Срок: пятница, 2 октября\n"
     "3. Идея: подарок к годовщине"
@@ -260,7 +260,7 @@ async def test_one_task_keeps_the_old_answer() -> None:
 
     outcome = await say(service, "купить лампочку")
 
-    assert outcome.message == "Записал: купить лампочку"
+    assert outcome.message == "✅ Записал: купить лампочку"
     assert items_of(understandings) == [1]
 
 
@@ -273,7 +273,7 @@ async def test_one_new_task_beside_small_talk_is_recorded_with_its_number() -> N
 
     outcome = await say(service, "привет! да, и забрать костюм")
 
-    assert outcome.message == "Записал: забрать костюм из химчистки"
+    assert outcome.message == "✅ Записал: забрать костюм из химчистки"
     assert items_of(understandings) == [2]
     assert saved(understandings, "task") is None
 
@@ -288,7 +288,7 @@ async def test_voice_with_several_tasks_answers_with_the_list() -> None:
 
     outcome = await record_voice(service)
 
-    assert outcome.message.startswith("Записал:\n1. Позвонить Игорю")
+    assert outcome.message.startswith("✅ Записал:\n1. Позвонить Игорю")
     assert items_of(understandings) == [1, 2, 3]
 
 
@@ -321,7 +321,8 @@ async def test_two_unclear_tasks_get_one_question_about_the_first() -> None:
     outcome = await say(service, "позвонить и купить подарок")
 
     assert outcome.message == (
-        "Записал:\n1. Позвонить\n2. Купить подарок. Не всё понял — перепроверьте\n\nКому позвонить?"
+        "❓ Записал:\n1. Позвонить\n2. Купить подарок. "
+        "Не всё понял — перепроверьте\n\nКому позвонить?"
     )
     first, second = task_of(understandings, 1), task_of(understandings, 2)
     assert first["open_question"] == "Кому позвонить?"
@@ -358,7 +359,7 @@ async def test_question_of_a_later_task_is_asked_when_the_first_is_clear() -> No
 
     outcome = await say(service, "позвонить Игорю и купить подарок")
 
-    assert outcome.message == "Записал:\n1. Позвонить Игорю\n2. Купить подарок\n\nКому подарок?"
+    assert outcome.message == "❓ Записал:\n1. Позвонить Игорю\n2. Купить подарок\n\nКому подарок?"
     assert task_of(understandings, 2)["open_question"] == "Кому подарок?"
     assert task_of(understandings, 1).get("open_question") is None
 
@@ -372,7 +373,7 @@ async def test_question_of_the_only_new_task_stays_in_its_line() -> None:
 
     outcome = await say(service, "привет! и позвонить")
 
-    assert outcome.message == "Записал: позвонить. Кому позвонить?"
+    assert outcome.message == "❓ Записал: позвонить. Кому позвонить?"
     assert task_of(understandings, 2)["open_question"] == "Кому позвонить?"
 
 
@@ -395,7 +396,7 @@ async def test_duplicate_task_gets_its_paragraph_and_numbered_button() -> None:
 
     outcome = await say(service, "позвонить Игорю и созвон с Ренатой")
 
-    assert paragraphs_of(outcome.message) == ["Записал: позвонить Игорю", MEETING_SAID]
+    assert paragraphs_of(outcome.message) == ["✅ Записал: позвонить Игорю", MEETING_SAID]
     assert outcome.buttons == (Button(text="Записать отдельно", data=f"apart:{MESSAGE_ID}:2"),)
     assert items_of(understandings) == [1]
     assert saved(understandings, "same_task") is None
@@ -411,7 +412,7 @@ async def test_two_duplicates_get_two_buttons_with_their_titles() -> None:
     outcome = await say(service, "позвонить Игорю, созвон с Ренатой, отчёт Петрову")
 
     assert paragraphs_of(outcome.message) == [
-        "Записал: позвонить Игорю",
+        "✅ Записал: позвонить Игорю",
         MEETING_SAID,
         REPORT_SAID,
     ]
@@ -433,7 +434,7 @@ async def test_duplicate_on_top_leaves_the_other_tasks_recorded() -> None:
     outcome = await say(service, "созвон с Ренатой и забрать костюм")
 
     assert paragraphs_of(outcome.message) == [
-        "Записал: забрать костюм из химчистки",
+        "✅ Записал: забрать костюм из химчистки",
         MEETING_SAID,
     ]
     assert outcome.buttons == (Button(text="Записать отдельно", data=f"apart:{MESSAGE_ID}:1"),)
@@ -490,7 +491,7 @@ async def test_edit_and_a_new_task_start_with_the_edit() -> None:
     outcome = await say(service, "перенеси встречу на пять и купи цветы к субботе")
 
     first, second = paragraphs_of(outcome.message)
-    assert first.startswith("Перенёс: встреча с Ренатой. Срок: вторник, 29 сентября, 17:00")
+    assert first.startswith("✏️ Перенёс: встреча с Ренатой. Срок: вторник, 29 сентября, 17:00")
     assert second == "Записал: купить цветы. Срок: суббота, 3 октября"
     assert saved(understandings, "edit")["task_id"] == MEETING_ID
     assert items_of(understandings) == [2]
@@ -541,7 +542,7 @@ async def test_answer_and_a_new_task_amend_the_asked_task_and_record_the_new() -
     outcome = await say(service, "это срочно, и купить цветы")
 
     first, second = paragraphs_of(outcome.message)
-    assert first.startswith("Понял: отправить отчёт")
+    assert first.startswith("✅ Понял: отправить отчёт")
     assert second == "Записал: купить цветы"
     assert saved(understandings, "amend")["task_id"] == REPORT_ID
     assert items_of(understandings) == [2]
@@ -559,7 +560,7 @@ async def test_move_question_beside_new_tasks_names_the_task() -> None:
     outcome = await say(service, "не успел, и купить цветы")
 
     assert paragraphs_of(outcome.message) == [
-        "Записал: купить цветы",
+        "❓ Записал: купить цветы",
         "Отправить отчёт — на когда перенести?",
     ]
     assert saved(understandings, "amend")["question"] == texts.OVERDUE_MOVE_QUESTION
@@ -577,7 +578,7 @@ async def test_candidates_and_a_new_task_record_it_and_ask_with_buttons() -> Non
     outcome = await say(service, "перенеси на понедельник и купить цветы")
 
     assert paragraphs_of(outcome.message) == [
-        "Записал: купить цветы",
+        "❓ Записал: купить цветы",
         "Какую задачу перенести на понедельник, 5 октября?",
     ]
     assert [button.data for button in outcome.buttons] == [
@@ -609,7 +610,7 @@ async def test_database_failure_records_none_of_the_tasks() -> None:
     outcome = await say(service, "завтра в 10 позвонить Игорю, в пятницу забрать костюм")
 
     assert not outcome.ok
-    assert outcome.message == texts.NOT_SAVED
+    assert outcome.message == texts.NOT_SAVED_MESSAGE
 
 
 # ------------------------------------------- кнопки под ответом о делах (§23.5)
@@ -688,13 +689,13 @@ async def test_apart_under_several_tasks_records_only_its_task() -> None:
     outcome = await apart(service, 3)
 
     assert outcome == PressOutcome(
-        message="Записал: отправить отчёт Петрову", replace=False, follow_up=True
+        message="✅ Записал: отправить отчёт Петрову", replace=False, follow_up=True
     )
     [(message_id, task, _, written)] = store.separates
     assert message_id == "9a71"
     assert task["title"] == "отправить отчёт Петрову"
     assert store.separate_items == [3]
-    assert written == f"{TWO_DUPLICATES_REPLY}\n\nЗаписал: отправить отчёт Петрову"
+    assert written == f"{TWO_DUPLICATES_REPLY}\n\n✅ Записал: отправить отчёт Петрову"
     assert store.messages[MESSAGE_ID].task_id is None
 
 
@@ -723,8 +724,8 @@ async def test_two_duplicates_are_recorded_each_by_its_button() -> None:
     ]
     assert store.separate_items == [2, 3]
     assert paragraphs_of(store.messages[MESSAGE_ID].reply or "")[-2:] == [
-        "Записал: созвон с Ренатой",
-        "Записал: отправить отчёт Петрову",
+        "✅ Записал: созвон с Ренатой",
+        "✅ Записал: отправить отчёт Петрову",
     ]
 
 
@@ -751,7 +752,7 @@ async def test_pick_under_several_tasks_answers_with_a_new_message() -> None:
 
     assert outcome.follow_up
     assert not outcome.replace
-    assert outcome.message.startswith("Перенёс: отправить отчёт")
+    assert outcome.message.startswith("✏️ Перенёс: отправить отчёт")
     [(_, _, written)] = store.picks
     assert written == f"{CANDIDATES_REPLY}\n\n{outcome.message}"
 
@@ -780,7 +781,7 @@ async def test_reopen_in_message_returns_the_task_of_the_message() -> None:
     outcome = await service.reopen_in_message(chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID)
 
     assert outcome.follow_up
-    assert outcome.message.startswith("Вернул в работу: встреча с Ренатой")
+    assert outcome.message.startswith("✏️ Вернул в работу: встреча с Ренатой")
     assert [task_id for task_id, _ in store.reopens] == [MEETING_ID]
     assert store.appends == [("9a71", outcome.message)]
     assert store.messages[MESSAGE_ID].reply == f"{DONE_REPLY}\n\n{outcome.message}"
@@ -805,7 +806,7 @@ async def test_reopen_in_message_survives_a_failed_append() -> None:
     outcome = await service.reopen_in_message(chat_id=OWNER_ID, telegram_message_id=MESSAGE_ID)
 
     assert outcome.follow_up
-    assert outcome.message.startswith("Вернул в работу")
+    assert outcome.message.startswith("✏️ Вернул в работу")
 
 
 async def test_back_in_message_of_a_one_off_task_changes_nothing() -> None:
@@ -851,7 +852,7 @@ async def test_press_under_several_tasks_keeps_the_text_and_the_other_buttons(
 
     await dispatcher.feed_update(bot, press)
 
-    assert session.texts == ["Записал: отправить отчёт Петрову"]
+    assert session.texts == ["✅ Записал: отправить отчёт Петрову"]
     assert session.edits == []
     [kept] = session.markups
     assert kept.message_id == 7
@@ -878,7 +879,7 @@ async def test_pick_under_several_tasks_drops_every_pick_button(
     await dispatcher.feed_update(bot, press)
 
     [follow_up] = session.texts
-    assert follow_up.startswith("Перенёс: отправить отчёт")
+    assert follow_up.startswith("✏️ Перенёс: отправить отчёт")
     assert session.edits == []
     [dropped] = session.markups
     assert dropped.reply_markup is None
@@ -900,7 +901,7 @@ async def test_reopen_under_several_tasks_answers_with_a_new_message(
     await dispatcher.feed_update(bot, press)
 
     [follow_up] = session.texts
-    assert follow_up.startswith("Вернул в работу: встреча с Ренатой")
+    assert follow_up.startswith("✏️ Вернул в работу: встреча с Ренатой")
     assert session.edits == []
     assert rows(session.markups[0].reply_markup) == [[APART_TWO]]
     assert store.appends == [("9a71", follow_up)]
@@ -938,6 +939,6 @@ async def test_second_press_under_several_tasks_only_pops_up(
             ),
         )
 
-    assert session.texts == ["Записал: отправить отчёт Петрову"]
+    assert session.texts == ["✅ Записал: отправить отчёт Петрову"]
     assert session.answers == [None, texts.PRESSED_BEFORE]
     assert len(store.separates) == 1

@@ -724,7 +724,7 @@ class InstagramService:
         if not in_window(moment, self._settings.owner_timezone):
             return 0
         try:
-            await self._send(text=texts.INSTAGRAM_REJECTED)
+            await self._send(text=texts.iconed(texts.ICON_TROUBLE, texts.INSTAGRAM_REJECTED))
         except Exception as error:  # noqa: BLE001 - отказ Telegram: следующий тик пришлёт
             logger.warning("Сообщение об отказе ключа Instagram не ушло: %s", type(error).__name__)
             return 0
@@ -740,7 +740,7 @@ class InstagramService:
         if not in_window(moment, self._settings.owner_timezone):
             return 0
         try:
-            await self._send(text=texts.INSTAGRAM_NO_ACCESS)
+            await self._send(text=texts.iconed(texts.ICON_TROUBLE, texts.INSTAGRAM_NO_ACCESS))
         except Exception as error:  # noqa: BLE001 - отказ Telegram: следующий тик пришлёт
             logger.warning("Сообщение о доступе к Direct не ушло: %s", type(error).__name__)
             return 0

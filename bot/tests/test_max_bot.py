@@ -790,7 +790,7 @@ async def test_first_message_to_the_bot_asks_consent_and_keeps_nothing() -> None
     polled = await bot.service.poll()
 
     assert polled.complete and polled.stored == 0
-    assert bot.sender.texts == [texts.consent_question("max")]
+    assert bot.sender.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("max"))]
     assert bot.store.sources["max"]["connection_id"] is None
     assert bot.store.messages == [], "до «Согласен» пересланное не хранится"
 
@@ -801,7 +801,7 @@ async def test_bot_start_by_the_owner_asks_consent_too() -> None:
 
     await bot.service.poll()
 
-    assert bot.sender.texts == [texts.consent_question("max")]
+    assert bot.sender.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("max"))]
 
 
 async def test_after_consent_the_message_is_kept_and_asked_once() -> None:
@@ -815,7 +815,7 @@ async def test_after_consent_the_message_is_kept_and_asked_once() -> None:
 
     assert polled.stored == 1
     assert bot.lines() == [("max:notes", "out", "Вы", "Позвонить Олегу в пятницу")]
-    assert bot.sender.texts == [texts.consent_question("max")]
+    assert bot.sender.texts == [texts.iconed(texts.ICON_CHAT, texts.consent_question("max"))]
 
 
 async def test_stopped_bot_keeps_nothing_until_started_again() -> None:
@@ -1088,7 +1088,7 @@ async def test_forwarded_deal_reaches_the_owner_marked_max() -> None:
 
     [(text, buttons)] = bot.sender.sent
     assert text == (
-        "Из переписки с Игорем (MAX) записал: прислать Игорю расчёт — пятница, 9 октября "
+        "💬 Из переписки с Игорем (MAX) записал: прислать Игорю расчёт — пятница, 9 октября "
         "(вы обещали)"
     )
     assert [button.text for button in buttons] == ["Убрать"], "у MAX «Открыть чат» нет"
@@ -1121,7 +1121,7 @@ async def test_group_deal_is_recorded_and_no_unanswered_reminder_comes() -> None
 
     assert reminded == 0
     assert bot.sender.texts == [
-        "Из переписки с группой «Дача» (MAX) записал: Олег привезёт доски — пятница, "
+        "💬 Из переписки с группой «Дача» (MAX) записал: Олег привезёт доски — пятница, "
         "9 октября (обещали вам)"
     ]
     [(_, prompt)] = call.calls
@@ -1159,7 +1159,7 @@ async def test_note_deal_is_reported_as_from_your_notes() -> None:
     await analyzing_service(bot.store, sender=bot.sender).send_reports(QUIET_LATER)
 
     assert bot.sender.texts == [
-        "Из ваших заметок в MAX записал: позвонить Олегу — пятница, 9 октября (вы обещали)"
+        "💬 Из ваших заметок в MAX записал: позвонить Олегу — пятница, 9 октября (вы обещали)"
     ]
     [(_, prompt)] = call.calls
     assert prompt.startswith("Заметки владельца самому себе в MAX.")
