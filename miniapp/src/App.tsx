@@ -5,6 +5,7 @@ import { type FactsState, FactList } from "./components/FactList.tsx";
 import { SpheresTab } from "./components/SpheresTab.tsx";
 import { type ListState, type ListView, TaskList } from "./components/TaskList.tsx";
 import { TaskCard } from "./components/TaskCard.tsx";
+import { ThemeSettings } from "./components/ThemeSettings.tsx";
 import { type Tab, Tabs } from "./components/Tabs.tsx";
 import { TodayTab } from "./components/TodayTab.tsx";
 import { WeekTab } from "./components/WeekTab.tsx";
@@ -22,6 +23,7 @@ import {
   initTelegram,
   onColorScheme,
   showBackButton,
+  showSettingsButton,
 } from "./lib/telegram.ts";
 import {
   type ThemeChoice,
@@ -29,6 +31,7 @@ import {
   cacheChoice,
   loadTheme,
   readCachedChoice,
+  saveTheme,
   skinOf,
 } from "./lib/theme.ts";
 
@@ -81,9 +84,23 @@ export default function App() {
   // Оформление: выбор владельца и схема Telegram; тема на экране — из обоих.
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>(readCachedChoice);
   const [scheme, setScheme] = useState<ColorScheme>(getColorScheme);
+  // «Оформление» открыто поверх текущего экрана; идёт ли запись выбора и отказ.
+  const [settings, setSettings] = useState(false);
+  const [themeBusy, setThemeBusy] = useState(false);
+  const [themeError, setThemeError] = useState<string | null>(null);
 
   // Telegram — внешняя система: ей говорят, что приложение готово.
   useEffect(() => initTelegram(), []);
+
+  // Вход в «Оформление» — пункт «Настройки» в меню ⋯ Telegram (`design.md` §1).
+  useEffect(
+    () =>
+      showSettingsButton(() => {
+        setThemeError(null);
+        setSettings(true);
+      }),
+    [],
+  );
 
   // Схема Telegram сменилась (ночной режим) — «Как в Telegram» следует за ней сразу.
   useEffect(() => onColorScheme(setScheme), []);
@@ -166,10 +183,15 @@ export default function App() {
 
   /**
    * «Назад» — одно на три входа: кнопка Telegram, своя «‹» и «Отмена».
-   * Из формы с несохранённым — сначала «Бросить правку?»; без него —
-   * сразу в карточку. Из карточки — в список.
+   * Из «Оформления» — к экрану под ним. Из формы с несохранённым — сначала
+   * «Бросить правку?»; без него — сразу в карточку. Из карточки — в список,
+   * из «О себе» — в «Сферы».
    */
   const back = useCallback(() => {
+    if (settings) {
+      setSettings(false);
+      return;
+    }
     if (editing) {
       if (dirty.current) {
         void confirmDiscard().then((discard) => {
@@ -188,18 +210,43 @@ export default function App() {
     } else {
       setAbout(false);
     }
-  }, [editing, card, closeEdit]);
+  }, [settings, editing, card, closeEdit]);
 
   const reportDirty = useCallback((value: boolean) => {
     dirty.current = value;
   }, []);
 
-  // В карточке, форме и «О себе» видна кнопка «назад» Telegram; на корневых экранах её нет.
-  const nested = card !== null || about;
+  // В карточке, форме, «О себе» и «Оформлении» видна кнопка «назад» Telegram;
+  // на корневых экранах её нет.
+  const nested = card !== null || about || settings;
   useEffect(() => {
     window.scrollTo(0, 0);
     return nested ? showBackButton(back) : undefined;
-  }, [nested, tab, editing, back]);
+  }, [nested, tab, editing, settings, back]);
+
+  /**
+   * Выбор в «Оформлении»: вид меняется сразу, а сохранённым выбор считается,
+   * когда его записала база (инвариант 4). Отказ — текстом, и выбор
+   * возвращается к прежнему: иначе после перезапуска вид сменился бы сам.
+   */
+  async function chooseTheme(choice: ThemeChoice) {
+    if ("error" in boot || choice === themeChoice) {
+      return;
+    }
+    const previous = themeChoice;
+    setThemeChoice(choice);
+    setThemeError(null);
+    setThemeBusy(true);
+    const result = await saveTheme(boot.db, choice);
+    setThemeBusy(false);
+    if (result.ok) {
+      setThemeChoice(result.choice);
+      cacheChoice(result.choice);
+    } else {
+      setThemeChoice(previous);
+      setThemeError(result.message);
+    }
+  }
 
   function open(task: Task) {
     setNow(new Date());
@@ -322,10 +369,10 @@ export default function App() {
     return result;
   }
 
-  if (card !== null && "db" in boot) {
-    return (
-      <>
-        <Backdrop />
+  /** Экран под «Оформлением»: карточка, «О себе» или корневой с вкладками. */
+  function screen() {
+    if (card !== null && "db" in boot) {
+      return (
         <TaskCard
           db={boot.db}
           task={card}
@@ -339,14 +386,10 @@ export default function App() {
           onSaved={saved}
           onDirty={reportDirty}
         />
-      </>
-    );
-  }
-
-  if (about) {
-    return (
-      <>
-        <Backdrop />
+      );
+    }
+    if (about) {
+      return (
         <FactList
           state={facts}
           now={now}
@@ -356,29 +399,48 @@ export default function App() {
           onConfirm={confirm}
           onRemove={remove}
         />
+      );
+    }
+    return (
+      <>
+        {tab === "today" ? <TodayTab now={now} onClose={closeApp} /> : null}
+        {tab === "week" ? <WeekTab now={now} onClose={closeApp} /> : null}
+        {tab === "spheres" ? <SpheresTab onClose={closeApp} onOpenAbout={openAbout} /> : null}
+        {tab === "tasks" ? (
+          <TaskList
+            state={list}
+            view={view}
+            now={now}
+            doneId={justDone}
+            onView={setView}
+            onOpen={open}
+            onReload={reload}
+            onClose={closeApp}
+          />
+        ) : null}
+        <Tabs active={tab} onChange={switchTab} />
       </>
     );
   }
 
+  // «Оформление» встаёт поверх, а экран под ним остаётся смонтированным и
+  // скрытым: форма правки, открытая под ним, не теряет введённое.
   return (
     <>
       <Backdrop />
-      {tab === "today" ? <TodayTab now={now} onClose={closeApp} /> : null}
-      {tab === "week" ? <WeekTab now={now} onClose={closeApp} /> : null}
-      {tab === "spheres" ? <SpheresTab onClose={closeApp} onOpenAbout={openAbout} /> : null}
-      {tab === "tasks" ? (
-        <TaskList
-          state={list}
-          view={view}
-          now={now}
-          doneId={justDone}
-          onView={setView}
-          onOpen={open}
-          onReload={reload}
-          onClose={closeApp}
+      <div className="layer" hidden={settings}>
+        {screen()}
+      </div>
+      {settings ? (
+        <ThemeSettings
+          choice={themeChoice}
+          scheme={scheme}
+          busy={themeBusy}
+          error={themeError}
+          onChoose={(choice) => void chooseTheme(choice)}
+          onBack={back}
         />
       ) : null}
-      <Tabs active={tab} onChange={switchTab} />
     </>
   );
 }

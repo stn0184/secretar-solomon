@@ -1539,3 +1539,151 @@ button {
   width: 6px;
   background: var(--c);
 }
+
+/* ─── «Оформление» ──────────────────────────────────────────────────── */
+/* Артборд 06: три варианта с превью; превью нарисованы цветами своих тем,
+   а не текущей, — так видно, что выбираешь. */
+
+.opts {
+  display: flex;
+  flex-direction: column;
+}
+
+.opt {
+  position: relative;
+  display: grid;
+  grid-template-columns: 46px 1fr 22px;
+  gap: 14px;
+  align-items: center;
+  padding: var(--s3) var(--s4);
+  cursor: pointer;
+}
+
+.opt + .opt {
+  border-top: 1px solid var(--line);
+}
+
+/* сам radio не виден: кнопкой служит вся строка, отметка — свой кружок */
+.opt input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.opt__b {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.opt__t {
+  font: var(--t-row);
+  color: var(--ink);
+}
+
+.opt__m {
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.radio {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink-3);
+}
+
+.opt input:checked ~ .radio {
+  border: 6px solid var(--acc);
+}
+
+.opt input:focus-visible ~ .radio {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
+
+.pv {
+  width: 46px;
+  height: 62px;
+  border-radius: 10px;
+  padding: 7px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.35);
+}
+
+.pv i {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+}
+
+.pv i:nth-child(1) {
+  width: 70%;
+  height: 8px;
+}
+
+.pv i:nth-child(3) {
+  width: 60%;
+}
+
+.pv i:nth-child(4) {
+  width: 80%;
+}
+
+.pv--bank {
+  background: #050505;
+}
+
+.pv--bank i:nth-child(1) {
+  background: #d9b76e;
+}
+
+.pv--bank i:nth-child(2) {
+  background: #7ea6ff;
+}
+
+.pv--bank i:nth-child(3) {
+  background: #4cc79a;
+}
+
+.pv--bank i:nth-child(4) {
+  background: #ef8a8a;
+}
+
+.pv--quiet {
+  background: #f6f3ee;
+}
+
+.pv--quiet i:nth-child(1) {
+  background: #1e1c19;
+}
+
+.pv--quiet i:nth-child(2) {
+  background: #4d6cb3;
+}
+
+.pv--quiet i:nth-child(3) {
+  background: #b4644b;
+}
+
+.pv--quiet i:nth-child(4) {
+  background: #b98a2e;
+}
+
+.pv--auto {
+  background: linear-gradient(135deg, #f6f3ee 50%, #050505 50%);
+}
+
+.pv--auto i {
+  display: none;
+}
+
+.note b {
+  font-weight: 500;
+  color: var(--ink);
+}
