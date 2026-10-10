@@ -12,7 +12,7 @@ import { type WeekState, WeekTab } from "./components/WeekTab.tsx";
 import { type Fact, aboutFacts, confirmFact, loadFacts, removeFact } from "./lib/facts.ts";
 import { loadToday, loadWeek } from "./lib/hours.ts";
 import { createSession, readSupabaseEnv } from "./lib/session.ts";
-import { loadSpheres, sphereOf } from "./lib/spheres.ts";
+import { loadSpheres } from "./lib/spheres.ts";
 import { type ActionResult, type Db, createDb } from "./lib/supabase.ts";
 import { type Task, loadActiveTasks } from "./lib/tasks.ts";
 import {
@@ -465,11 +465,7 @@ export default function App() {
   // «Сферы» знают о сферах то же, что «Дела»: они читаются вместе.
   const spheresState: SpheresState =
     list.kind === "ready" ? { kind: "ready", spheres: list.spheres } : list;
-  const unsphered =
-    list.kind === "ready"
-      ? list.tasks.filter((task) => sphereOf(task.sphereId, list.spheres) === null).length
-      : 0;
-  // «О себе» — записи без сферы; знания сфер покажет их карточка (035).
+  // «О себе» — записи без сферы; знания сфер — в их карточках на «Сферах».
   const aboutState: FactsState =
     facts.kind === "ready" ? { kind: "ready", facts: aboutFacts(facts.facts) } : facts;
 
@@ -529,9 +525,11 @@ export default function App() {
         {tab === "spheres" ? (
           <SpheresTab
             state={spheresState}
-            unsphered={unsphered}
-            facts={aboutState.kind === "ready" ? aboutState.facts.length : null}
+            tasks={list.kind === "ready" ? list.tasks : []}
+            facts={facts.kind === "ready" ? facts.facts : null}
+            week={week}
             onReload={reload}
+            onReloadWeek={reloadWeek}
             onClose={closeApp}
             onOpenAbout={openAbout}
           />

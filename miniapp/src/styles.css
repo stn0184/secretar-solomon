@@ -1562,6 +1562,14 @@ button {
   font-size: 16px;
 }
 
+.sph--plain .sph__h {
+  font-size: 16px;
+}
+
+.sph__h + .chev {
+  margin-left: 0;
+}
+
 :root[data-skin="bank"] .sph--plain {
   background: #141414;
   box-shadow: inset 0 0 0 1px var(--line);
