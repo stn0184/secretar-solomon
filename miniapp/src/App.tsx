@@ -153,7 +153,7 @@ export default function App() {
     };
   }, [boot, reloadKey]);
 
-  // Память читается при первом открытии вкладки и по «Обновить».
+  // Память читается при первом открытии «Сфер» или «О себе» и по «Обновить».
   useEffect(() => {
     if ("error" in boot || factsKey === 0) {
       return;

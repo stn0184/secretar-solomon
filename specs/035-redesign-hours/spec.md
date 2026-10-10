@@ -3,16 +3,16 @@
 **Статус:** запланировано
 **Размер:** L
 **Зависит от:** 034
-**Прототип:** одобрен prototype/000-redesign
+**Прототип:** одобрен prototype/archive/000-redesign
 **Читать:** `techspec/32-redesign.md` §32.3, §32.4 · `techspec/31-hours.md`
 целиком · `techspec/30-spheres.md` §30.1, §30.4 · `design.md` §1–§3 ·
-`prototype/000-redesign/README.md` · `techspec/03-schema.md` §3.3, §3.12,
+`prototype/archive/000-redesign/README.md` · `techspec/03-schema.md` §3.3, §3.12,
 §3.13, §3.17 · `techspec/04-access.md` §4.2 · `techspec/02-layout.md` §2.3
 **Код:** `bot/src/solomon/services/hours.py` (логика, которая переезжает в
 базу) · `bot/tests/test_hours.py` · `supabase/migrations/20261010100000_hours.sql`
 (образец) · `miniapp/src/App.tsx` · `miniapp/src/lib/` ·
-`miniapp/src/components/` · образцы вида: `prototype/000-redesign/*-01-today.dc.html`,
-`*-02-week.dc.html`, `*-03-spheres.dc.html`, `prototype/000-redesign/styles.css`
+`miniapp/src/components/` · образцы вида: `prototype/archive/000-redesign/*-01-today.dc.html`,
+`*-02-week.dc.html`, `*-03-spheres.dc.html`, `prototype/archive/000-redesign/styles.css`
 · новые: `supabase/tests/sphere_hours.test.ts`, `miniapp/src/lib/hours.ts`
 
 ## Проблема
@@ -90,5 +90,7 @@
 
 - `techspec/31-hours.md` §31.4 — счёт в базе; `techspec/32-redesign.md`
   §32.3 — по итогам; `techspec/03-schema.md` — функции.
-- `design.md` §3 — «будет» → «есть»; `prototype/000-redesign` — в архив
-  при закрытии (строка в `prototype/archive/README.md`).
+- `design.md` §3 — «будет» → «есть». Прототип уже в
+  `prototype/archive/000-redesign` со строкой в `prototype/archive/README.md`:
+  его перенесло закрытие 034 — ворота требуют архива при сдаче первого
+  этапа с этим прототипом.
