@@ -41,6 +41,8 @@ export interface Fact {
   status: FactStatus;
   createdAt: Date;
   source: FactSource | null;
+  /** Знание о сфере (§8.6); `null` — запись о самом владельце. */
+  sphereId: string | null;
 }
 
 /** Порядок категорий на экране — фиксированный (одобренный прототип 006). */
@@ -73,7 +75,7 @@ export type FactsResult = { ok: true; facts: Fact[] } | { ok: false; message: st
 // своим именем: `kind` — это вид самого сообщения (текст, снимок, голосовое,
 // кружок).
 const COLUMNS =
-  "id, category, text, status, created_at, " +
+  "id, category, text, status, created_at, sphere_id, " +
   "source:messages(text, received_at, kind, duration_seconds, photo_text, " +
   "analysis_kind:analysis->>kind)";
 
@@ -101,7 +103,17 @@ export function parseFact(row: unknown): Fact | null {
     status: oneOf<FactStatus>(r.status, ["fact", "guess"], "guess"),
     createdAt: dateOrNull(r.created_at) ?? new Date(0),
     source: parseSource(r.source),
+    sphereId: typeof r.sphere_id === "string" ? r.sphere_id : null,
   };
+}
+
+/**
+ * Записи экрана «О себе» — без сферы (`techspec/32-redesign.md` §32.2): он
+ * открывается из карточки «Без сферы и о себе» на «Сферах»; знания о сфере
+ * показывает карточка самой сферы.
+ */
+export function aboutFacts(facts: readonly Fact[]): Fact[] {
+  return facts.filter((fact) => fact.sphereId === null);
 }
 
 /* ------------------------------------------------------------ группировка */

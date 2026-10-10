@@ -10,6 +10,7 @@ import { describe, it } from "node:test";
 import {
   type Fact,
   CATEGORY_ORDER,
+  aboutFacts,
   factsSubtitle,
   groupFacts,
   isOwnWords,
@@ -25,9 +26,30 @@ function fact(overrides: Partial<Fact> = {}): Fact {
     status: "fact",
     createdAt: new Date(2026, 8, 12, 9, 0),
     source: null,
+    sphereId: null,
     ...overrides,
   };
 }
+
+describe("aboutFacts", () => {
+  it("«О себе» — записи без сферы; знания сфер покажет их карточка", () => {
+    const facts = [
+      fact({ id: "me", sphereId: null }),
+      fact({ id: "vf", sphereId: "s1" }),
+      fact({ id: "car", sphereId: null }),
+    ];
+    assert.deepEqual(
+      aboutFacts(facts).map((f) => f.id),
+      ["me", "car"],
+    );
+  });
+
+  it("сфера записи читается из строки; нет — без сферы", () => {
+    const row = { id: "f1", category: "work", text: "Продаём подписку", status: "fact", created_at: "2026-09-12T09:00:00Z" };
+    assert.equal(parseFact({ ...row, sphere_id: "s1" })?.sphereId, "s1");
+    assert.equal(parseFact(row)?.sphereId, null);
+  });
+});
 
 describe("parseFact", () => {
   it("строка с вложенным источником — запись с текстом, датой и видом сообщения", () => {

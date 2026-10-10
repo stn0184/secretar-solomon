@@ -20,6 +20,8 @@ import {
   sphereColor,
   sphereOf,
   sphereName,
+  spheresEyebrow,
+  unspheredMeta,
 } from "./spheres.ts";
 import type { Db } from "./supabase.ts";
 
@@ -118,6 +120,26 @@ describe("цвет и название", () => {
     assert.equal(sphereOf(null, spheres), null);
     assert.equal(sphereName(null), "Без сферы");
     assert.equal(sphereName(spheres[0]!), "VoiceFin");
+  });
+});
+
+describe("«Без сферы и о себе»", () => {
+  it("подпись: сколько дел без сферы и записей о вас", () => {
+    assert.equal(unspheredMeta(1, 6), "1 дело · 6 записей о вас");
+    assert.equal(unspheredMeta(3, 1), "3 дела · 1 запись о вас");
+    assert.equal(unspheredMeta(5, 0), "5 дел");
+    assert.equal(unspheredMeta(0, 2), "2 записи о вас");
+  });
+
+  it("записи ещё не прочитаны — только дела; ничего нет — пусто", () => {
+    assert.equal(unspheredMeta(2, null), "2 дела");
+    assert.equal(unspheredMeta(0, null), "");
+    assert.equal(unspheredMeta(0, 0), "");
+  });
+
+  it("надзаголовок «Сфер»: сколько из двенадцати", () => {
+    assert.equal(spheresEyebrow(4), "4 из 12");
+    assert.equal(spheresEyebrow(12), "12 из 12");
   });
 });
 

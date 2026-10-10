@@ -14,6 +14,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { plural } from "./format.ts";
 import { recordOf } from "./parse.ts";
 import { type Db, failed, query } from "./supabase.ts";
 
@@ -64,6 +65,23 @@ export function sphereOf(id: string | null, spheres: readonly Sphere[]): Sphere 
 /** Название для строки и карточки. */
 export function sphereName(sphere: Sphere | null): string {
   return sphere ? sphere.name : "Без сферы";
+}
+
+/** Надзаголовок «Сфер»: «4 из 12» — сколько заведено из возможных (§30.1). */
+export function spheresEyebrow(count: number): string {
+  return `${count} из ${PALETTE}`;
+}
+
+/**
+ * Подпись карточки «Без сферы и о себе»: «1 дело · 6 записей о вас». Записи
+ * ещё не прочитаны (`null`) — только дела; пустая часть не называется.
+ */
+export function unspheredMeta(tasks: number, facts: number | null): string {
+  const parts = [
+    tasks > 0 ? `${tasks} ${plural(tasks, "дело", "дела", "дел")}` : "",
+    facts ? `${facts} ${plural(facts, "запись", "записи", "записей")} о вас` : "",
+  ];
+  return parts.filter(Boolean).join(" · ");
 }
 
 const CONSONANT = /[бвгджзклмнпрстфхцчшщbcdfghjklmnpqrstvwxz]/i;

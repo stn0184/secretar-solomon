@@ -1392,25 +1392,64 @@ button {
 }
 
 /* ─── «О себе»: запись памяти ───────────────────────────────────────── */
-/* Строка записи — та же .row, что у задачи: суть + подпись, без полоски
-   приоритета. Вместо «›» (переход) — шеврон вниз (раскрытие на месте). */
+/* Строка записи: текст и подпись источника, метка «Предположение»; вместо
+   «›» (переход) — шеврон вниз: запись раскрывается на месте. */
 
 .fact + .fact {
   border-top: 1px solid var(--line);
 }
 
-.row--fact {
-  padding-left: var(--s4);
+.row {
+  appearance: none;
+  border: 0;
+  background: none;
+  width: 100%;
+  margin: 0;
+  text-align: left;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: 11px 14px 11px var(--s4);
+  color: var(--ink);
+  cursor: pointer;
 }
 
-.row__src {
+.row:active {
+  background: var(--surface-2);
+}
+
+.row__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.row__title {
+  font: var(--t-row);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.row__chev {
+  flex: none;
   color: var(--ink-3);
 }
 
 .row__chev--down {
   display: flex;
   align-items: center;
-  height: 21px;
+  height: 20px;
 }
 
 .row__chev--down svg {
@@ -1436,14 +1475,6 @@ button {
   padding: 0 var(--s4) var(--s3);
 }
 
-.source--inline {
-  padding: 0;
-}
-
-.source--inline .source__top {
-  color: var(--ink-3);
-}
-
 .source__box--guess {
   border-left-color: var(--c-guess);
 }
@@ -1456,10 +1487,9 @@ button {
 }
 
 .btn--sm {
-  min-height: 36px;
+  min-height: 38px;
   padding: 0 var(--s4);
-  border-radius: 10px;
-  font: 600 14px/18px var(--font-ui);
+  font-size: 14px;
 }
 
 /* ─── Сферы: карточка сферы ─────────────────────────────────────────── */

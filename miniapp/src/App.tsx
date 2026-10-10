@@ -2,16 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Backdrop } from "./components/Backdrop.tsx";
 import { type FactsState, FactList } from "./components/FactList.tsx";
-import { SpheresTab } from "./components/SpheresTab.tsx";
+import { type SpheresState, SpheresTab } from "./components/SpheresTab.tsx";
 import { type ListState, type ListView, TaskList } from "./components/TaskList.tsx";
 import { TaskCard } from "./components/TaskCard.tsx";
 import { ThemeSettings } from "./components/ThemeSettings.tsx";
 import { type Tab, Tabs } from "./components/Tabs.tsx";
 import { TodayTab } from "./components/TodayTab.tsx";
 import { WeekTab } from "./components/WeekTab.tsx";
-import { type Fact, confirmFact, loadFacts, removeFact } from "./lib/facts.ts";
+import { type Fact, aboutFacts, confirmFact, loadFacts, removeFact } from "./lib/facts.ts";
 import { createSession, readSupabaseEnv } from "./lib/session.ts";
-import { loadSpheres } from "./lib/spheres.ts";
+import { loadSpheres, sphereOf } from "./lib/spheres.ts";
 import { type ActionResult, type Db, createDb } from "./lib/supabase.ts";
 import { type Task, loadActiveTasks } from "./lib/tasks.ts";
 import {
@@ -369,6 +369,17 @@ export default function App() {
     return result;
   }
 
+  // «Сферы» знают о сферах то же, что «Дела»: они читаются вместе.
+  const spheresState: SpheresState =
+    list.kind === "ready" ? { kind: "ready", spheres: list.spheres } : list;
+  const unsphered =
+    list.kind === "ready"
+      ? list.tasks.filter((task) => sphereOf(task.sphereId, list.spheres) === null).length
+      : 0;
+  // «О себе» — записи без сферы; знания сфер покажет их карточка (035).
+  const aboutState: FactsState =
+    facts.kind === "ready" ? { kind: "ready", facts: aboutFacts(facts.facts) } : facts;
+
   /** Экран под «Оформлением»: карточка, «О себе» или корневой с вкладками. */
   function screen() {
     if (card !== null && "db" in boot) {
@@ -391,7 +402,7 @@ export default function App() {
     if (about) {
       return (
         <FactList
-          state={facts}
+          state={aboutState}
           now={now}
           onBack={back}
           onReload={reloadFacts}
@@ -405,7 +416,16 @@ export default function App() {
       <>
         {tab === "today" ? <TodayTab now={now} onClose={closeApp} /> : null}
         {tab === "week" ? <WeekTab now={now} onClose={closeApp} /> : null}
-        {tab === "spheres" ? <SpheresTab onClose={closeApp} onOpenAbout={openAbout} /> : null}
+        {tab === "spheres" ? (
+          <SpheresTab
+            state={spheresState}
+            unsphered={unsphered}
+            facts={aboutState.kind === "ready" ? aboutState.facts.length : null}
+            onReload={reload}
+            onClose={closeApp}
+            onOpenAbout={openAbout}
+          />
+        ) : null}
         {tab === "tasks" ? (
           <TaskList
             state={list}
