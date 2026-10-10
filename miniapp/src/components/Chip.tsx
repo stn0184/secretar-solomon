@@ -6,7 +6,8 @@ import type { Task } from "../lib/tasks.ts";
 /**
  * Пилюля-метка: приоритет, чьё обещание, вид записи, «перепроверьте».
  * Цвет говорит о смысле (`design.md` §1): жёлтый — важно, фиолетовый —
- * предположение помощника, синий — моё обещание.
+ * предположение помощника, синий — моё обещание; «Обещали мне» и вид —
+ * спокойной подложкой. Тон подобран под тему.
  */
 export type ChipTone = "high" | "mine" | "theirs" | "review" | "kind";
 
@@ -51,11 +52,11 @@ export function GuessChip({ fact }: { fact: Fact }) {
 
 const KIND_LABEL: Record<Task["kind"], string | null> = {
   task: null,
-  idea: "Идея",
-  wish: "Желание",
+  idea: "💡 Идея",
+  wish: "💡 Желание",
 };
 
-/** Вид записи: задача метки не получает, она по умолчанию. */
+/** Вид записи: задача метки не получает, она по умолчанию; 💡 — как в чате (§29.1). */
 export function KindChip({ task }: { task: Task }) {
   const label = KIND_LABEL[task.kind];
   return label ? <Chip tone="kind">{label}</Chip> : null;

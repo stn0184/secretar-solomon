@@ -1,70 +1,79 @@
-import { formatDue, formatRecorded } from "../lib/format.ts";
+import type { CSSProperties } from "react";
+
+import { formatDue } from "../lib/format.ts";
 import { repeatShort } from "../lib/repeat.ts";
-import { type GroupKey, type Task, isOverdue } from "../lib/tasks.ts";
+import { type Sphere, sphereColor, sphereName } from "../lib/spheres.ts";
+import { type Task, dueLine, isOverdue } from "../lib/tasks.ts";
 import { KindChip, PriorityChip, PromiseChip, ReviewChip } from "./Chip.tsx";
+import { SphereMark } from "./SphereMark.tsx";
 
 /**
- * Строка списка: полоска приоритета слева, суть, срок словами и метки.
- * Вся строка — кнопка: касание открывает карточку.
+ * Строка дела (`techspec/32-redesign.md` §32.2, артборд 04): отметка сферы,
+ * суть, «сфера · срок» со значком из чата, метки вторым рядом и «›». Вся
+ * строка — кнопка: касание открывает карточку. Кружка «Сделано» нет —
+ * «Сделано» только в карточке.
  *
- * У повторяющейся задачи за сроком — «↻» и правило коротко, подписью, а
- * не меткой. `justDone` — её только что отметили в карточке: под строкой
- * срок, который вернула база, до следующего чтения списка.
+ * У повторяющегося дела за сроком — «↻» и правило коротко, подписью, а не
+ * меткой. `justDone` — его только что отметили в карточке: под строкой срок,
+ * который вернула база, до следующего чтения списка.
  */
 export function TaskRow({
   task,
-  group,
+  sphere,
   now,
   justDone,
   onOpen,
 }: {
   task: Task;
-  group: GroupKey;
+  sphere: Sphere | null;
   now: Date;
   justDone: boolean;
   onOpen: (task: Task) => void;
 }) {
-  const overdue = isOverdue(task, now);
-  const markClass = overdue
-    ? "row__mark row__mark--overdue"
-    : task.priority === "high"
-      ? "row__mark row__mark--high"
-      : "row__mark";
-  const whenClass = overdue
-    ? "row__when row__when--overdue"
-    : group === "today"
-      ? "row__when row__when--today"
-      : "row__when";
+  const due = dueLine(task, now);
+  const chips =
+    task.kind !== "task" || task.priority === "high" || task.promise !== null || task.needsReview;
 
   return (
-    <button type="button" className="row" onClick={() => onOpen(task)}>
-      <span className={markClass} aria-hidden="true" />
-      <span className="row__body">
-        <span className="row__title">{task.title}</span>
-        <span className="row__meta">
-          <KindChip task={task} />
-          <span className={whenClass}>
-            {task.dueAt
-              ? formatDue(task.dueAt, task.duePrecision, now)
-              : formatRecorded(task.createdAt)}
-          </span>
+    <button
+      type="button"
+      className="task"
+      style={{ "--c": sphereColor(sphere) } as CSSProperties}
+      onClick={() => onOpen(task)}
+    >
+      <SphereMark sphere={sphere} />
+      <span className="task__b">
+        <span className="task__t">{task.title}</span>
+        <span className="task__m">
+          <span>{sphereName(sphere)}</span>
+          {due ? (
+            <span className={isOverdue(task, now) ? "task__due task__late" : "task__due"}>
+              {due.icon ? <i aria-hidden="true">{due.icon}</i> : null}
+              {due.text}
+            </span>
+          ) : null}
           {task.repeat ? (
-            <span className="row__rep">
+            <span className="task__rep">
               <i aria-hidden="true">↻</i>
               {repeatShort(task.repeat)}
             </span>
           ) : null}
-          <PriorityChip task={task} compact />
-          <PromiseChip task={task} compact />
-          <ReviewChip task={task} />
         </span>
+        {chips ? (
+          <span className="task__m">
+            <KindChip task={task} />
+            <PriorityChip task={task} compact />
+            <PromiseChip task={task} compact />
+            <ReviewChip task={task} />
+          </span>
+        ) : null}
         {justDone && task.dueAt ? (
-          <span className="row__next">
-            ✓ Сделано. Следующий раз: {formatDue(task.dueAt, task.duePrecision, now)}
+          <span className="task__next">
+            ✓ Сделано. Следующий раз: {formatDue(task.dueAt, task.duePrecision, now, task.duration)}
           </span>
         ) : null}
       </span>
-      <span className="row__chev" aria-hidden="true">
+      <span className="chev" aria-hidden="true">
         ›
       </span>
     </button>

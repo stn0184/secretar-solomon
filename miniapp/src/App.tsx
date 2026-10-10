@@ -3,13 +3,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Backdrop } from "./components/Backdrop.tsx";
 import { type FactsState, FactList } from "./components/FactList.tsx";
 import { SpheresTab } from "./components/SpheresTab.tsx";
-import { type ListState, TaskList } from "./components/TaskList.tsx";
+import { type ListState, type ListView, TaskList } from "./components/TaskList.tsx";
 import { TaskCard } from "./components/TaskCard.tsx";
 import { type Tab, Tabs } from "./components/Tabs.tsx";
 import { TodayTab } from "./components/TodayTab.tsx";
 import { WeekTab } from "./components/WeekTab.tsx";
 import { type Fact, confirmFact, loadFacts, removeFact } from "./lib/facts.ts";
 import { createSession, readSupabaseEnv } from "./lib/session.ts";
+import { loadSpheres } from "./lib/spheres.ts";
 import { type ActionResult, type Db, createDb } from "./lib/supabase.ts";
 import { type Task, loadActiveTasks } from "./lib/tasks.ts";
 import {
@@ -69,6 +70,8 @@ export default function App() {
   const [facts, setFacts] = useState<FactsState>(() =>
     "error" in boot ? { kind: "failed", message: boot.error } : { kind: "idle" },
   );
+  // «Дела» по сроку или по сферам — на время открытого приложения.
+  const [view, setView] = useState<ListView>("due");
   const [reloadKey, setReloadKey] = useState(0);
   const [factsKey, setFactsKey] = useState(0);
   // Повторяющаяся задача, которую только что отметили: строка «✓ Сделано»
@@ -107,24 +110,26 @@ export default function App() {
     };
   }, [boot]);
 
-  // Список читается при старте и по «Обновить»; «загрузка» ставится там,
-  // где нажали, а не в эффекте.
+  // Дела и сферы читаются вместе при старте и по «Обновить»: строке дела
+  // нужны название и цвет сферы. «Загрузка» ставится там, где нажали.
   useEffect(() => {
     if ("error" in boot) {
       return;
     }
     let cancelled = false;
-    void loadActiveTasks(boot.db).then((result) => {
+    void Promise.all([loadActiveTasks(boot.db), loadSpheres(boot.db)]).then(([tasks, spheres]) => {
       if (cancelled) {
         return;
       }
       setNow(new Date());
       setJustDone(null);
-      setList(
-        result.ok
-          ? { kind: "ready", tasks: result.tasks, more: result.more }
-          : { kind: "failed", message: result.message },
-      );
+      if (!tasks.ok) {
+        setList({ kind: "failed", message: tasks.message });
+      } else if (!spheres.ok) {
+        setList({ kind: "failed", message: spheres.message });
+      } else {
+        setList({ kind: "ready", tasks: tasks.tasks, more: tasks.more, spheres: spheres.spheres });
+      }
     });
     return () => {
       cancelled = true;
@@ -363,8 +368,10 @@ export default function App() {
       {tab === "tasks" ? (
         <TaskList
           state={list}
+          view={view}
           now={now}
           doneId={justDone}
+          onView={setView}
           onOpen={open}
           onReload={reload}
           onClose={closeApp}

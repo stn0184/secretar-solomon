@@ -13,6 +13,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { NO_REPEAT, type Repeat } from "./repeat.ts";
 import type { Session } from "./session.ts";
+import type { Sphere } from "./spheres.ts";
 import type { Db } from "./supabase.ts";
 import {
   type Task,
@@ -21,8 +22,10 @@ import {
   completeTask,
   draftOf,
   dueHint,
+  dueLine,
   editTask,
   formatDuration,
+  groupBySphere,
   groupOf,
   groupTasks,
   isOverdue,
@@ -61,6 +64,8 @@ function task(overrides: Partial<Task> = {}): Task {
     openQuestion: null,
     repeat: null,
     occurrenceAt: null,
+    sphereId: null,
+    duration: null,
     ...overrides,
   };
 }
@@ -214,6 +219,103 @@ describe("parseTask", () => {
     const parsed = parseTask({ ...row, repeat: { every: "week", interval: 1, weekdays: [] } });
     assert.ok(parsed);
     assert.equal(parsed.repeat, null);
+  });
+
+  it("сфера и длительность встречи (§30, §31.1); нет — пусто", () => {
+    const parsed = parseTask({ ...row, sphere_id: "s1", duration: 120 });
+    assert.equal(parsed?.sphereId, "s1");
+    assert.equal(parsed?.duration, 120);
+    const plain = parseTask(row);
+    assert.equal(plain?.sphereId, null);
+    assert.equal(plain?.duration, null);
+    assert.equal(parseTask({ ...row, duration: "много" })?.duration, null);
+    assert.equal(parseTask({ ...row, duration: 0 })?.duration, null);
+  });
+});
+
+/* ------------------------------------------------ «Дела»: по сферам и строка */
+
+describe("groupBySphere", () => {
+  const spheres: Sphere[] = [
+    { id: "vf", name: "VoiceFin", place: 1 },
+    { id: "rv", name: "РЕЙВА", place: 2 },
+  ];
+
+  it("группы в порядке мест, «Без сферы» — последней, пустых нет", () => {
+    const groups = groupBySphere(
+      [
+        task({ id: "1", sphereId: null }),
+        task({ id: "2", sphereId: "rv" }),
+        task({ id: "3", sphereId: "vf" }),
+      ],
+      spheres,
+      now,
+    );
+    assert.deepEqual(
+      groups.map((g) => [g.key, g.title, g.tasks.map((t) => t.id)]),
+      [
+        ["vf", "VoiceFin", ["3"]],
+        ["rv", "РЕЙВА", ["2"]],
+        ["none", "Без сферы", ["1"]],
+      ],
+    );
+  });
+
+  it("внутри сферы — по группам срока, дальше как пришло из базы", () => {
+    const groups = groupBySphere(
+      [
+        task({ id: "idea", sphereId: "vf", kind: "idea" }),
+        task({ id: "later", sphereId: "vf", dueAt: new Date(2026, 10, 20), duePrecision: "day" }),
+        task({ id: "late", sphereId: "vf", dueAt: new Date(2026, 8, 28), duePrecision: "day" }),
+        task({ id: "today-1", sphereId: "vf", dueAt: new Date(2026, 8, 30, 18), duePrecision: "day" }),
+        task({ id: "today-2", sphereId: "vf", dueAt: new Date(2026, 8, 30, 15), duePrecision: "time" }),
+      ],
+      spheres,
+      now,
+    );
+    assert.deepEqual(
+      groups[0]?.tasks.map((t) => t.id),
+      ["late", "today-1", "today-2", "later", "idea"],
+    );
+  });
+
+  it("сфера убрана или не прочиталась — дело уходит в «Без сферы»", () => {
+    const groups = groupBySphere([task({ id: "x", sphereId: "gone" })], spheres, now);
+    assert.deepEqual(
+      groups.map((g) => g.key),
+      ["none"],
+    );
+  });
+});
+
+describe("dueLine", () => {
+  it("срок с часом — 📅, у встречи с концом", () => {
+    assert.deepEqual(
+      dueLine(task({ dueAt: new Date(2026, 8, 30, 19, 0), duePrecision: "time", duration: 90 }), now),
+      { icon: "📅", text: "сегодня, 19:00–20:30" },
+    );
+  });
+
+  it("день и часть дня — 🔔 (§29.1)", () => {
+    assert.deepEqual(
+      dueLine(task({ dueAt: new Date(2026, 9, 2, 18, 0), duePrecision: "day" }), now),
+      { icon: "🔔", text: "пятница, 2 октября" },
+    );
+    assert.deepEqual(
+      dueLine(task({ dueAt: new Date(2026, 8, 30, 8, 0), duePrecision: "morning" }), now),
+      { icon: "🔔", text: "сегодня утром" },
+    );
+  });
+
+  it("у идеи и желания значка нет — о них не напоминают", () => {
+    assert.deepEqual(
+      dueLine(task({ kind: "idea", dueAt: new Date(2026, 9, 2, 18, 0), duePrecision: "day" }), now),
+      { icon: null, text: "пятница, 2 октября" },
+    );
+  });
+
+  it("без срока — строки срока нет", () => {
+    assert.equal(dueLine(task(), now), null);
   });
 });
 
@@ -385,6 +487,7 @@ function draft(overrides: Partial<TaskDraft> = {}): TaskDraft {
     promise: "none",
     people: "",
     repeat: NO_REPEAT,
+    sphereId: null,
     ...overrides,
   };
 }
@@ -410,7 +513,12 @@ describe("draftOf", () => {
       promise: "mine",
       people: "Кузнецов, Анна",
       repeat: NO_REPEAT,
+      sphereId: null,
     });
+  });
+
+  it("сфера — как записана", () => {
+    assert.equal(draftOf(task({ sphereId: "s2" })).sphereId, "s2");
   });
 
   it("срок с часом — час в поле", () => {
@@ -458,6 +566,14 @@ describe("taskChanges", () => {
   it("ничего не меняли — пусто", () => {
     assert.deepEqual(taskChanges(friday, draftOf(friday)), {});
     assert.deepEqual(taskChanges(task(), draftOf(task())), {});
+  });
+
+  it("сфера (§32.2): сменили — ключ sphere_id, сняли — null, та же — не правка", () => {
+    const inRv = task({ sphereId: "rv" });
+    assert.deepEqual(taskChanges(inRv, { ...draftOf(inRv), sphereId: "vf" }), { sphere_id: "vf" });
+    assert.deepEqual(taskChanges(inRv, { ...draftOf(inRv), sphereId: null }), { sphere_id: null });
+    assert.deepEqual(taskChanges(task(), { ...draftOf(task()), sphereId: "vf" }), { sphere_id: "vf" });
+    assert.deepEqual(taskChanges(inRv, draftOf(inRv)), {});
   });
 
   it("суть — без пробелов по краям; те же слова с пробелами — не правка", () => {

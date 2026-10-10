@@ -264,7 +264,7 @@ button {
   /* высота видимой части — от Telegram, вне его — окно браузера */
   min-height: var(--tg-viewport-stable-height, 100vh);
   margin: 0 auto;
-  padding: var(--s2) var(--s4) calc(var(--s4) + env(safe-area-inset-bottom));
+  padding: var(--s2) 14px calc(var(--s4) + env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -433,30 +433,28 @@ button {
 }
 
 /* ─── Группы и строки списка ────────────────────────────────────────── */
+/* Артборд 04: группа — заголовок капителью и число справа, ниже карточка со
+   строками. Строка — отметка сферы, суть, «сфера · срок», метки, «›». */
 
 .sec {
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
 .sec__h {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  gap: var(--s2);
   margin: 0;
-  padding: 0 var(--s1);
+  padding: 10px var(--s2) 9px;
   font: var(--t-cap);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink-3);
-}
-
-.sec__h--overdue {
-  color: var(--c-late);
+  color: var(--ink-2);
 }
 
 .sec__h em {
+  margin-left: auto;
   font: var(--t-sub);
   font-style: normal;
   letter-spacing: 0;
@@ -466,119 +464,140 @@ button {
 
 .card {
   background: var(--surface);
+  border: var(--card-border);
+  box-shadow: var(--shadow);
   border-radius: var(--r-card);
   overflow: hidden;
 }
 
-.row {
+.task {
   appearance: none;
   border: 0;
   background: none;
   width: 100%;
+  margin: 0;
   text-align: left;
-  display: flex;
-  gap: var(--s3);
-  align-items: flex-start;
-  padding: 9px var(--s4) 9px var(--s3);
+  display: grid;
+  grid-template-columns: var(--mark-col) 1fr 14px;
+  gap: 12px;
+  align-items: start;
+  padding: 11px 14px;
+  color: var(--ink);
   cursor: pointer;
 }
 
-.row:active {
-  background: var(--surface-2);
-}
-
-.row + .row {
+.task + .task {
   border-top: 1px solid var(--line);
 }
 
-.row__mark {
-  flex: none;
-  width: 4px;
-  align-self: stretch;
-  border-radius: 2px;
-  background: transparent;
+.task:active {
+  background: var(--surface-2);
 }
 
-.row__mark--high {
-  background: var(--c-high);
-}
-
-.row__mark--overdue {
-  background: var(--c-late);
-}
-
-.row__body {
-  flex: 1;
-  min-width: 0;
+.task__b {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--s1);
+  min-width: 0;
 }
 
-.row__title {
-  font: var(--t-body);
-  letter-spacing: -0.005em;
+.task__t {
+  font: var(--t-row);
   color: var(--ink);
   overflow-wrap: anywhere;
 }
 
-.row__meta {
+.task__m {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 6px;
+  gap: 4px 8px;
   font: var(--t-sub);
   color: var(--ink-2);
 }
 
-.row__when--overdue {
+.task__due,
+.task__rep {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s1);
+}
+
+.task__due i,
+.task__rep i {
+  font-style: normal;
+}
+
+.task__rep {
+  white-space: nowrap;
+}
+
+.task__rep i {
+  color: var(--ink-3);
+}
+
+/* просрочено — цветом необратимого, словами срока */
+.task__late {
   color: var(--c-late);
   font-weight: 500;
 }
 
-.row__when--today {
-  color: var(--ink);
-  font-weight: 500;
-}
-
-.row__chev {
-  flex: none;
-  color: var(--ink-3);
-  font: 400 17px/21px var(--font-ui);
-}
-
-/* Список: правило коротко сразу за сроком — подписью, не меткой:
-   повтор — свойство задачи, а не её состояние, цвета у него нет. */
-.row__rep {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-  color: var(--ink-2);
-  white-space: nowrap;
-}
-
-.row__rep i {
-  font-style: normal;
-  color: var(--ink-3);
-}
-
 /* После «Сделано» в карточке: что вернула база — цветом «ок». */
-.row__next {
+.task__next {
   font: 500 13px/17px var(--font-ui);
   color: var(--ok);
 }
 
+.chev {
+  flex: none;
+  margin-top: 2px;
+  color: var(--ink-3);
+  font: 400 18px/20px var(--font-ui);
+}
+
+/* Отметка сферы: монограмма-«логотип» в «Банк-люксе», полоска в «Тихой роскоши». */
+.mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c);
+}
+
+:root[data-skin="bank"] .mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  color: var(--mark-ink);
+  font: 600 12.5px/1 var(--font-ui);
+  letter-spacing: 0.02em;
+}
+
+:root[data-skin="quiet"] .mark {
+  width: 4px;
+  height: 38px;
+  border-radius: 2px;
+  font-size: 0;
+}
+
+.note {
+  margin: 0;
+  padding: 0 var(--s2);
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
 /* ─── Метки ─────────────────────────────────────────────────────────── */
+/* Пилюли; смысл прежний (design.md §1), тон — у темы. */
 
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 7px;
-  border-radius: 7px;
-  font: var(--t-cap);
+  gap: var(--s1);
+  padding: 2px var(--s2);
+  border-radius: var(--r-pill);
+  font: var(--t-chip);
   white-space: nowrap;
-  background: var(--surface-2);
+  background: var(--c-kind-w);
   color: var(--ink-2);
 }
 
@@ -588,25 +607,13 @@ button {
 }
 
 .chip--mine {
-  background: var(--acc-w);
-  color: var(--acc);
-}
-
-.chip--theirs {
-  background: var(--surface-2);
-  color: var(--ink-2);
-  box-shadow: inset 0 0 0 1px var(--line);
+  background: var(--c-mine-w);
+  color: var(--c-mine);
 }
 
 .chip--review {
   background: var(--c-guess-w);
   color: var(--c-guess);
-}
-
-.chip--kind {
-  background: transparent;
-  color: var(--ink-3);
-  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 /* ─── Карточка: поля, источник, напоминания ─────────────────────────── */
@@ -742,13 +749,6 @@ button {
 
 .rem__state--sent {
   color: var(--ok);
-}
-
-.note {
-  margin: 0;
-  padding: 0 var(--s1);
-  font: var(--t-sub);
-  color: var(--ink-3);
 }
 
 /* ─── Карточка: вопрос бота и вход в форму ──────────────────────────── */
@@ -980,6 +980,42 @@ button {
 .seg__opt input:focus-visible + span {
   outline: 2px solid var(--acc);
   outline-offset: 1px;
+}
+
+/* Переключатель вида экрана — «По сроку / По сферам» (артборд 04). */
+.seg--view {
+  margin: 2px var(--s1) 0;
+  gap: 0;
+  border-radius: 12px;
+  background: var(--seg-bg);
+  box-shadow: none;
+  border: var(--card-border);
+}
+
+.seg--view .seg__opt span {
+  padding: 7px 0;
+  border-radius: 9px;
+  font: 500 13px/16px var(--font-ui);
+}
+
+.seg--view .seg__opt input:checked + span {
+  background: var(--seg-on);
+  color: var(--seg-on-ink);
+  box-shadow: var(--seg-shadow);
+}
+
+/* Много вариантов (сферы в форме) — с переносом, каждый по своей ширине. */
+.seg--wrap {
+  flex-wrap: wrap;
+}
+
+.seg--wrap .seg__opt {
+  flex: 0 1 auto;
+}
+
+.seg--wrap .seg__opt span {
+  padding: 7px 12px;
+  white-space: normal;
 }
 
 /* ─── Форма правки: повтор (прототип 011) ──────────────────────────── */

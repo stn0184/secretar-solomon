@@ -1,35 +1,39 @@
-import { formatDay } from "../lib/format.ts";
-import type { Task, TaskGroup as Group } from "../lib/tasks.ts";
+import { type Sphere, sphereOf } from "../lib/spheres.ts";
+import type { Task } from "../lib/tasks.ts";
 import { TaskRow } from "./TaskRow.tsx";
 
 /**
- * Группа списка: заголовок капителью и карточка со строками.
- * У «Сегодня» рядом с заголовком — какой сегодня день; «Просрочено» — красным.
+ * Группа списка «Дел»: заголовок капителью и число дел справа, ниже —
+ * карточка со строками (артборд 04). Одна и та же для групп срока и сфер.
  */
 export function TaskGroup({
-  group,
+  title,
+  tasks,
+  spheres,
   now,
   doneId,
   onOpen,
 }: {
-  group: Group;
+  title: string;
+  tasks: Task[];
+  spheres: readonly Sphere[];
   now: Date;
-  /** Задача, которую только что отметили «Сделано» и база перевела дальше. */
+  /** Дело, которое только что отметили «Сделано» и база перевела дальше. */
   doneId: string | null;
   onOpen: (task: Task) => void;
 }) {
   return (
     <section className="sec">
-      <h2 className={group.key === "overdue" ? "sec__h sec__h--overdue" : "sec__h"}>
-        <span>{group.title}</span>
-        {group.key === "today" ? <em>{formatDay(now)}</em> : null}
+      <h2 className="sec__h">
+        <span>{title}</span>
+        <em>{tasks.length}</em>
       </h2>
       <div className="card">
-        {group.tasks.map((task) => (
+        {tasks.map((task) => (
           <TaskRow
             key={task.id}
             task={task}
-            group={group.key}
+            sphere={sphereOf(task.sphereId, spheres)}
             now={now}
             justDone={task.id === doneId}
             onOpen={onOpen}

@@ -21,6 +21,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   type DuePrecision,
   dateInputValue,
+  formatDue,
   formatTime,
   isPart,
   isoWithOffset,
@@ -46,6 +47,7 @@ import {
   ruleOf,
   sameChoice,
 } from "./repeat.ts";
+import { type Sphere, sphereName, sphereOf } from "./spheres.ts";
 import { type ActionResult, type Db, failed, query } from "./supabase.ts";
 
 export type { ActionResult } from "./supabase.ts";
@@ -76,6 +78,10 @@ export interface Task {
   repeat: Repeat | null;
   /** Раз по правилу, который задача сейчас представляет; у разовой `null`. */
   occurrenceAt: Date | null;
+  /** Сфера дела (§30); `null` — без сферы. */
+  sphereId: string | null;
+  /** Минуты встречи от срока (§31.1): «14:00–16:00»; у простого дела `null`. */
+  duration: number | null;
 }
 
 /** Уточняющий вопрос бота (§10.4): текст и когда задан; время может не прийти. */
@@ -131,7 +137,8 @@ export type DetailsResult = { ok: true; details: TaskDetails } | { ok: false; me
 
 const COLUMNS =
   "id, title, kind, due_at, due_precision, priority, promise, people, needs_review, " +
-  "open_question, question_asked_at, source_message_id, created_at, repeat, occurrence_at";
+  "open_question, question_asked_at, source_message_id, created_at, repeat, occurrence_at, " +
+  "sphere_id, duration";
 
 /** Строка `tasks` → задача. Не годится (нет id или названия) — `null`. */
 export function parseTask(row: unknown): Task | null {
@@ -161,6 +168,11 @@ export function parseTask(row: unknown): Task | null {
     // Правило не по форме — задача показывается разовой, а не пропадает.
     repeat: parseRepeat(r.repeat),
     occurrenceAt: dateOrNull(r.occurrence_at),
+    sphereId: typeof r.sphere_id === "string" ? r.sphere_id : null,
+    duration:
+      typeof r.duration === "number" && Number.isInteger(r.duration) && r.duration > 0
+        ? r.duration
+        : null,
   };
 }
 
@@ -335,6 +347,61 @@ export function groupTasks(tasks: Task[], now: Date): TaskGroup[] {
     const bucket = buckets.get(key);
     return bucket ? [{ key, title: GROUP_TITLES[key], tasks: bucket }] : [];
   });
+}
+
+/* ------------------------------------------------- «Дела»: по сферам и строка */
+
+export interface SphereGroup {
+  /** id сферы или `none` — без сферы. */
+  key: string;
+  title: string;
+  sphere: Sphere | null;
+  tasks: Task[];
+}
+
+/**
+ * «По сферам» (`techspec/32-redesign.md` §32.2): тот же список, разложенный
+ * по сферам в порядке их мест, «Без сферы» — последней; пустых групп нет.
+ * Внутри сферы — в порядке групп срока (просрочено, сегодня, …, идеи), дальше
+ * как пришло из базы. Сфера убрана или не прочиталась — дело без сферы.
+ */
+export function groupBySphere(tasks: Task[], spheres: readonly Sphere[], now: Date): SphereGroup[] {
+  const rank = (task: Task) => GROUP_ORDER.indexOf(groupOf(task, now));
+  const sorted = tasks
+    .map((task, index) => ({ task, index }))
+    .sort((a, b) => rank(a.task) - rank(b.task) || a.index - b.index)
+    .map((entry) => entry.task);
+
+  const order = [...spheres].sort((a, b) => a.place - b.place);
+  const groups: SphereGroup[] = order.map((sphere) => ({
+    key: sphere.id,
+    title: sphere.name,
+    sphere,
+    tasks: [],
+  }));
+  const none: SphereGroup = { key: "none", title: sphereName(null), sphere: null, tasks: [] };
+  for (const task of sorted) {
+    const sphere = sphereOf(task.sphereId, spheres);
+    const group = sphere ? groups.find((g) => g.key === sphere.id) : undefined;
+    (group ?? none).tasks.push(task);
+  }
+  return [...groups, none].filter((group) => group.tasks.length > 0);
+}
+
+/**
+ * Срок в строке дела: значок как в чате (`techspec/29-icons.md` §29.1) —
+ * 📅 у срока с часом, 🔔 у дня и части дня; у идеи и желания значка нет, о
+ * них не напоминают. Слова — как у бота, у встречи с концом. Без срока — `null`.
+ */
+export function dueLine(task: Task, now: Date): { icon: "📅" | "🔔" | null; text: string } | null {
+  if (!task.dueAt) {
+    return null;
+  }
+  const text = formatDue(task.dueAt, task.duePrecision, now, task.duration);
+  if (task.kind !== "task") {
+    return { icon: null, text };
+  }
+  return { icon: task.duePrecision === "time" ? "📅" : "🔔", text };
 }
 
 /* ------------------------------------------------------------------ база */
@@ -528,6 +595,8 @@ export interface TaskDraft {
   people: string;
   /** Выбор повтора; действует, пока выбран день (`repeatOpen`). */
   repeat: RepeatDraft;
+  /** Сфера дела; `null` — без сферы. */
+  sphereId: string | null;
 }
 
 /** Изменённые поля для `edit_task` — ровно те ключи, что понимает база. */
@@ -543,6 +612,8 @@ export interface TaskChanges {
   people?: string[];
   /** Правило без часа — срок формы станет первым разом; `null` — повтор снят. */
   repeat?: RepeatChange | null;
+  /** Живая сфера владельца; `null` — без сферы (§32.2). */
+  sphere_id?: string | null;
 }
 
 export type EditResult = { ok: true; task: Task } | { ok: false; message: string };
@@ -563,6 +634,7 @@ export function draftOf(task: Task): TaskDraft {
     promise: task.promise ?? "none",
     people: task.people.join(", "),
     repeat: repeatDraftOf(task.repeat),
+    sphereId: task.sphereId,
   };
 }
 
@@ -731,6 +803,9 @@ export function taskChanges(task: Task, draft: TaskDraft): TaskChanges {
   const people = peopleOf(draft.people);
   if (!sameList(people, task.people)) {
     changes.people = people;
+  }
+  if (draft.sphereId !== task.sphereId) {
+    changes.sphere_id = draft.sphereId;
   }
   if (repeatChanged(task, draft)) {
     const choice = repeatOf(draft);
