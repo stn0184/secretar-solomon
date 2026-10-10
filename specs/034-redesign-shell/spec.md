@@ -48,7 +48,7 @@
 
 - [x] `plan.md` первым коммитом: файлы, порядок, как токены `design.md`
   ложатся на CSS-переменные, где живёт выбор темы.
-- [ ] Миграция: `owner_settings.theme` (`auto` · `bank` · `quiet`,
+- [x] Миграция: `owner_settings.theme` (`auto` · `bank` · `quiet`,
   по умолчанию `auto`), правка из приложения под RLS; тест базы; §3.8.
 - [ ] Темы: токены обеих тем, выбор по Telegram при `auto`, смена на
   лету (`themeChanged`); шрифты в сборке; `RollingNumber` и движение с

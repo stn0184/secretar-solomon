@@ -786,24 +786,34 @@ where excluded.status = 'fact' and facts.status = 'guess'` — статус
 
 ### 3.8 `owner_settings` — настройки владельца
 
-Одна строка на владельца. Пока в ней один пояс: `edit_task` (§3.6)
-работает под ролью владельца и окружения бота не видит, а день без часа
-и утро напоминания без пояса не посчитать (§11.3).
+Одна строка на владельца: пояс и оформление приложения. Пояс нужен
+`edit_task` (§3.6): она работает под ролью владельца и окружения бота не
+видит, а день без часа и утро напоминания без пояса не посчитать (§11.3).
 
 | Колонка | Тип | Что это |
 | --- | --- | --- |
 | `owner_telegram_id` | bigint, ключ | владелец (§3.1) |
 | `timezone` | text | имя пояса IANA: `Asia/Yekaterinburg` |
-| `updated_at` | timestamptz, `default now()` | когда бот записал последний раз |
+| `theme` | text, `check in ('auto', 'bank', 'quiet')` (`owner_settings_theme_check`), `default 'auto'` | оформление Mini App (этап 034, §32.1): `auto` — как в Telegram, `bank` — «Банк-люкс», `quiet` — «Тихая роскошь» |
+| `updated_at` | timestamptz, `default now()` | когда бот записал пояс последний раз; тема его не двигает |
 
 Источник правды — `OWNER_TIMEZONE` в `.env` бота; база — его зеркало.
 Пишет его бот при каждом запуске функцией
 `save_owner_timezone(owner_telegram_id bigint, timezone text) returns
 owner_settings` (только `service_role`): незнакомое имя пояса — отказ
-самой базы, запись — upsert по ключу. Не записалось — строка в журнале,
-бот работает дальше. RLS — §4.2, та же политика `for all to
-authenticated`; приложение таблицу не читает, пояс берёт `edit_task`.
-Миграция 009.
+самой базы, запись — upsert по ключу, тему не трогает. Не записалось —
+строка в журнале, бот работает дальше. RLS — §4.2, та же политика `for all
+to authenticated`; пояс берёт `edit_task`. Миграция 009.
+
+Тему (миграция 034, `20261011100000_theme.sql`) приложение читает своей
+строкой (`select theme`) и пишет функцией `save_theme(theme text) returns
+owner_settings`: `security invoker`, владелец из клейма `telegram_id`,
+явный фильтр сверх RLS; строки нет или клейма нет — `null`, ничего не
+записано; незнакомое значение — отказ ограничения. Только `authenticated`
+(`anon`, `public`, `service_role` — `revoke`). Права `authenticated` на
+таблицу — `select` и `update (theme)`: пояс приложение не переписывает,
+строк не заводит и не удаляет (`insert`, `update`, `delete` у `anon` и
+`authenticated` забраны).
 
 ### 3.9 `morning_plans` — утренние планы
 

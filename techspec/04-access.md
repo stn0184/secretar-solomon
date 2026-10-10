@@ -47,7 +47,10 @@ create policy "<t>: owner only"
 - Таблица без RLS в `public` — баг уровня безопасности (инвариант 2),
   а не недоделка.
 - `owner_settings` (§3.8) — та же политика: ключ таблицы и есть
-  `owner_telegram_id`.
+  `owner_telegram_id`. С этапа 034 приложение пишет в ней тему —
+  функцией `save_theme`, а права `authenticated` на таблицу сужены до
+  `select` и `update (theme)`: пояс — зеркало `.env` бота, приложение его
+  не переписывает.
 - `searches` (§3.10) — та же политика; приложение таблицу не читает,
   поиски пишет и читает только бот функциями `service_role`.
 - `chat_sources`, `chat_threads`, `chat_messages`, `chat_analyses`
