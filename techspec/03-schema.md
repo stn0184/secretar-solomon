@@ -1004,7 +1004,10 @@ chat_key)`; `chat_threads_waiting_check` — время, фраза и «ком�
 текст пуст. Индексы: `(thread_id, sent_at)` — под куски разбора;
 частичный `(owner_telegram_id, created_at) where erased_at is null` — под
 стирание; `(owner_telegram_id, sent_at)` (`chat_messages_owner_sent_idx`,
-миграция 033) — под сессии переписки в часах по сферам (§31.4).
+миграция 033) — под сессии переписки в часах по сферам (§31.4, §3.18).
+Строка с `sent_at` и `direction` не удаляется и после стирания текста
+сроком — по ней считаются часы недели (§31.4). Приложению таблица
+закрыта с этапа 035 (§3.18, `techspec/04-access.md` §4.2).
 
 ### 3.14 `chat_analyses` — разборы переписки
 
@@ -1181,3 +1184,41 @@ created_at where removed_at is null` по порядку заведения: м�
 знание, сфера чата) и `edit_from_chat` (правка «это по X»), по смыслу —
 `insert_message_task` и `record_chat_analysis` — только находят (§3.4,
 §3.15).
+
+### 3.18 Часы по сферам: `sphere_hours` и `day_spans`
+
+Счёт часов (§31) — в базе, одна функция на бота и приложение (этап 035,
+`techspec/32-redesign.md` §32.3). Миграция `20261011120000_sphere_hours.sql`.
+Таблиц нет: функции считают по `tasks`, `chat_messages`, `chat_threads` и
+`spheres`. Окна собирает тот, кто зовёт: бот — сегодня, вчера и неделю по
+поясу владельца (§31.2), приложение — день и неделю по часам телефона.
+
+- `sphere_hours(window_start, window_end, owner_telegram_id default null)` →
+  `table (sphere_id uuid, name text, meetings integer, chat integer)` —
+  минуты сфер за окно `[start, end)`, правый край не позже `now()`. Встречи —
+  задачи с `duration`, `active` и `done`, отрезок от `due_at`; переписка —
+  сессии. Отрезки сферы объединяются (пересечение — один раз и встречей),
+  разные сферы не вычитаются. Минуты округляются у итога и у встреч,
+  `chat` — разность. Строки — только сферы с минутами: живые по порядку
+  заведения, «без сферы» (`sphere_id` и `name` пусты) — последней; сфера не
+  живая — «без сферы». Запас чтения — сутки до окна; сообщения — до
+  «сейчас», сессия через край окна режется.
+- `day_spans(span_start, span_end, owner_telegram_id default null)` →
+  `table (kind text, starts_at, ends_at, sphere_id uuid, task_id uuid)` —
+  отрезки, задевающие окно, по `starts_at`: `meeting` — встречи, и будущие
+  (`task_id` — дело), `chat` — сессии. Окном не режутся. Текста нет ни в
+  одной колонке.
+- Внутренние: `chat_sessions(owner, since)` — сессии переписки (§31.1: шаг
+  до 10 минут, хвост 2 минуты, без сообщения владельца сессии нет, сфера —
+  нынешняя сфера чата, не живая — пусто); `hours_owner(owner)` — владелец
+  вызова.
+
+Обе внешние — `security definer`, `set search_path = ''`, фильтр по
+владельцу в каждом запросе. Владелец — клейм `telegram_id` токена
+приложения; переданный параметром и другой — отказ. Без клейма — параметр,
+только у бота (`service_role`) и в SQL-редакторе; роль `authenticated` или
+`anon` без клейма и пустой параметр — отказ. Отказ — `42501` («hours: owner
+refused», PostgREST — 403). `execute`: `sphere_hours`, `day_spans` —
+`authenticated` и `service_role`; `chat_sessions`, `hours_owner` — никому,
+их зовут только определители. Индексы — прежние `tasks_meetings_idx` и
+`chat_messages_owner_sent_idx` (§3.3, §3.13).

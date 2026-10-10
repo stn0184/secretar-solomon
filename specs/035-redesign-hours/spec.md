@@ -41,7 +41,7 @@
 
 - [x] `plan.md` первым коммитом: перенос счёта в SQL, проверка
   совпадения с прежним Python, порядок переключения бота.
-- [ ] Миграция: `sphere_hours`, `day_spans` (`security invoker`, RLS,
+- [x] Миграция: `sphere_hours`, `day_spans` (`security invoker`, RLS,
   пояс владельца); тест базы с теми же случаями, что `test_hours.py`; §3.
   Приложению закрывается прямое чтение `chat_messages` (у `authenticated`
   отбирается доступ к таблице), а `sphere_hours` и `day_spans` —

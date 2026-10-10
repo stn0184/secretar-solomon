@@ -8,7 +8,7 @@
 ## Порядок (коммит на задачу спеки)
 
 1. `plan.md` (этот файл), статус «в работе».
-2. База: `supabase/migrations/20261012100000_sphere_hours.sql` —
+2. База: `supabase/migrations/20261011120000_sphere_hours.sql` —
    `hours_owner`, `chat_sessions` (внутренние), `sphere_hours`, `day_spans`,
    права на таблицы переписки; тест `supabase/tests/sphere_hours.test.ts`
    (случаи счёта из `bot/tests/test_hours.py` — один к одному, с теми же

@@ -289,25 +289,33 @@ test("функции чатов под anon и authenticated — отказ в �
   });
 });
 
-test("четыре таблицы под правилом «owner only»: владелец видит своё, anon — ничего", async () => {
+test("четыре таблицы под правилом «owner only»: владелец видит своё согласие, переписку приложение не читает", async () => {
   await withDatabase(async (db) => {
     await consented(db);
     await store(db, { id: "1" });
     await consented(db, "telegram", STRANGER);
     await store(db, { id: "1", owner: STRANGER });
 
-    for (const table of ["chat_sources", "chat_threads", "chat_messages"]) {
-      const seen = await asRole(db, "authenticated", OWNER, async () => {
-        const { rows } = await db.query<{ owner_telegram_id: string | number }>(
-          `select owner_telegram_id from public.${table}`,
-        );
-        return rows.map((row) => Number(row.owner_telegram_id));
-      });
-      assert.deepEqual(seen, [OWNER], table);
-      await asRole(db, "anon", null, async () => {
-        const { rows } = await db.query(`select * from public.${table}`);
-        assert.deepEqual(rows, [], table);
-      });
+    const seen = await asRole(db, "authenticated", OWNER, async () => {
+      const { rows } = await db.query<{ owner_telegram_id: string | number }>(
+        "select owner_telegram_id from public.chat_sources",
+      );
+      return rows.map((row) => Number(row.owner_telegram_id));
+    });
+    assert.deepEqual(seen, [OWNER]);
+    await asRole(db, "anon", null, async () => {
+      const { rows } = await db.query("select * from public.chat_sources");
+      assert.deepEqual(rows, []);
+    });
+    // Этап 035 (`techspec/04-access.md` §4.2): текст переписки приложению
+    // недоступен совсем — права на таблицы с ним забраны, часы и отрезки оно
+    // получает функциями `sphere_hours` и `day_spans`.
+    for (const table of ["chat_threads", "chat_messages", "chat_analyses"]) {
+      for (const role of ["authenticated", "anon"] as const) {
+        await asRole(db, role, OWNER, async () => {
+          await assert.rejects(db.query(`select * from public.${table}`), /permission denied/, `${role}: ${table}`);
+        });
+      }
     }
     const { rows: rls } = await db.query<{ relname: string; relrowsecurity: boolean }>(
       `select relname, relrowsecurity from pg_class
