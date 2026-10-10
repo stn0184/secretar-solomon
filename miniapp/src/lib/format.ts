@@ -93,19 +93,46 @@ export function partLabel(part: PartOfDay): string {
 }
 
 /**
+ * Время встречи: «14:00–16:00» — начало и конец по длительности (§31.1),
+ * без длительности — одно начало. Так же, как у бота (`texts.format_due`).
+ */
+export function formatTimeRange(dueAt: Date, duration: number | null): string {
+  if (!duration) {
+    return formatTime(dueAt);
+  }
+  const end = new Date(dueAt.getTime() + duration * 60 * 1000);
+  return `${formatTime(dueAt)}–${formatTime(end)}`;
+}
+
+/** «2 ч 10 мин», «45 мин», «3 ч» — те же слова, что в ответе бота о часах (§31.2). */
+export function hoursWords(minutes: number): string {
+  const whole = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (whole && rest) {
+    return `${whole} ч ${rest} мин`;
+  }
+  return whole ? `${whole} ч` : `${rest} мин`;
+}
+
+/**
  * Срок словами: день, а со временем — и час, у части дня — её слово.
  *
  * Час показывается только когда человек его назвал: у срока «в пятницу»
  * в базе стоит 18:00 (`techspec/03-schema.md` §3.3), у «утром» — 08:00
  * (§21.2), и произносить его значило бы приписать человеку то, чего он не
  * говорил: «сегодня утром», «пятница, 9 октября, утром». Пустая точность
- * читается как день.
+ * читается как день. У встречи с длительностью — и конец: «14:00–16:00».
  */
-export function formatDue(dueAt: Date, precision: DuePrecision | null, now: Date): string {
+export function formatDue(
+  dueAt: Date,
+  precision: DuePrecision | null,
+  now: Date,
+  duration: number | null = null,
+): string {
   const today = sameDay(dueAt, now);
   const day = today ? "сегодня" : formatDay(dueAt);
   if (precision === "time") {
-    return `${day}, ${formatTime(dueAt)}`;
+    return `${day}, ${formatTimeRange(dueAt, duration)}`;
   }
   if (isPart(precision)) {
     return `${day}${today ? " " : ", "}${PART_WORDS[precision]}`;
@@ -142,17 +169,32 @@ export function plural(n: number, one: string, few: string, many: string): strin
   return many;
 }
 
-/** «7 активных» — подпись под заголовком списка. */
-export function countActive(n: number): string {
-  return `${n} ${plural(n, "активная", "активные", "активных")}`;
+/** «11 открытых», «1 открытое» — надзаголовок «Дел». */
+export function countOpen(n: number): string {
+  return `${n} ${plural(n, "открытое", "открытых", "открытых")}`;
 }
 
-/** «одна просрочена», «2 просрочены», «5 просрочено». */
+/** «одно просрочено», «2 просрочены», «5 просрочено» — о делах. */
 export function countOverdue(n: number): string {
   if (n === 1) {
-    return "одна просрочена";
+    return "одно просрочено";
   }
-  return `${n} ${plural(n, "просрочена", "просрочены", "просрочено")}`;
+  return `${n} ${plural(n, "просрочено", "просрочены", "просрочено")}`;
+}
+
+/** Понедельник недели, в которую попадает день, — в полночь по часам устройства. */
+export function weekStart(moment: Date): Date {
+  const shift = (moment.getDay() + 6) % 7;
+  return new Date(moment.getFullYear(), moment.getMonth(), moment.getDate() - shift);
+}
+
+/** «5 – 11 октября», на стыке — «28 сентября – 4 октября»: неделя с понедельника. */
+export function formatWeekRange(now: Date): string {
+  const monday = weekStart(now);
+  const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
+  return monday.getMonth() === sunday.getMonth()
+    ? `${monday.getDate()} – ${formatDate(sunday)}`
+    : `${formatDate(monday)} – ${formatDate(sunday)}`;
 }
 
 /* ------------------------------------------------------ поля ввода срока */

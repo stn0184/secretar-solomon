@@ -20,7 +20,7 @@ export type FactsState =
   | { kind: "ready"; facts: Fact[] }
   | { kind: "failed"; message: string };
 
-const HINTS = ["«У меня Toyota Camry»", "«Работаю до шести, по пятницам до пяти»"];
+const EXAMPLES = ["У меня Toyota Camry", "Работаю до шести, по пятницам до пяти"];
 
 /**
  * Экран «О себе»: записи по категориям, у каждой — раскрытие на месте с
@@ -31,6 +31,7 @@ const HINTS = ["«У меня Toyota Camry»", "«Работаю до шести
 export function FactList({
   state,
   now,
+  onBack,
   onReload,
   onClose,
   onConfirm,
@@ -38,6 +39,7 @@ export function FactList({
 }: {
   state: FactsState;
   now: Date;
+  onBack: () => void;
   onReload: () => void;
   onClose: () => void;
   onConfirm: (fact: Fact) => Promise<ActionResult>;
@@ -67,8 +69,13 @@ export function FactList({
   }
 
   return (
-    <main className="screen screen--tabs">
-      <Header title="О себе" subtitle={facts.length > 0 ? factsSubtitle(facts) : undefined} />
+    <main className="screen">
+      <Header
+        title="О себе"
+        eyebrow={facts.length > 0 ? factsSubtitle(facts) : undefined}
+        onBack={onBack}
+        backLabel="Сферы"
+      />
       {state.kind === "idle" || state.kind === "loading" ? (
         <Skeleton label="Загружаем записи" />
       ) : null}
@@ -77,8 +84,8 @@ export function FactList({
         <Empty
           title="Пока ничего о вас не знаю"
           text="Расскажите боту между делом — какая машина, во сколько заканчиваете работу, как зовут детей. Он запомнит и не будет переспрашивать."
-          hints={HINTS}
-          note="Что помощник поймёт из поручений сам, будет помечено как предположение — его можно подтвердить или удалить."
+          examples={EXAMPLES}
+          hint="Что помощник поймёт из поручений сам, будет помечено как предположение — его можно подтвердить или удалить."
           onClose={onClose}
         />
       ) : null}

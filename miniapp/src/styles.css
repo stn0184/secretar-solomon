@@ -386,11 +386,14 @@ button {
 }
 
 /* ─── Шапка экрана ──────────────────────────────────────────────────── */
+/* Надзаголовок над заголовком (design.md §1): капителью в «Банк-люксе»,
+   строчными в «Тихой роскоши». Своя «‹ назад» — только без кнопки Telegram. */
 
-.head {
+.hd {
   display: flex;
   flex-direction: column;
-  padding-top: var(--s2);
+  gap: 2px;
+  padding: var(--s1) var(--s2) var(--s1);
 }
 
 .back {
@@ -414,17 +417,19 @@ button {
   margin-top: -2px;
 }
 
-.page-title {
+.eyebrow {
+  font: var(--t-eyebrow);
+  letter-spacing: var(--eyebrow-ls);
+  text-transform: var(--eyebrow-case);
+  color: var(--ink-2);
+}
+
+.h1 {
   margin: 0;
   font: var(--t-h1);
   letter-spacing: -0.01em;
+  color: var(--ink);
   overflow-wrap: anywhere;
-}
-
-.page-sub {
-  margin: 4px 0 0;
-  font: var(--t-sub);
-  color: var(--ink-2);
 }
 
 /* ─── Группы и строки списка ────────────────────────────────────────── */
@@ -1058,20 +1063,23 @@ button {
 }
 
 /* ─── Кнопки и действия ─────────────────────────────────────────────── */
+/* Пилюля 26 в «Банк-люксе», скругление 14 в «Тихой роскоши»; главная —
+   золотой градиент или олива, «Удалить» — цветом необратимого. */
 
 .btn {
   appearance: none;
-  border: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 44px;
+  min-height: 50px;
   padding: 0 var(--s5);
   border-radius: var(--btn-r);
+  border: var(--card-border);
+  box-shadow: var(--shadow);
   text-align: center;
-  font: 600 15px/20px var(--font-ui);
-  background: var(--acc);
-  color: var(--acc-ink);
+  font: var(--t-btn);
+  background: var(--btn-bg);
+  color: var(--ink);
   cursor: pointer;
 }
 
@@ -1080,27 +1088,30 @@ button {
   cursor: default;
 }
 
+.btn--main {
+  border: 0;
+  background: var(--btn-main);
+  color: var(--acc-ink);
+}
+
 .btn--wide {
   width: 100%;
 }
 
 .btn--ghost {
-  background: var(--surface);
   color: var(--acc);
-  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .btn--danger {
-  background: var(--surface);
   color: var(--c-late);
-  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .actions {
   position: sticky;
+  z-index: 20;
   bottom: 0;
-  margin-top: auto;
-  padding: var(--s3) 0 calc(var(--s2) + env(safe-area-inset-bottom));
+  margin: auto calc(var(--s4) * -1) 0;
+  padding: 10px var(--s4) calc(var(--s4) + env(safe-area-inset-bottom));
   background: var(--bg);
   display: flex;
   flex-direction: column;
@@ -1114,6 +1125,11 @@ button {
 
 .actions__row .btn {
   flex: 1;
+  padding: 0 var(--s3);
+}
+
+.actions__row .btn--main {
+  flex: 1.4;
 }
 
 .actions__error {
@@ -1131,8 +1147,7 @@ button {
 }
 
 .skeleton__row {
-  height: 56px;
-  background: var(--surface);
+  height: 60px;
   position: relative;
   overflow: hidden;
 }
@@ -1144,81 +1159,87 @@ button {
 .skeleton__row::after {
   content: "";
   position: absolute;
-  left: var(--s3);
-  top: 14px;
+  left: var(--s4);
+  top: 15px;
   width: 62%;
   height: 12px;
   border-radius: 6px;
-  background: var(--surface-2);
-  box-shadow: 0 18px 0 -2px var(--surface-2);
+  background: var(--track);
+  box-shadow: 0 18px 0 -2px var(--track);
 }
 
+/* Пусто (design.md §2): заголовок, абзац, два примера пузырями, подсказка
+   и кнопка в чат — слева, как на артбордах 07–10. */
 .empty {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: var(--s3);
-  padding: 15vh var(--s2) 0;
+  gap: 14px;
+  padding: var(--s2) var(--s2) 0;
 }
 
-.empty__mark {
-  width: 64px;
-  height: 64px;
-  margin-bottom: var(--s1);
-  border-radius: 20px;
-  background: var(--surface);
-  box-shadow: inset 0 0 0 1px var(--line);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.empty__mark i {
-  display: block;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--r-pill);
-  border: 2px dashed var(--ink-3);
-}
-
-.empty__h {
+.empty__t {
   margin: 0;
-  font: 600 19px/24px var(--font-ui);
+  font: var(--t-empty);
   letter-spacing: -0.01em;
   color: var(--ink);
 }
 
 .empty__p {
   margin: 0;
-  max-width: 292px;
-  font: 400 15px/21px var(--font-ui);
+  font: var(--t-body-l);
   color: var(--ink-2);
 }
 
-.hints {
+.empty__ex {
   list-style: none;
-  margin: var(--s1) 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  width: 100%;
+  gap: var(--s2);
 }
 
-.empty__note {
-  margin-top: var(--s1);
-  text-align: center;
-}
-
-.hint {
+.empty__ex li {
+  align-self: flex-start;
+  padding: var(--s2) var(--s3);
+  border-radius: 14px 14px 14px 4px;
   background: var(--surface);
-  border-radius: 10px;
-  padding: 9px var(--s3);
-  text-align: left;
-  font: 400 14px/19px var(--font-ui);
+  border: var(--card-border);
+  box-shadow: var(--shadow);
+  font: var(--t-body);
   color: var(--ink);
-  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.empty__hint {
+  margin: 0;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.cta {
+  margin-top: 6px;
+}
+
+/* Пунктирное место под первую сферу (артборд 09). */
+.blank {
+  margin: 0 0 var(--s1);
+  min-height: 150px;
+  border-radius: var(--r-sph);
+  border: 1.5px dashed var(--blank-line);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s1);
+  text-align: center;
+  padding: var(--s4) 30px;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.blank b {
+  font: var(--t-sph);
+  color: var(--num-acc);
 }
 
 .error {
@@ -1227,32 +1248,35 @@ button {
   gap: var(--s3);
   padding: var(--s4);
   background: var(--surface);
+  border: var(--card-border);
+  box-shadow: var(--shadow);
   border-radius: var(--r-card);
 }
 
 .error__text {
   margin: 0;
-  font: 400 15px/20px var(--font-ui);
+  font: var(--t-value);
   color: var(--ink);
 }
 
-/* ─── Нижние вкладки «Задачи | О себе» ──────────────────────────────── */
-/* Корень приложения: BackButton Telegram здесь нет, он только в карточке. */
+/* ─── Нижние вкладки «Сегодня · Неделя · Сферы · Дела» ─────────────── */
+/* Корень приложения: кнопки «назад» Telegram здесь нет. */
 
 .screen--tabs {
-  /* место под вкладки, чтобы последняя строка списка не пряталась под ними */
-  padding-bottom: calc(64px + var(--s4) + env(safe-area-inset-bottom));
+  /* место под вкладки, чтобы последняя строка не пряталась под ними */
+  padding-bottom: calc(84px + env(safe-area-inset-bottom));
 }
 
 .tabs {
   position: fixed;
+  z-index: 20;
   left: 0;
   right: 0;
   bottom: 0;
   display: flex;
   justify-content: center;
-  padding: 6px var(--s4) calc(var(--s2) + env(safe-area-inset-bottom));
-  background: var(--surface);
+  padding: var(--s2) var(--s2) calc(10px + env(safe-area-inset-bottom));
+  background: var(--tabs-bg);
   border-top: 1px solid var(--line);
 }
 
@@ -1262,27 +1286,25 @@ button {
   background: none;
   padding: 0;
   flex: 1;
-  max-width: 17rem;
+  max-width: 8.5rem;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
+  gap: var(--s1);
+  font: 500 10.5px/12px var(--font-ui);
+  letter-spacing: 0.02em;
   color: var(--ink-3);
   cursor: pointer;
 }
 
-.tab span {
-  font: var(--t-cap);
-}
-
-.tab svg {
+.tab__ic svg {
   display: block;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
 }
 
 .tab--on {
-  color: var(--acc);
+  color: var(--tab-on);
 }
 
 /* ─── «О себе»: запись памяти ───────────────────────────────────────── */
@@ -1354,4 +1376,82 @@ button {
   padding: 0 var(--s4);
   border-radius: 10px;
   font: 600 14px/18px var(--font-ui);
+}
+
+/* ─── Сферы: карточка сферы ─────────────────────────────────────────── */
+/* «Без сферы и о себе» — та же карточка сферы без камня и полосы (design.md
+   §3); в «Банк-люксе» — тёмный камень с линией, в «Тихой роскоши» — белая
+   карточка с серой полосой слева. Карточки сфер с часами добавит 035. */
+
+.sph {
+  appearance: none;
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  margin: 0;
+  padding: 12px var(--s4) 12px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border: 0;
+  border-radius: var(--r-sph);
+  text-align: left;
+  color: var(--sph-ink);
+  cursor: pointer;
+  --c: var(--s-none);
+}
+
+.sph__top {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sph__name {
+  font: var(--t-sph);
+  color: var(--sph-ink);
+}
+
+.sph__meta {
+  position: relative;
+  font: var(--t-sub);
+  color: var(--sph-ink-2);
+}
+
+.sph .chev {
+  margin-left: auto;
+  color: var(--ink-3);
+  font: 400 20px/20px var(--font-ui);
+}
+
+.sph--plain {
+  padding-top: 11px;
+  padding-bottom: 11px;
+}
+
+.sph--plain .sph__name {
+  font-size: 16px;
+}
+
+:root[data-skin="bank"] .sph--plain {
+  background: #141414;
+  box-shadow: inset 0 0 0 1px var(--line);
+  --sph-ink: var(--ink);
+  --sph-ink-2: var(--ink-2);
+}
+
+:root[data-skin="quiet"] .sph {
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+:root[data-skin="quiet"] .sph::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  background: var(--c);
 }

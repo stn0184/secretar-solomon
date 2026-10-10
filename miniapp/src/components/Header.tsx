@@ -1,31 +1,34 @@
+import { hasBackButton } from "../lib/telegram.ts";
+
 /**
- * Шапка экрана: заголовок, подпись под ним и своя «‹ назад».
+ * Шапка экрана: надзаголовок, заголовок и — только когда кнопки «назад»
+ * Telegram нет (вне Telegram, SDK старше 6.1) — своя «‹ назад».
  *
- * Шапка Telegram (название бота, «✕», его кнопка «назад») — не наша: её
- * рисует мессенджер. Своя стрелка дублирует BackButton, потому что на
- * старом SDK и вне Telegram кнопки мессенджера нет.
+ * Шапка Telegram (название бота, «Закрыть», его «‹ Назад», меню ⋯) — не
+ * наша: её рисует мессенджер, мы её только красим в фон темы. Надзаголовок
+ * в «Банк-люксе» — капителью, в «Тихой роскоши» — строчными (`design.md` §1).
  */
 export function Header({
   title,
-  subtitle,
+  eyebrow,
   onBack,
-  backLabel = "Задачи",
+  backLabel = "Назад",
 }: {
-  title: string;
-  subtitle?: string;
+  title?: string;
+  eyebrow?: string;
   onBack?: () => void;
   backLabel?: string;
 }) {
   return (
-    <header className="head">
-      {onBack ? (
+    <header className="hd">
+      {onBack && !hasBackButton() ? (
         <button type="button" className="back" onClick={onBack}>
           <i aria-hidden="true">‹</i>
           {backLabel}
         </button>
       ) : null}
-      <h1 className="page-title">{title}</h1>
-      {subtitle ? <p className="page-sub">{subtitle}</p> : null}
+      {eyebrow ? <span className="eyebrow">{eyebrow}</span> : null}
+      {title ? <h1 className="h1">{title}</h1> : null}
     </header>
   );
 }

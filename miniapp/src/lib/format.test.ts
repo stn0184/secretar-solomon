@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  countActive,
+  countOpen,
   countOverdue,
   dateInputValue,
   formatDay,
@@ -17,6 +17,9 @@ import {
   formatMoment,
   formatRecorded,
   formatTime,
+  formatTimeRange,
+  formatWeekRange,
+  hoursWords,
   isPart,
   isoWithOffset,
   momentFromInputs,
@@ -121,13 +124,57 @@ describe("plural", () => {
     assert.equal(word(100), "задач");
   });
 
-  it("подпись списка — сколько активных и сколько просрочено", () => {
-    assert.equal(countActive(1), "1 активная");
-    assert.equal(countActive(3), "3 активные");
-    assert.equal(countActive(7), "7 активных");
-    assert.equal(countOverdue(1), "одна просрочена");
+  it("надзаголовок «Дел» — сколько открытых и сколько просрочено", () => {
+    assert.equal(countOpen(1), "1 открытое");
+    assert.equal(countOpen(3), "3 открытых");
+    assert.equal(countOpen(11), "11 открытых");
+    assert.equal(countOpen(21), "21 открытое");
+    assert.equal(countOverdue(1), "одно просрочено");
     assert.equal(countOverdue(2), "2 просрочены");
     assert.equal(countOverdue(5), "5 просрочено");
+    assert.equal(countOverdue(21), "21 просрочено");
+  });
+});
+
+describe("встреча с концом (§31.1)", () => {
+  it("срок с часом и длительностью — «14:00–16:00», как у бота", () => {
+    const at = new Date(2026, 8, 30, 14, 0);
+    assert.equal(formatDue(at, "time", now, 120), "сегодня, 14:00–16:00");
+    assert.equal(
+      formatDue(new Date(2026, 9, 5, 9, 30), "time", now, 45),
+      "понедельник, 5 октября, 09:30–10:15",
+    );
+  });
+
+  it("без длительности и у срока без часа конца нет", () => {
+    assert.equal(formatDue(new Date(2026, 8, 30, 14, 0), "time", now, null), "сегодня, 14:00");
+    assert.equal(formatDue(new Date(2026, 9, 2, 18, 0), "day", now, 60), "пятница, 2 октября");
+  });
+
+  it("время крупно в карточке — начало и конец или одно начало", () => {
+    assert.equal(formatTimeRange(new Date(2026, 8, 30, 14, 0), 120), "14:00–16:00");
+    assert.equal(formatTimeRange(new Date(2026, 8, 30, 23, 30), 60), "23:30–00:30");
+    assert.equal(formatTimeRange(new Date(2026, 8, 30, 14, 0), null), "14:00");
+  });
+
+  it("длительность словами — как в ответе бота: «2 ч 10 мин», «45 мин», «3 ч»", () => {
+    assert.equal(hoursWords(130), "2 ч 10 мин");
+    assert.equal(hoursWords(45), "45 мин");
+    assert.equal(hoursWords(180), "3 ч");
+    assert.equal(hoursWords(60), "1 ч");
+  });
+});
+
+describe("formatWeekRange", () => {
+  it("неделя с понедельника по воскресенье, месяц один раз", () => {
+    // Четверг, 8 октября 2026 — неделя 5–11 октября.
+    assert.equal(formatWeekRange(new Date(2026, 9, 8, 16, 40)), "5 – 11 октября");
+    assert.equal(formatWeekRange(new Date(2026, 9, 5, 0, 1)), "5 – 11 октября");
+    assert.equal(formatWeekRange(new Date(2026, 9, 11, 23, 59)), "5 – 11 октября");
+  });
+
+  it("неделя на стыке месяцев — оба месяца", () => {
+    assert.equal(formatWeekRange(now), "28 сентября – 4 октября");
   });
 });
 

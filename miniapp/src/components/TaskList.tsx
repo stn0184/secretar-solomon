@@ -1,4 +1,4 @@
-import { countActive, countOverdue } from "../lib/format.ts";
+import { countOpen, countOverdue } from "../lib/format.ts";
 import { TASKS_SHOWN, type Task, groupTasks } from "../lib/tasks.ts";
 import { Empty } from "./Empty.tsx";
 import { ErrorNote } from "./ErrorNote.tsx";
@@ -12,14 +12,16 @@ export type ListState =
   | { kind: "ready"; tasks: Task[]; more: boolean }
   | { kind: "failed"; message: string };
 
-const HINTS = ["«В пятницу отправить расчёт Кузнецову»", "«Я обещал Сергею перезвонить во вторник»"];
-
-function subtitle(state: ListState, overdue: number): string | undefined {
-  if (state.kind !== "ready" || state.tasks.length === 0) {
+/** Надзаголовок «Дел»: «11 открытых · одно просрочено»; пусто — «Открытых нет». */
+function eyebrow(state: ListState, overdue: number): string | undefined {
+  if (state.kind !== "ready") {
     return undefined;
   }
-  const active = countActive(state.tasks.length);
-  return overdue > 0 ? `${active} · ${countOverdue(overdue)}` : active;
+  if (state.tasks.length === 0) {
+    return "Открытых нет";
+  }
+  const open = countOpen(state.tasks.length);
+  return overdue > 0 ? `${open} · ${countOverdue(overdue)}` : open;
 }
 
 export function TaskList({
@@ -43,14 +45,15 @@ export function TaskList({
 
   return (
     <main className="screen screen--tabs">
-      <Header title="Задачи" subtitle={subtitle(state, overdue)} />
+      <Header title="Дела" eyebrow={eyebrow(state, overdue)} />
       {state.kind === "loading" ? <Skeleton label="Загружаем задачи" /> : null}
       {state.kind === "failed" ? <ErrorNote message={state.message} onRetry={onReload} /> : null}
       {state.kind === "ready" && state.tasks.length === 0 ? (
         <Empty
-          title="Задач пока нет"
-          text="Напишите боту — и она появится здесь. Срок и напоминание он разберёт сам."
-          hints={HINTS}
+          title="Дел пока нет"
+          text="Напишите Соломону — и дело появится здесь. Сферу и срок он поставит сам, поправить можно словом."
+          examples={["Купить лампочку", "Прислать расчёт Олегу до пятницы"]}
+          hint="Голосовые и пересланные сообщения тоже подойдут."
           onClose={onClose}
         />
       ) : null}

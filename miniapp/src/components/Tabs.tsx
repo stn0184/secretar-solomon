@@ -1,46 +1,52 @@
 /**
- * Нижние вкладки «Задачи | О себе» — корень приложения (`design.md` §1).
- * Есть на обоих корневых экранах; внутри карточки задачи их нет, там
- * кнопка «назад» Telegram. Активная вкладка — цветом действия.
+ * Нижние вкладки «Сегодня · Неделя · Сферы · Дела» — корень приложения
+ * (`design.md` §1, `techspec/32-redesign.md` §32.2). Открывается «Сегодня».
+ * Внутри карточки дела, «О себе» и «Оформления» вкладок нет — там кнопка
+ * «назад» Telegram. Активная вкладка — цветом действия темы.
  */
 import type { ReactNode } from "react";
 
-export type Tab = "tasks" | "me";
+export type Tab = "today" | "week" | "spheres" | "tasks";
 
-const ICON_TASKS = (
-  <svg
-    viewBox="0 0 22 22"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.7"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <path d="M8.5 5.5h11M8.5 11h11M8.5 16.5h7.5" />
-    <path d="M2.5 5.2 3.9 6.6 6.4 4" />
-    <path d="M2.5 10.7 3.9 12.1 6.4 9.5" />
-  </svg>
-);
+/** Иконки — как на артбордах прототипа: штрих в currentColor, 24px. */
+const ICONS: Record<Tab, ReactNode> = {
+  today: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6" />
+    </svg>
+  ),
+  week: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+      <path d="M3.5 6h9M8 12h11M5.5 18h7" />
+    </svg>
+  ),
+  spheres: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <circle cx="8.5" cy="8.5" r="4.5" />
+      <circle cx="15.5" cy="8.5" r="4.5" />
+      <circle cx="12" cy="15.5" r="4.5" />
+    </svg>
+  ),
+  tasks: (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M4 6.5l1.6 1.6L8.5 5M4 13l1.6 1.6L8.5 11.5M4 19.5h.01M11.5 7h8.5M11.5 13.5h8.5M11.5 19.5h8.5" />
+    </svg>
+  ),
+};
 
-const ICON_ME = (
-  <svg
-    viewBox="0 0 22 22"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.7"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden="true"
-  >
-    <circle cx="11" cy="7.6" r="3.7" />
-    <path d="M4.2 19c.4-3.7 3.2-6 6.8-6s6.4 2.3 6.8 6" />
-  </svg>
-);
-
-const TABS: { key: Tab; label: string; icon: ReactNode }[] = [
-  { key: "tasks", label: "Задачи", icon: ICON_TASKS },
-  { key: "me", label: "О себе", icon: ICON_ME },
+export const TABS: readonly { key: Tab; label: string }[] = [
+  { key: "today", label: "Сегодня" },
+  { key: "week", label: "Неделя" },
+  { key: "spheres", label: "Сферы" },
+  { key: "tasks", label: "Дела" },
 ];
 
 export function Tabs({ active, onChange }: { active: Tab; onChange: (tab: Tab) => void }) {
@@ -54,7 +60,9 @@ export function Tabs({ active, onChange }: { active: Tab; onChange: (tab: Tab) =
           aria-current={tab.key === active ? "page" : undefined}
           onClick={() => onChange(tab.key)}
         >
-          {tab.icon}
+          <span className="tab__ic" aria-hidden="true">
+            {ICONS[tab.key]}
+          </span>
           <span>{tab.label}</span>
         </button>
       ))}

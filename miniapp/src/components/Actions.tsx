@@ -45,7 +45,12 @@ export function Actions({
     <div className={inline ? "actions actions--inline" : "actions"}>
       <div className="actions__row">
         {primary ? (
-          <button type="button" className={button} disabled={busy !== null} onClick={primary.onClick}>
+          <button
+            type="button"
+            className={`${button} btn--main`}
+            disabled={busy !== null}
+            onClick={primary.onClick}
+          >
             {busy === primary.kind ? primary.busyLabel : primary.label}
           </button>
         ) : null}

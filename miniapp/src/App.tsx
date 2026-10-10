@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Backdrop } from "./components/Backdrop.tsx";
 import { type FactsState, FactList } from "./components/FactList.tsx";
+import { SpheresTab } from "./components/SpheresTab.tsx";
 import { type ListState, TaskList } from "./components/TaskList.tsx";
 import { TaskCard } from "./components/TaskCard.tsx";
 import { type Tab, Tabs } from "./components/Tabs.tsx";
+import { TodayTab } from "./components/TodayTab.tsx";
+import { WeekTab } from "./components/WeekTab.tsx";
 import { type Fact, confirmFact, loadFacts, removeFact } from "./lib/facts.ts";
 import { createSession, readSupabaseEnv } from "./lib/session.ts";
 import { type ActionResult, type Db, createDb } from "./lib/supabase.ts";
@@ -39,21 +42,24 @@ function bootstrap(): { db: Db } | { error: string } {
   }
   const initData = getInitData();
   if (!initData) {
-    return { error: "Откройте приложение из Telegram: вне мессенджера задачи не видны." };
+    return { error: "Откройте приложение из Telegram: вне мессенджера дела не видны." };
   }
   return { db: createDb(createSession(env, initData)) };
 }
 
 /**
- * Роутера нет: два корневых экрана переключаются вкладкой, карточка задачи
- * открывается поверх списка состоянием, форма правки — на месте карточки.
- * Кнопка «назад» Telegram — в карточке и в форме; на корневых экранах
- * внизу вкладки.
+ * Роутера нет: четыре корневых экрана переключаются вкладкой, открывается
+ * «Сегодня» (`techspec/32-redesign.md` §32.2). Карточка дела открывается
+ * поверх «Дел» состоянием, форма правки — на месте карточки; «О себе» —
+ * поверх «Сфер» из карточки «Без сферы и о себе». Кнопка «назад» Telegram —
+ * на этих экранах; на корневых внизу вкладки.
  */
 export default function App() {
   const [boot] = useState(bootstrap);
-  const [tab, setTab] = useState<Tab>("tasks");
+  const [tab, setTab] = useState<Tab>("today");
   const [card, setCard] = useState<Task | null>(null);
+  // «О себе» открыт поверх «Сфер».
+  const [about, setAbout] = useState(false);
   const [editing, setEditing] = useState(false);
   // Есть ли в форме несохранённое — сообщает сама форма; читается только в «назад».
   const dirty = useRef(false);
@@ -172,18 +178,23 @@ export default function App() {
       return;
     }
     setNow(new Date());
-    setCard(null);
-  }, [editing, closeEdit]);
+    if (card !== null) {
+      setCard(null);
+    } else {
+      setAbout(false);
+    }
+  }, [editing, card, closeEdit]);
 
   const reportDirty = useCallback((value: boolean) => {
     dirty.current = value;
   }, []);
 
-  // В карточке и форме видна кнопка «назад» Telegram; на корневых экранах её нет.
+  // В карточке, форме и «О себе» видна кнопка «назад» Telegram; на корневых экранах её нет.
+  const nested = card !== null || about;
   useEffect(() => {
     window.scrollTo(0, 0);
-    return card !== null ? showBackButton(back) : undefined;
-  }, [card, tab, editing, back]);
+    return nested ? showBackButton(back) : undefined;
+  }, [nested, tab, editing, back]);
 
   function open(task: Task) {
     setNow(new Date());
@@ -211,13 +222,26 @@ export default function App() {
     closeEdit();
   }
 
-  function switchTab(next: Tab) {
-    setNow(new Date());
-    setTab(next);
-    if (next === "me" && facts.kind === "idle") {
+  /** Память читается при первом открытии «Сфер»: карточке «Без сферы и о себе» нужен счёт. */
+  function loadFactsOnce() {
+    if (facts.kind === "idle") {
       setFacts({ kind: "loading" });
       setFactsKey((k) => k + 1);
     }
+  }
+
+  function switchTab(next: Tab) {
+    setNow(new Date());
+    setTab(next);
+    if (next === "spheres") {
+      loadFactsOnce();
+    }
+  }
+
+  function openAbout() {
+    setNow(new Date());
+    setAbout(true);
+    loadFactsOnce();
   }
 
   function reload() {
@@ -298,16 +322,33 @@ export default function App() {
       <>
         <Backdrop />
         <TaskCard
-        db={boot.db}
-        task={card}
-        now={now}
-        editing={editing}
-        onBack={back}
-        onGone={gone}
-        onAdvanced={advanced}
-        onEdit={edit}
-        onSaved={saved}
-        onDirty={reportDirty}
+          db={boot.db}
+          task={card}
+          now={now}
+          editing={editing}
+          onBack={back}
+          onGone={gone}
+          onAdvanced={advanced}
+          onEdit={edit}
+          onSaved={saved}
+          onDirty={reportDirty}
+        />
+      </>
+    );
+  }
+
+  if (about) {
+    return (
+      <>
+        <Backdrop />
+        <FactList
+          state={facts}
+          now={now}
+          onBack={back}
+          onReload={reloadFacts}
+          onClose={closeApp}
+          onConfirm={confirm}
+          onRemove={remove}
         />
       </>
     );
@@ -316,6 +357,9 @@ export default function App() {
   return (
     <>
       <Backdrop />
+      {tab === "today" ? <TodayTab now={now} onClose={closeApp} /> : null}
+      {tab === "week" ? <WeekTab now={now} onClose={closeApp} /> : null}
+      {tab === "spheres" ? <SpheresTab onClose={closeApp} onOpenAbout={openAbout} /> : null}
       {tab === "tasks" ? (
         <TaskList
           state={list}
@@ -325,16 +369,7 @@ export default function App() {
           onReload={reload}
           onClose={closeApp}
         />
-      ) : (
-        <FactList
-          state={facts}
-          now={now}
-          onReload={reloadFacts}
-          onClose={closeApp}
-          onConfirm={confirm}
-          onRemove={remove}
-        />
-      )}
+      ) : null}
       <Tabs active={tab} onChange={switchTab} />
     </>
   );

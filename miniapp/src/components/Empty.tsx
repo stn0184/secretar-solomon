@@ -1,40 +1,45 @@
+import type { ReactNode } from "react";
+
 /**
- * Пустое состояние: объяснение, фразы-подсказки и действие, а не пустая
- * таблица. Заводить записи здесь нельзя — их ведёт бот, поэтому
- * единственная кнопка возвращает в чат. `note` — строка под кнопкой,
- * если экрану есть что пообещать заранее.
+ * Пустое состояние (`design.md` §2): заголовок, абзац зачем, две
+ * фразы-примера пузырями, строка подсказки и кнопка, которая закрывает
+ * приложение и возвращает в чат. Нулей, пустых колец и пустой сетки нет.
+ * Заводить записи здесь нельзя — их ведёт бот, поэтому кнопка одна.
+ *
+ * `blank` — место под будущее содержимое над текстом (пунктир «Первая
+ * сфера» на «Сферах»); `action` — слово на кнопке.
  */
 export function Empty({
   title,
   text,
-  hints,
-  note,
+  examples,
+  hint,
+  action = "Вернуться в чат",
+  blank,
   onClose,
 }: {
   title: string;
   text: string;
-  hints: string[];
-  note?: string;
+  examples: readonly string[];
+  hint?: string;
+  action?: string;
+  blank?: ReactNode;
   onClose: () => void;
 }) {
   return (
     <div className="empty">
-      <span className="empty__mark" aria-hidden="true">
-        <i />
-      </span>
-      <h2 className="empty__h">{title}</h2>
+      {blank}
+      <h2 className="empty__t">{title}</h2>
       <p className="empty__p">{text}</p>
-      <ul className="hints">
-        {hints.map((hint) => (
-          <li className="hint" key={hint}>
-            {hint}
-          </li>
+      <ul className="empty__ex">
+        {examples.map((example) => (
+          <li key={example}>«{example}»</li>
         ))}
       </ul>
-      <button type="button" className="btn btn--wide" onClick={onClose}>
-        Вернуться в чат
+      {hint ? <p className="empty__hint">{hint}</p> : null}
+      <button type="button" className="btn btn--main btn--wide cta" onClick={onClose}>
+        {action}
       </button>
-      {note ? <p className="note empty__note">{note}</p> : null}
     </div>
   );
 }
