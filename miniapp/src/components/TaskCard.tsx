@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { type CSSProperties, useEffect, useState } from "react";
 
-import { formatDay, formatDue, formatMoment, sameDay } from "../lib/format.ts";
+import { formatMoment } from "../lib/format.ts";
 import { repeatWords } from "../lib/repeat.ts";
+import { type Sphere, sphereColor, sphereName, sphereOf } from "../lib/spheres.ts";
 import type { Db } from "../lib/supabase.ts";
 import {
   type Task,
   type TaskDetails,
+  cardWhen,
   completeTask,
   loadTaskDetails,
   questionOf,
@@ -18,7 +20,6 @@ import { ErrorNote } from "./ErrorNote.tsx";
 import { Field } from "./Field.tsx";
 import { Header } from "./Header.tsx";
 import { Reminders } from "./Reminders.tsx";
-import { Skeleton } from "./Skeleton.tsx";
 import { SourceMessage } from "./SourceMessage.tsx";
 import { TaskEdit } from "./TaskEdit.tsx";
 
@@ -33,41 +34,29 @@ const KIND_WORD: Record<Task["kind"], string> = {
   wish: "Желание",
 };
 
-function PencilIcon() {
-  return (
-    <svg
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M12.8 3.7l3.5 3.5L7.5 16H4v-3.5z" />
-      <path d="M11 5.5l3.5 3.5" />
-    </svg>
-  );
-}
-
 /**
- * Карточка задачи: поля как у бота в подтверждении, строка «Изменить»,
- * исходное сообщение целиком, напоминания и два действия. Задача приходит
- * из списка, сообщение и напоминания докачиваются здесь.
+ * Карточка дела (`techspec/32-redesign.md` §32.2, артборд 05): шапка — сфера,
+ * суть, время крупно (у встречи — «14:00–16:00», §31.1), ниже день и
+ * длительность; поля стопкой — разбор, сфера, повтор, вид, срочность,
+ * обещание, люди, напоминания; исходное сообщение цитатой; внизу «Сделано ·
+ * Изменить · Удалить». Дело приходит из списка, сообщение и напоминания
+ * докачиваются здесь. Время в карточке не анимируется (`design.md` §1).
  *
- * После подтверждённого действия `onGone` — список убирает задачу и
- * возвращается; отказ базы остаётся текстом под кнопками. Повторяющаяся
- * задача после «Сделано» не уходит: база перевела её на следующий раз,
- * и `onAdvanced` кладёт в список её новую строку.
+ * После подтверждённого действия `onGone` — список убирает дело и
+ * возвращается; отказ базы остаётся текстом под кнопками. Повторяющееся
+ * дело после «Сделано» не уходит: база перевела его на следующий раз, и
+ * `onAdvanced` кладёт в список его новую строку.
  *
- * `editing` — на месте карточки форма правки (`TaskEdit`). Карточка
- * остаётся владельцем докачанного: форма берёт у неё исходное сообщение,
- * а после «Сохранить» приходит новая задача — и напоминания читаются
- * заново, их пересчитала база.
+ * `editing` — на месте карточки форма правки (`TaskEdit`). Карточка остаётся
+ * владельцем докачанного: форма берёт у неё исходное сообщение, а после
+ * «Сохранить» приходит новое дело — и напоминания читаются заново, их
+ * пересчитала база. `spheres` — живые сферы владельца для строки «Сфера» и
+ * выбора в форме; `null` — не прочитались.
  */
 export function TaskCard({
   db,
   task,
+  spheres,
   now,
   editing,
   onBack,
@@ -79,6 +68,7 @@ export function TaskCard({
 }: {
   db: Db;
   task: Task;
+  spheres: readonly Sphere[] | null;
   now: Date;
   editing: boolean;
   onBack: () => void;
@@ -125,8 +115,8 @@ export function TaskCard({
   }
 
   /**
-   * «Сделано». У повторяющейся с запросом уходит раз, который видно на
-   * экране: задача уже на другом — база второй раз её не переводит.
+   * «Сделано». У повторяющегося с запросом уходит раз, который видно на
+   * экране: дело уже на другом — база второй раз его не переводит.
    */
   async function done() {
     setBusy("done");
@@ -164,6 +154,7 @@ export function TaskCard({
       <TaskEdit
         db={db}
         task={task}
+        spheres={spheres}
         message={details.kind === "ready" ? details.details.message : undefined}
         now={now}
         onBack={onBack}
@@ -173,67 +164,70 @@ export function TaskCard({
     );
   }
 
-  const dueToday = task.dueAt !== null && sameDay(task.dueAt, now);
+  const sphere = sphereOf(task.sphereId, spheres ?? []);
+  const when = cardWhen(task, now);
   const question = questionOf(task, now);
 
   return (
     <main className="screen">
-      <Header title={task.title} onBack={onBack} />
+      <Header onBack={onBack} backLabel="Дела" />
 
-      <div className="card">
-        <div className="kv">
-          <Field label="Срок" note={dueToday && task.dueAt ? formatDay(task.dueAt) : undefined}>
-            {task.dueAt ? formatDue(task.dueAt, task.duePrecision, now) : "не назван"}
+      <section className="ch card" style={{ "--c": sphereColor(sphere) } as CSSProperties}>
+        <span className="ch__s">
+          <i aria-hidden="true" />
+          {sphereName(sphere)}
+        </span>
+        <h1 className="ch__t">{task.title}</h1>
+        {when.time ? <span className="ch__time">{when.time}</span> : null}
+        <span className={when.late ? "ch__d ch__d--late" : "ch__d"}>{when.day}</span>
+      </section>
+
+      <div className="kv card">
+        {task.needsReview || question ? (
+          <Field label="Разбор">
+            <ReviewChip task={task} />
+            {question?.askedAt ? (
+              <span className="kv__q">
+                Бот спросил {formatMoment(question.askedAt, now)}: «{question.text}»
+              </span>
+            ) : null}
           </Field>
-          {task.repeat ? (
-            <Field label="Повтор" note="«Сделано» переведёт задачу на следующий раз">
-              {repeatWords(task.repeat)}
-            </Field>
-          ) : null}
-          {task.kind !== "task" ? <Field label="Вид">{KIND_WORD[task.kind]}</Field> : null}
-          {task.priority === "high" ? (
-            <Field label="Приоритет">
-              <PriorityChip task={task} compact={false} />
-            </Field>
-          ) : null}
-          {task.priority === "low" ? <Field label="Приоритет">низкий</Field> : null}
-          {task.promise ? (
-            <Field label="Обещание">
-              <PromiseChip task={task} compact={false} />
-            </Field>
-          ) : null}
-          {task.people.length > 0 ? <Field label="Люди">{task.people.join(", ")}</Field> : null}
-          {task.needsReview || question ? (
-            <Field label="Разбор">
-              <ReviewChip task={task} />
-              {question?.askedAt ? (
-                <span className="kv__q">
-                  Бот спросил {formatMoment(question.askedAt, now)}: «{question.text}»
-                </span>
-              ) : null}
-            </Field>
-          ) : null}
-        </div>
-        <button type="button" className="kv__edit" onClick={onEdit}>
-          <PencilIcon />
-          Изменить
-        </button>
-      </div>
-
-      {details.kind === "loading" ? <Skeleton rows={2} label="Загружаем карточку" /> : null}
-      {details.kind === "failed" ? (
-        <ErrorNote message={details.message} onRetry={reloadDetails} />
-      ) : null}
-      {details.kind === "ready" ? (
-        <>
-          <SourceMessage message={details.details.message} now={now} />
+        ) : null}
+        <Field label="Сфера">{sphereName(sphere)}</Field>
+        {task.repeat ? (
+          <Field label="Повтор" note="«Сделано» переведёт дело на следующий раз">
+            {repeatWords(task.repeat)}
+          </Field>
+        ) : null}
+        {task.kind !== "task" ? <Field label="Вид">{KIND_WORD[task.kind]}</Field> : null}
+        {task.priority === "high" ? (
+          <Field label="Приоритет">
+            <PriorityChip task={task} compact={false} />
+          </Field>
+        ) : null}
+        {task.priority === "low" ? <Field label="Приоритет">низкий</Field> : null}
+        {task.promise ? (
+          <Field label="Обещание">
+            <PromiseChip task={task} compact={false} />
+          </Field>
+        ) : null}
+        {task.people.length > 0 ? <Field label="Люди">{task.people.join(", ")}</Field> : null}
+        {details.kind !== "failed" ? (
           <Reminders
-            reminders={details.details.reminders}
+            reminders={details.kind === "ready" ? details.details.reminders : null}
             hasDue={task.dueAt !== null}
             now={now}
           />
-        </>
+        ) : null}
+      </div>
+
+      {details.kind === "loading" ? (
+        <div className="src src--wait" aria-busy="true" aria-label="Загружаем сообщение" />
       ) : null}
+      {details.kind === "failed" ? (
+        <ErrorNote message={details.message} onRetry={reloadDetails} />
+      ) : null}
+      {details.kind === "ready" ? <SourceMessage message={details.details.message} now={now} /> : null}
 
       <Actions
         busy={busy}
@@ -244,6 +238,7 @@ export function TaskCard({
           busyLabel: task.repeat ? "Отмечаем…" : "Закрываем…",
           onClick: () => void done(),
         }}
+        extra={{ label: "Изменить", onClick: onEdit }}
         onDelete={() => void onDelete()}
       />
     </main>

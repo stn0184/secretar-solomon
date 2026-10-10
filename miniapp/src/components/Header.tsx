@@ -19,9 +19,13 @@ export function Header({
   onBack?: () => void;
   backLabel?: string;
 }) {
+  const ownBack = onBack !== undefined && !hasBackButton();
+  if (!ownBack && !title && !eyebrow) {
+    return null;
+  }
   return (
     <header className="hd">
-      {onBack && !hasBackButton() ? (
+      {ownBack ? (
         <button type="button" className="back" onClick={onBack}>
           <i aria-hidden="true">‹</i>
           {backLabel}

@@ -616,7 +616,58 @@ button {
   color: var(--c-guess);
 }
 
-/* ─── Карточка: поля, источник, напоминания ─────────────────────────── */
+/* ─── Карточка: шапка, поля, источник, напоминания ─────────────────── */
+/* Артборд 05: шапка-карточка (сфера, суть, время крупно, день), поля
+   стопкой — подпись над значением, исходное сообщение цитатой. */
+
+.ch {
+  margin-top: 2px;
+  padding: 18px 18px var(--s4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ch__s {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.ch__s i {
+  width: 22px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--c);
+}
+
+.ch__t {
+  margin: 0;
+  font: var(--t-card-t);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* Время в карточке не анимируется (design.md §1). */
+.ch__time {
+  font: var(--t-card-time);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.ch__d {
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.ch__d--late {
+  color: var(--c-late);
+  font-weight: 500;
+}
 
 .kv {
   display: flex;
@@ -625,9 +676,9 @@ button {
 
 .kv__row {
   display: flex;
-  gap: var(--s3);
-  align-items: flex-start;
-  padding: 10px var(--s4);
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px var(--s4);
 }
 
 .kv__row + .kv__row {
@@ -635,36 +686,121 @@ button {
 }
 
 .kv__k {
-  flex: none;
-  width: 92px;
-  padding-top: 2px;
   font: var(--t-sub);
   color: var(--ink-2);
 }
 
 .kv__v {
-  flex: 1;
-  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  font: 400 15px/20px var(--font-ui);
+  font: var(--t-row);
   color: var(--ink);
+  overflow-wrap: anywhere;
 }
 
 .kv__v small {
-  display: block;
-  width: 100%;
+  flex-basis: 100%;
   font: var(--t-sub);
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 
+.kv__v--muted {
+  font: var(--t-value);
+  color: var(--ink-2);
+}
+
+/* вопрос бота под «Перепроверьте» — мелким текстом */
+.kv__q {
+  flex-basis: 100%;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+/* напоминания ещё читаются — серая плашка, без спиннера */
+.kv__wait {
+  display: block;
+  width: 60%;
+  height: 12px;
+  margin: var(--s1) 0;
+  border-radius: 6px;
+  background: var(--track);
+}
+
+.rem {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rem__item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.rem__when {
+  font: var(--t-row);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.rem__state {
+  flex: none;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.rem__state--sent {
+  color: var(--ok);
+}
+
+/* Исходное сообщение в карточке — цитатой на второй поверхности. */
+.src {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--s3) var(--s4);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+}
+
+.src--wait {
+  min-height: 76px;
+}
+
+.src__h {
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.src__q {
+  margin: 0;
+}
+
+.src__q .source__text {
+  font: var(--t-quote);
+}
+
+.src__q .source__text:first-child::before {
+  content: "«";
+}
+
+.src__q .source__text:last-child::after {
+  content: "»";
+}
+
+/* Исходное сообщение внутри раскрытой записи памяти — без своей поверхности. */
 .source {
   display: flex;
   flex-direction: column;
   gap: var(--s2);
-  padding: var(--s3) var(--s4) var(--s4);
 }
 
 .source__top {
@@ -686,7 +822,7 @@ button {
 
 .source__text {
   margin: 0;
-  font: 400 14px/19px var(--font-ui);
+  font: var(--t-body);
   color: var(--ink);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -695,95 +831,6 @@ button {
 /* У снимка в цитате две строки: подпись и «Со снимка: …» (§14.4). */
 .source__text + .source__text {
   margin-top: var(--s2);
-}
-
-.rem {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.rem__item {
-  display: flex;
-  gap: var(--s3);
-  align-items: center;
-  padding: 9px var(--s4);
-}
-
-.rem__item + .rem__item {
-  border-top: 1px solid var(--line);
-}
-
-.rem__dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: var(--r-pill);
-  background: var(--ok);
-}
-
-.rem__dot--wait {
-  background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--ink-3);
-}
-
-.rem__when {
-  flex: 1;
-  font: 400 15px/20px var(--font-ui);
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-}
-
-.rem__stage {
-  font: var(--t-sub);
-  color: var(--ink-3);
-}
-
-.rem__state {
-  flex: none;
-  font: var(--t-sub);
-  color: var(--ink-2);
-}
-
-.rem__state--sent {
-  color: var(--ok);
-}
-
-/* ─── Карточка: вопрос бота и вход в форму ──────────────────────────── */
-
-.kv__q {
-  display: block;
-  width: 100%;
-  font: 400 14px/19px var(--font-ui);
-  color: var(--ink-2);
-}
-
-.kv__edit {
-  appearance: none;
-  border: 0;
-  border-top: 1px solid var(--line);
-  background: none;
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  padding: 11px var(--s4);
-  font: 500 15px/20px var(--font-ui);
-  color: var(--acc);
-  text-align: left;
-  cursor: pointer;
-}
-
-.kv__edit svg {
-  flex: none;
-  width: 18px;
-  height: 18px;
-}
-
-.kv__edit:active {
-  background: var(--surface-2);
 }
 
 /* ─── Форма правки: пометка «Перепроверьте» и вопрос ───────────────── */
@@ -894,9 +941,10 @@ button {
   padding: 0 var(--s3);
   border: 0;
   border-radius: 10px;
-  background: var(--surface-2);
+  background: var(--input-bg);
   box-shadow: inset 0 0 0 1px var(--line);
-  font: var(--t-body);
+  /* 16px — меньше iOS увеличивает страницу при фокусе */
+  font: 400 16px/21px var(--font-ui);
   color: var(--ink);
   color-scheme: inherit;
 }
@@ -1146,8 +1194,8 @@ button {
   position: sticky;
   z-index: 20;
   bottom: 0;
-  margin: auto calc(var(--s4) * -1) 0;
-  padding: 10px var(--s4) calc(var(--s4) + env(safe-area-inset-bottom));
+  margin: auto -14px calc((var(--s4) + env(safe-area-inset-bottom)) * -1);
+  padding: 10px 14px calc(var(--s4) + env(safe-area-inset-bottom));
   background: var(--bg);
   display: flex;
   flex-direction: column;

@@ -11,24 +11,27 @@ export interface PrimaryAction {
   onClick: () => void;
 }
 
-/** Вторая кнопка вместо «Удалить» — спокойная, без красного: «Отмена» в форме. */
+/** Спокойная кнопка без красного: «Отмена» в форме, «Изменить» в карточке. */
 export interface SecondaryAction {
   label: string;
   onClick: () => void;
 }
 
 /**
- * Кнопки действий: главное (если есть) и «Удалить» — или вместо него
- * спокойная `secondary`. Пока действие идёт, обе заперты; отказ базы —
- * текстом под кнопками, запись остаётся на месте (инвариант 4).
+ * Кнопки действий: главное (если есть), спокойная `extra` рядом с ним
+ * («Изменить» в карточке) и «Удалить» — или вместо него спокойная
+ * `secondary` («Отмена» в форме). Пока действие идёт, все заперты; отказ
+ * базы — текстом под кнопками, запись остаётся на месте (инвариант 4).
  *
- * На карточке задачи блок прилипает к низу экрана; `inline` — внутри
- * раскрытой записи памяти, кнопки меньше и стоят по месту.
+ * На карточке дела блок прилипает к низу экрана (артборд 05: «Сделано ·
+ * Изменить · Удалить»); `inline` — внутри раскрытой записи памяти, кнопки
+ * меньше и стоят по месту.
  */
 export function Actions({
   busy,
   error,
   primary,
+  extra,
   onDelete,
   secondary,
   inline = false,
@@ -36,6 +39,7 @@ export function Actions({
   busy: ActionKind | null;
   error: string | null;
   primary?: PrimaryAction;
+  extra?: SecondaryAction;
   onDelete?: () => void;
   secondary?: SecondaryAction;
   inline?: boolean;
@@ -52,6 +56,11 @@ export function Actions({
             onClick={primary.onClick}
           >
             {busy === primary.kind ? primary.busyLabel : primary.label}
+          </button>
+        ) : null}
+        {extra ? (
+          <button type="button" className={button} disabled={busy !== null} onClick={extra.onClick}>
+            {extra.label}
           </button>
         ) : null}
         {secondary ? (

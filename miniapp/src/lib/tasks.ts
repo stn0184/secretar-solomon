@@ -20,9 +20,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   type DuePrecision,
+  PART_WORDS,
   dateInputValue,
+  formatDay,
   formatDue,
   formatTime,
+  formatTimeRange,
+  hoursWords,
   isPart,
   isoWithOffset,
   momentFromInputs,
@@ -402,6 +406,30 @@ export function dueLine(task: Task, now: Date): { icon: "📅" | "🔔" | null; 
     return { icon: null, text };
   }
   return { icon: task.duePrecision === "time" ? "📅" : "🔔", text };
+}
+
+/**
+ * Срок в шапке карточки (артборд 05): у срока с часом — время крупно
+ * («14:00–16:00» у встречи), ниже день словами и длительность («· 2 ч»);
+ * у дня и части дня крупного времени нет. `late` — срок прошёл.
+ */
+export function cardWhen(task: Task, now: Date): { time: string | null; day: string; late: boolean } {
+  if (!task.dueAt) {
+    return { time: null, day: "Без срока", late: false };
+  }
+  const day = sameDay(task.dueAt, now) ? `сегодня, ${formatDay(task.dueAt)}` : formatDay(task.dueAt);
+  const late = isOverdue(task, now);
+  if (task.duePrecision === "time") {
+    return {
+      time: formatTimeRange(task.dueAt, task.duration),
+      day: task.duration ? `${day} · ${hoursWords(task.duration)}` : day,
+      late,
+    };
+  }
+  if (isPart(task.duePrecision)) {
+    return { time: null, day: `${day}, ${PART_WORDS[task.duePrecision]}`, late };
+  }
+  return { time: null, day, late };
 }
 
 /* ------------------------------------------------------------------ база */

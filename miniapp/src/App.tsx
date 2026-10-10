@@ -329,6 +329,7 @@ export default function App() {
         <TaskCard
           db={boot.db}
           task={card}
+          spheres={list.kind === "ready" ? list.spheres : null}
           now={now}
           editing={editing}
           onBack={back}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { formatMoment } from "../lib/format.ts";
+import type { Sphere } from "../lib/spheres.ts";
 import type { Db } from "../lib/supabase.ts";
 import {
   type Priority,
@@ -47,10 +48,18 @@ const PROMISES = [
   ["to_me", "Мне обещали"],
 ] as const satisfies readonly (readonly [PromiseSide | "none", string])[];
 
+/** Значение выбора «без сферы» в ряду вариантов — пустой id. */
+const NO_SPHERE = "";
+
 /**
  * Форма правки на месте карточки (`techspec/11-edit.md` §11.2): поля
  * стопкой, внизу «Сохранить» и «Отмена». Напоминаний в форме нет — их
  * пересчитает база; исходное сообщение внизу — для сверки.
+ *
+ * Сфера (`techspec/32-redesign.md` §32.2) — ряд вариантов с переносом:
+ * «Без сферы» и живые сферы владельца по порядку заведения; в `edit_task`
+ * уходит `sphere_id`, только если выбор изменён. Сферы не прочитались
+ * (`spheres === null`) — ряд не показывается, сменить сферу нельзя.
  *
  * Уходит в базу только изменённое (`taskChanges`); ответ базы — новая
  * задача для карточки и списка (`onSaved`). Отказ — текстом под
@@ -67,6 +76,7 @@ const PROMISES = [
 export function TaskEdit({
   db,
   task,
+  spheres,
   message,
   now,
   onBack,
@@ -75,6 +85,7 @@ export function TaskEdit({
 }: {
   db: Db;
   task: Task;
+  spheres: readonly Sphere[] | null;
   message: Source | null | undefined;
   now: Date;
   onBack: () => void;
@@ -139,7 +150,7 @@ export function TaskEdit({
 
   return (
     <main className="screen">
-      <Header title="Правка задачи" onBack={onBack} backLabel="Задача" />
+      <Header title="Правка дела" onBack={onBack} backLabel="Дело" />
 
       {task.needsReview || question ? (
         <div className="review">
@@ -171,6 +182,25 @@ export function TaskEdit({
             }}
           />
         </label>
+
+        <div className="form__row">
+          <span className="form__k">Сфера</span>
+          {spheres ? (
+            <Choice
+              label="Сфера"
+              variant="wrap"
+              options={[
+                [NO_SPHERE, "Без сферы"] as const,
+                ...spheres.map((sphere) => [sphere.id, sphere.name] as const),
+              ]}
+              value={draft.sphereId ?? NO_SPHERE}
+              disabled={busy}
+              onChange={(id) => update({ sphereId: id === NO_SPHERE ? null : id })}
+            />
+          ) : (
+            <p className="form__hint">Сферы не прочитались — сменить сферу сейчас нельзя.</p>
+          )}
+        </div>
 
         <div className="form__row">
           <span className="form__k">Срок</span>

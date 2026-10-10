@@ -19,6 +19,7 @@ import {
   type Task,
   type TaskDraft,
   applyRepeat,
+  cardWhen,
   completeTask,
   draftOf,
   dueHint,
@@ -285,6 +286,43 @@ describe("groupBySphere", () => {
       groups.map((g) => g.key),
       ["none"],
     );
+  });
+});
+
+describe("cardWhen", () => {
+  it("встреча: время крупно с концом, ниже день и длительность словами", () => {
+    assert.deepEqual(
+      cardWhen(task({ dueAt: new Date(2026, 9, 5, 14, 0), duePrecision: "time", duration: 120 }), now),
+      { time: "14:00–16:00", day: "понедельник, 5 октября · 2 ч", late: false },
+    );
+  });
+
+  it("час без длительности — одно начало; сегодня — со словом «сегодня»", () => {
+    assert.deepEqual(
+      cardWhen(task({ dueAt: new Date(2026, 8, 30, 15, 0), duePrecision: "time" }), now),
+      { time: "15:00", day: "сегодня, среда, 30 сентября", late: false },
+    );
+  });
+
+  it("день и часть дня — без крупного времени", () => {
+    assert.deepEqual(cardWhen(task({ dueAt: new Date(2026, 9, 2, 18, 0), duePrecision: "day" }), now), {
+      time: null,
+      day: "пятница, 2 октября",
+      late: false,
+    });
+    assert.deepEqual(
+      cardWhen(task({ dueAt: new Date(2026, 9, 2, 8, 0), duePrecision: "morning" }), now),
+      { time: null, day: "пятница, 2 октября, утром", late: false },
+    );
+  });
+
+  it("просрочено — отмечено; без срока — «Без срока»", () => {
+    assert.deepEqual(cardWhen(task({ dueAt: new Date(2026, 8, 28, 18, 0), duePrecision: "day" }), now), {
+      time: null,
+      day: "понедельник, 28 сентября",
+      late: true,
+    });
+    assert.deepEqual(cardWhen(task(), now), { time: null, day: "Без срока", late: false });
   });
 });
 
