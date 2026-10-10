@@ -1624,7 +1624,9 @@ button {
   display: block;
   height: 100%;
   border-radius: 3px;
-  background: var(--sph-fill);
+  /* В «Тихой роскоши» заливка — цвет сферы: --sph-fill там var(--c), а на
+     :root --c нет, поэтому запасное значение берётся уже у карточки. */
+  background: var(--sph-fill, var(--c));
 }
 
 .sph__fact {
