@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { Backdrop } from "./components/Backdrop.tsx";
 import { type FactsState, FactList } from "./components/FactList.tsx";
 import { type ListState, TaskList } from "./components/TaskList.tsx";
 import { TaskCard } from "./components/TaskCard.tsx";
@@ -9,12 +10,23 @@ import { createSession, readSupabaseEnv } from "./lib/session.ts";
 import { type ActionResult, type Db, createDb } from "./lib/supabase.ts";
 import { type Task, loadActiveTasks } from "./lib/tasks.ts";
 import {
+  type ColorScheme,
   closeApp,
   confirmDiscard,
+  getColorScheme,
   getInitData,
   initTelegram,
+  onColorScheme,
   showBackButton,
 } from "./lib/telegram.ts";
+import {
+  type ThemeChoice,
+  applySkin,
+  cacheChoice,
+  loadTheme,
+  readCachedChoice,
+  skinOf,
+} from "./lib/theme.ts";
 
 /**
  * Собрать доступ к базе. Нет переменных сборки или приложение открыто не из
@@ -57,9 +69,37 @@ export default function App() {
   // под ней держится до следующего чтения списка.
   const [justDone, setJustDone] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
+  // Оформление: выбор владельца и схема Telegram; тема на экране — из обоих.
+  const [themeChoice, setThemeChoice] = useState<ThemeChoice>(readCachedChoice);
+  const [scheme, setScheme] = useState<ColorScheme>(getColorScheme);
 
   // Telegram — внешняя система: ей говорят, что приложение готово.
   useEffect(() => initTelegram(), []);
+
+  // Схема Telegram сменилась (ночной режим) — «Как в Telegram» следует за ней сразу.
+  useEffect(() => onColorScheme(setScheme), []);
+
+  useEffect(() => {
+    applySkin(skinOf(themeChoice, scheme));
+  }, [themeChoice, scheme]);
+
+  // Выбор из базы — правда; копия на устройстве только для первого кадра.
+  // Не прочиталось — остаётся копия: оформление не повод для ошибки на экране.
+  useEffect(() => {
+    if ("error" in boot) {
+      return;
+    }
+    let cancelled = false;
+    void loadTheme(boot.db).then((result) => {
+      if (!cancelled && result.ok) {
+        setThemeChoice(result.choice);
+        cacheChoice(result.choice);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [boot]);
 
   // Список читается при старте и по «Обновить»; «загрузка» ставится там,
   // где нажали, а не в эффекте.
@@ -255,7 +295,9 @@ export default function App() {
 
   if (card !== null && "db" in boot) {
     return (
-      <TaskCard
+      <>
+        <Backdrop />
+        <TaskCard
         db={boot.db}
         task={card}
         now={now}
@@ -266,12 +308,14 @@ export default function App() {
         onEdit={edit}
         onSaved={saved}
         onDirty={reportDirty}
-      />
+        />
+      </>
     );
   }
 
   return (
     <>
+      <Backdrop />
       {tab === "tasks" ? (
         <TaskList
           state={list}

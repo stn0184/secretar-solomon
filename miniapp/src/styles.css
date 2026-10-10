@@ -1,68 +1,230 @@
 /*
- * Визуальный язык — design.md §1, значения — из одобренного прототипа 005.
+ * Визуальный язык — design.md §1: две темы на одной разметке, значения —
+ * из одобренного прототипа prototype/000-redesign (styles.css, разделы 3–4).
  *
- * Цвет только через переменные. Поверхности и текст берутся из темы Telegram
- * (--tg-theme-*, их выставляет telegram-web-app.js), значения после запятой —
- * запасные, чтобы вне Telegram приложение оставалось читаемым. Смысловые
- * цвета — важно, ок, предположение — в теме не водятся: это фиксированные
- * пары под светлую и тёмную схему, переключает их атрибут data-scheme на
- * <html> (ставит lib/telegram.ts из colorScheme SDK). Отдельных стилей под
- * тёмную тему нет.
+ * Цвет, шрифт и поверхность — только через переменные. Тема на экране —
+ * атрибут data-skin на <html> (ставит lib/theme.ts): «bank» — «Банк-люкс»,
+ * тёмная; «quiet» — «Тихая роскошь», светлая. Тема меняет значения тех же
+ * переменных, а не разметку: новой теме — новый набор значений.
+ * От Telegram берётся только схема (светлая или тёмная) для выбора «Как в
+ * Telegram»; его переменные --tg-theme-* приложение больше не читает.
+ *
+ * Шрифты — из сборки (fonts/fonts.css), из внешних сервисов не грузятся.
  */
 
-/* ─── Токены ────────────────────────────────────────────────────────── */
+@import "./fonts/fonts.css";
+
+/* ─── Токены: общее ─────────────────────────────────────────────────── */
 
 :root {
-  --app-bg: var(--tg-theme-secondary-bg-color, #eff0f4);
-  --surface: var(--tg-theme-bg-color, #ffffff);
-  --line: var(--tg-theme-section-separator-color, #e3e5ea);
-  --ink: var(--tg-theme-text-color, #0f1116);
-  --ink-2: var(--tg-theme-subtitle-text-color, #6b7280);
-  --ink-3: var(--tg-theme-hint-color, #a0a6b0);
-  --accent: var(--tg-theme-button-color, #3390ec);
-  --accent-ink: var(--tg-theme-button-text-color, #ffffff);
-  --urgent: var(--tg-theme-destructive-text-color, #ce4238);
-
-  /* производные — от темы, какой бы она ни была */
-  --surface-2: color-mix(in srgb, var(--ink) 5%, var(--surface));
-  --line-strong: color-mix(in srgb, var(--ink) 16%, var(--surface));
-  --accent-weak: color-mix(in srgb, var(--accent) 12%, var(--surface));
-  --urgent-weak: color-mix(in srgb, var(--urgent) 12%, var(--surface));
-
-  /* смысловые пары: состояние задачи, не украшение */
-  --important: #b1741a;
-  --important-weak: #faf0dd;
-  --ok: #2f9a58;
-  --ok-weak: #e7f4ec;
-  --guess: #6f57ac;
-  --guess-weak: #f1edfa;
-
-  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --t-title: 600 22px/28px var(--font-ui);
-  --t-body: 400 16px/21px var(--font-ui);
-  --t-sub: 400 13px/17px var(--font-ui);
-  --t-cap: 500 11px/14px var(--font-ui);
-
   --s1: 4px;
   --s2: 8px;
   --s3: 12px;
   --s4: 16px;
   --s5: 20px;
   --s6: 24px;
-  --r-sheet: 16px;
-  --r-card: 14px;
-  --r-btn: 12px;
+  --r-card: 18px;
+  --r-sph: 18px;
   --r-pill: 999px;
+  --font-system: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --roll-ms: 320ms;
+  --grow-ms: 380ms;
 }
 
-:root[data-scheme="dark"] {
-  --surface: var(--tg-theme-section-bg-color, var(--tg-theme-bg-color, #232e3c));
-  --important: #dfa94f;
-  --important-weak: #362c1b;
+/* ─── Тема «Банк-люкс»: чёрный, золото, сферы-камни ─────────────────── */
+
+:root[data-skin="bank"] {
+  --bg: #050505;
+  --surface: #101010;
+  --surface-2: #151515;
+  --line: rgba(255, 255, 255, 0.08);
+  --ink: #f5f1e8;
+  --ink-2: #ada699;
+  --ink-3: #8e877b;
+  --acc: #d9b76e;
+  --acc-ink: #120e05;
+  --acc-w: rgba(217, 183, 110, 0.14);
+  --num-acc: #d9b76e;
+  --today: #d9b76e;
+  --now: #d9b76e;
+  --tab-on: #d9b76e;
+  --tabs-bg: #0a0a0a;
   --ok: #6cc38a;
-  --ok-weak: #1f3327;
-  --guess: #b49ae8;
-  --guess-weak: #2a2540;
+
+  /* сферы — камни; места 5–12 подобраны на реализации (design.md §1) */
+  --s-1: #7ea6ff;
+  --s-2: #4cc79a;
+  --s-3: #ef8a8a;
+  --s-4: #b79bff;
+  --s-5: #5ec8d8;
+  --s-6: #f0a060;
+  --s-7: #a8d46a;
+  --s-8: #f096c8;
+  --s-9: #e4cf6a;
+  --s-10: #a8b6cc;
+  --s-11: #8f8ff5;
+  --s-12: #c8b49a;
+  --s-none: #8e877b;
+  --mark-ink: #0b0b0b;
+
+  /* смысловые: текст цветом на подложке -w */
+  --c-high: #f0c46a;
+  --c-high-w: rgba(240, 196, 106, 0.12);
+  --c-guess: #c7b2ff;
+  --c-guess-w: rgba(183, 155, 255, 0.14);
+  --c-mine: #8fb4ff;
+  --c-mine-w: rgba(126, 166, 255, 0.13);
+  --c-kind-w: rgba(255, 255, 255, 0.07);
+  --c-late: #ff8a80;
+  --c-late-w: rgba(255, 138, 128, 0.12);
+
+  --card-border: 1px solid var(--line);
+  --shadow: none;
+  --btn-r: 26px;
+  --btn-bg: #181818;
+  --btn-main: linear-gradient(135deg, #f2dda4, #d9b76e 45%, #a9823a);
+  --input-bg: #151515;
+  --rail: rgba(255, 255, 255, 0.14);
+  --track: #191919;
+  --cap-shadow: none;
+  --done-ink: #0b0b0b;
+  --seg-bg: #101010;
+  --seg-on: #232323;
+  --seg-on-ink: #d9b76e;
+  --seg-shadow: none;
+  --blank-line: rgba(217, 183, 110, 0.45);
+  --blob-1: rgba(217, 183, 110, 0.2);
+  --blob-2: rgba(76, 199, 154, 0.1);
+  --drift-1: 30s;
+  --drift-2: 36s;
+  --sph-ink: #ffffff;
+  --sph-ink-2: rgba(255, 255, 255, 0.92);
+  --sph-track: rgba(255, 255, 255, 0.18);
+  --sph-fill: rgba(255, 255, 255, 0.92);
+  --mark-col: 38px;
+
+  --font-ui: "Inter Tight", var(--font-system);
+  --font-num: var(--font-ui);
+  --t-eyebrow: 500 11px/14px var(--font-ui);
+  --eyebrow-ls: 0.14em;
+  --eyebrow-case: uppercase;
+  --t-h1: 300 32px/38px var(--font-ui);
+  --t-big: 200 58px/62px var(--font-ui);
+  --t-big-u: 300 26px/30px var(--font-ui);
+  --t-body: 400 14px/19px var(--font-ui);
+  --t-body-l: 400 15px/22px var(--font-ui);
+  --t-row: 500 15px/19px var(--font-ui);
+  --t-value: 400 15px/20px var(--font-ui);
+  --t-sub: 400 13px/17px var(--font-ui);
+  --t-cap: 500 11px/14px var(--font-ui);
+  --t-chip: 500 11.5px/15px var(--font-ui);
+  --t-gap: 400 12.5px/16px var(--font-ui);
+  --t-dayv: 300 17px/20px var(--font-ui);
+  --t-sph: 500 18px/22px var(--font-ui);
+  --t-sph-h: 300 22px/26px var(--font-ui);
+  --t-card-t: 500 20px/25px var(--font-ui);
+  --t-card-time: 200 40px/44px var(--font-ui);
+  --t-quote: 400 14.5px/20px var(--font-ui);
+  --t-btn: 500 15px/1 var(--font-ui);
+  --t-empty: 300 30px/36px var(--font-ui);
+}
+
+/* ─── Тема «Тихая роскошь»: бумага, воздух, антиква ─────────────────── */
+
+:root[data-skin="quiet"] {
+  --bg: #f6f3ee;
+  --surface: #ffffff;
+  --surface-2: #fbf9f5;
+  --line: #e9e3d9;
+  --ink: #1e1c19;
+  --ink-2: #645e55;
+  --ink-3: #6f695f;
+  --acc: #2f4a3d;
+  --acc-ink: #ffffff;
+  --acc-w: #e4ece7;
+  --num-acc: #2f4a3d;
+  --today: #2f4a3d;
+  --now: #a8392f;
+  --tab-on: #2f4a3d;
+  --tabs-bg: rgba(246, 243, 238, 0.96);
+  --ok: #2f7a4d;
+
+  /* сферы — приглушённые; места 5–12 подобраны на реализации (design.md §1) */
+  --s-1: #4d6cb3;
+  --s-2: #b4644b;
+  --s-3: #b98a2e;
+  --s-4: #5a8c6c;
+  --s-5: #3f8288;
+  --s-6: #8a587f;
+  --s-7: #b8707f;
+  --s-8: #7d8740;
+  --s-9: #7c70ae;
+  --s-10: #676c75;
+  --s-11: #8e3b4a;
+  --s-12: #9a6a42;
+  --s-none: #9a9389;
+  --mark-ink: #ffffff;
+
+  --c-high: #8a5a0e;
+  --c-high-w: #f6ecd7;
+  --c-guess: #5e4a99;
+  --c-guess-w: #eeeaf6;
+  --c-mine: #2f5c8e;
+  --c-mine-w: #e6eef6;
+  --c-kind-w: #efebe4;
+  --c-late: #a8392f;
+  --c-late-w: #f8e6e3;
+
+  --card-border: 0 solid transparent;
+  --shadow: 0 1px 2px rgba(60, 45, 25, 0.05), 0 10px 28px rgba(60, 45, 25, 0.07);
+  --btn-r: 14px;
+  --btn-bg: #ffffff;
+  --btn-main: #2f4a3d;
+  --input-bg: #fbf9f5;
+  --rail: #ddd5c8;
+  --track: #f0ebe3;
+  --cap-shadow: 0 4px 12px rgba(60, 45, 25, 0.12);
+  --done-ink: #ffffff;
+  --seg-bg: #ece7df;
+  --seg-on: #ffffff;
+  --seg-on-ink: #1e1c19;
+  --seg-shadow: 0 1px 3px rgba(60, 45, 25, 0.12);
+  --blank-line: #cfc6b8;
+  --blob-1: rgba(232, 214, 186, 0.9);
+  --blob-2: rgba(206, 220, 205, 0.8);
+  --drift-1: 40s;
+  --drift-2: 46s;
+  --sph-ink: var(--ink);
+  --sph-ink-2: var(--ink-2);
+  --sph-track: #f0ebe3;
+  --sph-fill: var(--c);
+  --mark-col: 4px;
+
+  --font-ui: "Inter", var(--font-system);
+  --font-serif: "Lora", "Iowan Old Style", Georgia, serif;
+  --font-num: var(--font-serif);
+  --t-eyebrow: 400 13px/17px var(--font-ui);
+  --eyebrow-ls: 0;
+  --eyebrow-case: none;
+  --t-h1: 500 30px/36px var(--font-serif);
+  --t-big: 500 46px/54px var(--font-serif);
+  --t-big-u: 400 22px/28px var(--font-serif);
+  --t-body: 400 14px/19px var(--font-ui);
+  --t-body-l: 400 15px/22px var(--font-ui);
+  --t-row: 500 15px/20px var(--font-ui);
+  --t-value: 400 15px/20px var(--font-ui);
+  --t-sub: 400 13px/17px var(--font-ui);
+  --t-cap: 500 11px/14px var(--font-ui);
+  --t-chip: 500 11.5px/15px var(--font-ui);
+  --t-gap: italic 400 13px/17px var(--font-serif);
+  --t-dayv: 500 15px/20px var(--font-serif);
+  --t-sph: 500 20px/26px var(--font-serif);
+  --t-sph-h: 500 18px/24px var(--font-serif);
+  --t-card-t: 500 25px/31px var(--font-serif);
+  --t-card-time: 500 30px/36px var(--font-serif);
+  --t-quote: italic 400 15px/21px var(--font-serif);
+  --t-btn: 500 15px/1 var(--font-ui);
+  --t-empty: 500 26px/32px var(--font-serif);
 }
 
 /* ─── Основа ────────────────────────────────────────────────────────── */
@@ -73,13 +235,15 @@
 
 html {
   -webkit-text-size-adjust: 100%;
+  background: var(--bg);
 }
 
 body {
   margin: 0;
-  background: var(--app-bg);
+  background: var(--bg);
   color: var(--ink);
   font: var(--t-body);
+  -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -88,7 +252,14 @@ button {
   color: inherit;
 }
 
+#root {
+  position: relative;
+  isolation: isolate;
+}
+
 .screen {
+  position: relative;
+  z-index: 1;
   max-width: 34rem;
   /* высота видимой части — от Telegram, вне его — окно браузера */
   min-height: var(--tg-viewport-stable-height, 100vh);
@@ -97,6 +268,121 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* ─── Движение ──────────────────────────────────────────────────────── */
+/* Только transform; при «уменьшить движение» — всё сразу в конечном виде. */
+
+/* Прокрутка цифр (как NumberFlow): разряд — колонка 0–9, едет к своей
+   цифре; сменилось значение — от прежней к новой, при первом показе — от 0. */
+.num {
+  display: inline-flex;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dg {
+  display: inline-block;
+  height: 1.15em;
+  line-height: 1.15em;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+
+.dg__col {
+  display: flex;
+  flex-direction: column;
+  transform: translateY(calc(var(--d) * -1.15em));
+  transition: transform var(--roll-ms) cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition-delay: calc(var(--i) * 40ms + var(--wait, 0ms));
+  animation: roll var(--roll-ms) cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  animation-delay: calc(var(--i) * 40ms + var(--wait, 0ms));
+}
+
+.dg__col > span {
+  display: block;
+  height: 1.15em;
+  text-align: center;
+}
+
+@keyframes roll {
+  from {
+    transform: translateY(0);
+  }
+}
+
+/* Полосы и доли: вырастают слева направо, лесенкой по --wait. */
+.grow {
+  transform-origin: left center;
+  animation: grow var(--grow-ms) cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  animation-delay: var(--wait, 0ms);
+}
+
+@keyframes grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+/* Плывущий фон: два пятна за шапкой, готовый мягкий градиент без blur. */
+.bgfx {
+  position: absolute;
+  z-index: 0;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 320px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  animation: drift var(--drift, 30s) ease-in-out infinite alternate;
+}
+
+.blob--1 {
+  width: 400px;
+  height: 290px;
+  left: -80px;
+  top: -90px;
+  background: radial-gradient(closest-side, var(--blob-1), transparent);
+  --dx: 60px;
+  --dy: 16px;
+  --drift: var(--drift-1);
+}
+
+.blob--2 {
+  width: 300px;
+  height: 240px;
+  right: -110px;
+  top: -30px;
+  background: radial-gradient(closest-side, var(--blob-2), transparent);
+  --dx: -40px;
+  --dy: 22px;
+  --drift: var(--drift-2);
+}
+
+@keyframes drift {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(var(--dx), var(--dy)) scale(1.15);
+  }
+  100% {
+    transform: translate(calc(var(--dx) * -0.6), calc(var(--dy) * 0.8)) scale(0.95);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dg__col,
+  .grow,
+  .blob {
+    animation: none;
+    transition: none;
+  }
 }
 
 /* ─── Шапка экрана ──────────────────────────────────────────────────── */
@@ -117,7 +403,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  color: var(--accent);
+  color: var(--acc);
   font: 400 15px/20px var(--font-ui);
   cursor: pointer;
 }
@@ -130,7 +416,7 @@ button {
 
 .page-title {
   margin: 0;
-  font: var(--t-title);
+  font: var(--t-h1);
   letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
@@ -162,7 +448,7 @@ button {
 }
 
 .sec__h--overdue {
-  color: var(--urgent);
+  color: var(--c-late);
 }
 
 .sec__h em {
@@ -209,11 +495,11 @@ button {
 }
 
 .row__mark--high {
-  background: var(--important);
+  background: var(--c-high);
 }
 
 .row__mark--overdue {
-  background: var(--urgent);
+  background: var(--c-late);
 }
 
 .row__body {
@@ -241,7 +527,7 @@ button {
 }
 
 .row__when--overdue {
-  color: var(--urgent);
+  color: var(--c-late);
   font-weight: 500;
 }
 
@@ -292,24 +578,24 @@ button {
 }
 
 .chip--high {
-  background: var(--important-weak);
-  color: var(--important);
+  background: var(--c-high-w);
+  color: var(--c-high);
 }
 
 .chip--mine {
-  background: var(--accent-weak);
-  color: var(--accent);
+  background: var(--acc-w);
+  color: var(--acc);
 }
 
 .chip--theirs {
   background: var(--surface-2);
   color: var(--ink-2);
-  box-shadow: inset 0 0 0 1px var(--line-strong);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .chip--review {
-  background: var(--guess-weak);
-  color: var(--guess);
+  background: var(--c-guess-w);
+  color: var(--c-guess);
 }
 
 .chip--kind {
@@ -381,7 +667,7 @@ button {
 .source__box {
   margin: 0;
   background: var(--surface-2);
-  border-left: 2px solid var(--accent);
+  border-left: 2px solid var(--acc);
   border-radius: 0 10px 10px 0;
   padding: 9px 11px;
 }
@@ -480,7 +766,7 @@ button {
   gap: var(--s2);
   padding: 11px var(--s4);
   font: 500 15px/20px var(--font-ui);
-  color: var(--accent);
+  color: var(--acc);
   text-align: left;
   cursor: pointer;
 }
@@ -503,8 +789,8 @@ button {
   gap: 6px;
   padding: var(--s3) var(--s4);
   border-radius: var(--r-card);
-  background: var(--guess-weak);
-  box-shadow: inset 2px 0 0 var(--guess);
+  background: var(--c-guess-w);
+  box-shadow: inset 2px 0 0 var(--c-guess);
 }
 
 .review__top {
@@ -584,7 +870,7 @@ button {
   background: none;
   padding: 0;
   font: 500 15px/20px var(--font-ui);
-  color: var(--accent);
+  color: var(--acc);
   cursor: pointer;
 }
 
@@ -612,7 +898,7 @@ button {
 
 .input:focus {
   outline: none;
-  box-shadow: inset 0 0 0 1.5px var(--accent);
+  box-shadow: inset 0 0 0 1.5px var(--acc);
 }
 
 .input:disabled {
@@ -642,7 +928,7 @@ button {
   width: 18px;
   height: 18px;
   margin: 0;
-  accent-color: var(--accent);
+  accent-color: var(--acc);
 }
 
 .seg {
@@ -681,13 +967,13 @@ button {
 }
 
 .seg__opt input:checked + span {
-  background: var(--accent-weak);
-  color: var(--accent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, var(--surface));
+  background: var(--acc-w);
+  color: var(--acc);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc) 35%, var(--surface));
 }
 
 .seg__opt input:focus-visible + span {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--acc);
   outline-offset: 1px;
 }
 
@@ -743,13 +1029,13 @@ button {
 }
 
 .days__opt input:checked + span {
-  background: var(--accent-weak);
-  color: var(--accent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, var(--surface));
+  background: var(--acc-w);
+  color: var(--acc);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc) 35%, var(--surface));
 }
 
 .days__opt input:focus-visible + span {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--acc);
   outline-offset: 1px;
 }
 
@@ -781,11 +1067,11 @@ button {
   justify-content: center;
   min-height: 44px;
   padding: 0 var(--s5);
-  border-radius: var(--r-btn);
+  border-radius: var(--btn-r);
   text-align: center;
   font: 600 15px/20px var(--font-ui);
-  background: var(--accent);
-  color: var(--accent-ink);
+  background: var(--acc);
+  color: var(--acc-ink);
   cursor: pointer;
 }
 
@@ -800,14 +1086,14 @@ button {
 
 .btn--ghost {
   background: var(--surface);
-  color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--acc);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .btn--danger {
   background: var(--surface);
-  color: var(--urgent);
-  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--c-late);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .actions {
@@ -815,7 +1101,7 @@ button {
   bottom: 0;
   margin-top: auto;
   padding: var(--s3) 0 calc(var(--s2) + env(safe-area-inset-bottom));
-  background: var(--app-bg);
+  background: var(--bg);
   display: flex;
   flex-direction: column;
   gap: var(--s2);
@@ -834,7 +1120,7 @@ button {
   margin: 0;
   padding: 0 var(--s1);
   font: var(--t-sub);
-  color: var(--urgent);
+  color: var(--c-late);
 }
 
 /* ─── Состояния: загрузка, пусто, ошибка ────────────────────────────── */
@@ -996,7 +1282,7 @@ button {
 }
 
 .tab--on {
-  color: var(--accent);
+  color: var(--acc);
 }
 
 /* ─── «О себе»: запись памяти ───────────────────────────────────────── */
@@ -1053,7 +1339,7 @@ button {
 }
 
 .source__box--guess {
-  border-left-color: var(--guess);
+  border-left-color: var(--c-guess);
 }
 
 .actions--inline {
