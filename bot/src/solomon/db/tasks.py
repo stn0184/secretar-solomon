@@ -46,14 +46,6 @@ DETAIL_COLUMNS = (
     "id, title, kind, status, due_at, due_precision, priority, promise, people, created_at, "
     "repeat, occurrence_at, sphere_id, duration"
 )
-# Встреча для часов по сферам (`techspec/31-hours.md` §31.1): начало,
-# длительность и сфера. Убранная (`cancelled`) в часы не идёт, сделанная —
-# идёт: встреча была.
-MEETING_COLUMNS = "due_at, duration, sphere_id"
-MEETING_STATUSES = (ACTIVE_STATUS, "done")
-# Встреч владельца за неделю с запасом больше этого не бывает; выборка
-# режется, а не падает.
-MEETINGS_LIMIT = 1000
 # Сообщение владельца, на которое ответили свайпом или по которому нажали
 # кнопку кандидата: текст, задача, разбор и ответ бота (§12.2, §12.6).
 STORED_MESSAGE_COLUMNS = "id, text, task_id, analysis, reply"
@@ -134,16 +126,6 @@ class TaskDetails:
     occurrence_at: datetime | None = None
     sphere_id: str | None = None
     duration: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class Meeting:
-    """Встреча для часов по сферам (`techspec/31-hours.md` §31.1): начало,
-    минуты и сфера дела."""
-
-    start: datetime
-    minutes: int
-    sphere_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -649,45 +631,6 @@ async def list_open_tasks(db: Client, *, owner_telegram_id: int, limit: int) -> 
         )
     )
     return [task_details_from_row(row) for row in _rows(rows, "задач")]
-
-
-async def list_meetings(
-    db: Client, *, owner_telegram_id: int, since: datetime, until: datetime
-) -> list[Meeting]:
-    """Встречи владельца с началом в `[since, until)` (`techspec/31-hours.md`
-    §31.1): задачи с длительностью, кроме убранных. Окна и то, что из встречи
-    уже прошло, решает `services/hours.py`."""
-    rows = await ask(
-        lambda: (
-            db.table(TASKS_TABLE)
-            .select(MEETING_COLUMNS)
-            .eq("owner_telegram_id", owner_telegram_id)
-            .in_("status", MEETING_STATUSES)
-            .not_.is_("duration", None)
-            .gte("due_at", since.isoformat())
-            .lt("due_at", until.isoformat())
-            .order("due_at", desc=False)
-            .limit(MEETINGS_LIMIT)
-            .execute()
-            .data
-        )
-    )
-    meetings: list[Meeting] = []
-    for row in _rows(rows, "встреч"):
-        if not isinstance(row, Mapping):
-            raise DatabaseError("База вернула не строку встречи.")
-        minutes = _optional_minutes(row.get("duration"))
-        start = row.get("due_at")
-        if minutes is None or start is None:
-            raise DatabaseError("В ответе базы встреча без срока или длительности.")
-        meetings.append(
-            Meeting(
-                start=moment(start, "due_at"),
-                minutes=minutes,
-                sphere_id=_optional_text(row.get("sphere_id")),
-            )
-        )
-    return meetings
 
 
 async def list_task_people(

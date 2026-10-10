@@ -1235,52 +1235,6 @@ async def test_open_task_with_a_broken_duration_is_a_failure() -> None:
         await db_tasks.list_open_tasks(as_client(fake), owner_telegram_id=OWNER_ID, limit=50)
 
 
-async def test_meetings_are_this_owner_tasks_with_a_duration_not_removed() -> None:
-    """Встречи для часов (`techspec/31-hours.md` §31.1): с длительностью, кроме
-    убранных, с началом в окне чтения."""
-    fake = FakeClient(
-        data=[{"due_at": "2026-10-10T14:00:00+05:00", "duration": 120, "sphere_id": "s1"}]
-    )
-    since = datetime(2026, 10, 4, 0, 0, tzinfo=TZ)
-    until = datetime(2026, 10, 10, 18, 0, tzinfo=TZ)
-
-    found = await db_tasks.list_meetings(
-        as_client(fake), owner_telegram_id=OWNER_ID, since=since, until=until
-    )
-
-    assert found == [
-        db_tasks.Meeting(
-            start=datetime(2026, 10, 10, 14, 0, tzinfo=TZ), minutes=120, sphere_id="s1"
-        )
-    ]
-    assert ("table", "tasks") in fake.calls
-    assert ("eq", "owner_telegram_id", OWNER_ID) in fake.calls
-    assert ("in", "status", ("active", "done")) in fake.calls
-    assert ("not.is", "duration", None) in fake.calls
-    assert ("gte", "due_at", since.isoformat()) in fake.calls
-    assert ("lt", "due_at", until.isoformat()) in fake.calls
-
-
-@pytest.mark.parametrize(
-    "row",
-    [
-        {"due_at": None, "duration": 60, "sphere_id": None},
-        {"due_at": "2026-10-10T14:00:00+05:00", "duration": None, "sphere_id": None},
-        "не строка",
-    ],
-)
-async def test_broken_meeting_row_is_a_failure(row: Any) -> None:
-    fake = FakeClient(data=[row])
-
-    with pytest.raises(DatabaseError):
-        await db_tasks.list_meetings(
-            as_client(fake),
-            owner_telegram_id=OWNER_ID,
-            since=datetime(2026, 10, 4, tzinfo=TZ),
-            until=datetime(2026, 10, 10, tzinfo=TZ),
-        )
-
-
 async def test_open_task_with_a_broken_rule_is_a_failure() -> None:
     """Правило строкой читать вслепую нельзя — отказ, а не разовая задача."""
     fake = FakeClient(data=[{**DETAIL_ROW, "repeat": "каждый понедельник"}])
@@ -2142,7 +2096,6 @@ def test_owner_is_required_by_every_query() -> None:
         db_tasks.list_active_tasks,
         db_tasks.open_question,
         db_tasks.list_open_tasks,
-        db_tasks.list_meetings,
         db_tasks.task_details,
         db_tasks.last_message_task,
         db_tasks.last_reminder_task,

@@ -1,24 +1,30 @@
-"""Часы по сферам (`techspec/31-hours.md`).
+"""Часы по сферам (`techspec/31-hours.md`): обвязка бота вокруг счёта базы.
 
-Чистые функции: сессии переписки из сообщений чатов, часы встреч, окна
-«сегодня», «вчера» и «неделя с понедельника» по поясу владельца, пересечения
-без двойного счёта и строки блока «Часы по сферам». Дальше — блок в промпте и
-как бот его собирает: только своему тексту и голосу, а без сфер или при сбое
-базы — без блока. Сети и базы здесь нет: модель и хранилище подменены.
+Считает функция базы `sphere_hours` (этап 035, `techspec/03-schema.md` §3.18):
+её случаи — сессии переписки, встречи, пересечения, окна, полночь,
+понедельник, округление — проверяет `supabase/tests/sphere_hours.test.ts` на
+настоящем Postgres, с теми же числами, что проверялись здесь до переезда.
+Здесь — то, что осталось боту: окна «сегодня», «вчера» и «неделя с
+понедельника» по поясу владельца, слова и строки блока «Часы по сферам», блок
+в промпте, чтение функции базы и как бот собирает блок — только своему тексту
+и голосу, при сбое базы — без блока. Сети и базы здесь нет: модель и
+хранилище подменены.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+import inspect
+from datetime import date, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from solomon import texts
-from solomon.db.chats import ChatStamp
+from solomon.db import hours as db_hours
+from solomon.db.hours import SphereMinutes
+from solomon.db.rpc import DatabaseError
 from solomon.db.spheres import Sphere
-from solomon.db.tasks import Meeting as DbMeeting
 from solomon.services import hours
 from solomon.services.tasks import TaskService
 from solomon.services.understanding import (
@@ -32,6 +38,7 @@ from solomon.services.understanding import (
     open_task_lines,
 )
 from tests.conftest import (
+    OWNER_ID,
     OWNER_TIMEZONE,
     FakeAnalyst,
     FakeEdits,
@@ -44,6 +51,7 @@ from tests.conftest import (
     make_settings,
     make_understanding,
 )
+from tests.test_tasks_db import FakeClient, as_client
 from tests.test_understanding import FakeAnswer, FakeCall
 
 TZ = ZoneInfo(OWNER_TIMEZONE)
@@ -60,220 +68,58 @@ def at(hour: int, minute: int = 0, day: date = SATURDAY) -> datetime:
     return datetime(day.year, day.month, day.day, hour, minute, tzinfo=TZ)
 
 
-@dataclass(frozen=True, slots=True)
-class Meeting:
-    start: datetime
-    minutes: int
-    sphere_id: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class Stamp:
-    thread_id: str
-    sphere_id: str | None
-    sent_at: datetime
-    mine: bool
-
-
-@dataclass(frozen=True, slots=True)
-class Book:
-    id: str
-    name: str
-
-
-VOICEFIN = Book(id="s-voicefin", name="VoiceFin")
-REIVA = Book(id="s-reiva", name="РЕЙВА")
-BOOK = (VOICEFIN, REIVA)
-
-
-def chat(thread: str, sphere: str | None, *moments: tuple[datetime, bool]) -> list[Stamp]:
-    """Сообщения одного чата: время и «моё ли»."""
-    return [Stamp(thread, sphere, sent_at, mine) for sent_at, mine in moments]
-
-
-def today(periods: list[hours.Period]) -> hours.Period:
-    return periods[0]
-
-
-def minutes_of(period: hours.Period) -> dict[str | None, tuple[int, int]]:
-    """Сфера → (встречи, переписка) в минутах."""
-    return {item.name: (item.meetings, item.chat) for item in period.spheres}
-
-
-# --- сессии переписки -----------------------------------------------------------
-
-
-def test_messages_closer_than_ten_minutes_make_one_session_with_two_minutes_tail() -> None:
-    stamps = chat(
-        "t1",
-        "s-voicefin",
-        (at(10, 0), False),
-        (at(10, 4), True),
-        (at(10, 14), False),
+def row(name: str | None, meetings: int, chat: int) -> SphereMinutes:
+    """Строка ответа `sphere_hours`; id сферы тестам обвязки не нужен."""
+    return SphereMinutes(
+        sphere_id=None if name is None else f"s-{name}", name=name, meetings=meetings, chat=chat
     )
 
-    found = hours.sessions(stamps)
 
-    assert found == [("s-voicefin", hours.Span(at(10, 0), at(10, 16)))]
-
-
-def test_a_gap_longer_than_ten_minutes_starts_a_new_session() -> None:
-    stamps = chat(
-        "t1",
-        None,
-        (at(10, 0), True),
-        (at(10, 11), True),
-    )
-
-    found = hours.sessions(stamps)
-
-    assert found == [
-        (None, hours.Span(at(10, 0), at(10, 2))),
-        (None, hours.Span(at(10, 11), at(10, 13))),
-    ]
-
-
-def test_a_session_without_the_owner_does_not_count() -> None:
-    """Собеседник писал, владелец молчал — его время на это не ушло."""
-    stamps = chat("t1", "s-voicefin", (at(10, 0), False), (at(10, 5), False))
-
-    assert hours.sessions(stamps) == []
-
-
-def test_sessions_are_per_chat_and_ignore_the_arrival_order() -> None:
-    """Сессия — в пределах одного чата; сообщения считаются по времени площадки,
-    в каком бы порядке их ни отдала база."""
-    stamps = [
-        *chat("t2", "s-reiva", (at(10, 3), True)),
-        *chat("t1", "s-voicefin", (at(10, 5), False), (at(10, 0), True)),
-    ]
-
-    found = hours.sessions(stamps)
-
-    assert sorted(found, key=lambda item: item[1].start) == [
-        ("s-voicefin", hours.Span(at(10, 0), at(10, 7))),
-        ("s-reiva", hours.Span(at(10, 3), at(10, 5))),
-    ]
-
-
-# --- подсчёт ------------------------------------------------------------------------
-
-
-def test_past_meeting_goes_to_its_sphere() -> None:
-    meetings = [Meeting(at(14), 120, "s-voicefin")]
-
-    periods = hours.tally(meetings, [], BOOK, NOW, TZ)
-
-    assert minutes_of(today(periods)) == {"VoiceFin": (120, 0)}
-
-
-def test_meeting_counts_only_the_part_that_has_passed() -> None:
-    """Время встречи ещё не прошло — в часы идёт только прошедшее."""
-    meetings = [Meeting(at(17), 120, "s-voicefin"), Meeting(at(19), 60, "s-reiva")]
-
-    periods = hours.tally(meetings, [], BOOK, NOW, TZ)
-
-    assert minutes_of(today(periods)) == {"VoiceFin": (60, 0)}
-
-
-def test_meeting_and_chat_at_the_same_time_count_once_within_a_sphere() -> None:
-    """Переписка во время встречи — та же работа: пересечение — встреча."""
-    meetings = [Meeting(at(14), 60, "s-voicefin")]
-    stamps = chat("t1", "s-voicefin", (at(14, 50), True), (at(14, 58), False), (at(15, 8), True))
-
-    periods = hours.tally(meetings, stamps, BOOK, NOW, TZ)
-
-    assert minutes_of(today(periods)) == {"VoiceFin": (60, 10)}
-
-
-def test_chats_of_one_sphere_at_the_same_time_count_once() -> None:
-    stamps = [
-        *chat("t1", "s-voicefin", (at(10, 0), True), (at(10, 8), False)),
-        *chat("t2", "s-voicefin", (at(10, 5), True)),
-    ]
-
-    periods = hours.tally([], stamps, BOOK, NOW, TZ)
-
-    assert minutes_of(today(periods)) == {"VoiceFin": (0, 10)}
-
-
-def test_overlaps_of_different_spheres_both_count() -> None:
-    """Пересечение не складывается дважды только в пределах сферы."""
-    meetings = [Meeting(at(14), 60, "s-voicefin")]
-    stamps = chat("t1", "s-reiva", (at(14, 10), True))
-
-    periods = hours.tally(meetings, stamps, BOOK, NOW, TZ)
-
-    assert minutes_of(today(periods)) == {"VoiceFin": (60, 0), "РЕЙВА": (0, 2)}
-
-
-def test_unknown_or_missing_sphere_is_without_a_sphere_and_goes_last() -> None:
-    meetings = [Meeting(at(9), 30, None), Meeting(at(11), 30, "s-gone")]
-    stamps = chat("t1", "s-reiva", (at(12), True))
-
-    periods = hours.tally(meetings, stamps, BOOK, NOW, TZ)
-
-    assert [item.name for item in today(periods).spheres] == ["РЕЙВА", None]
-    assert minutes_of(today(periods))[None] == (60, 0)
-
-
-def test_spheres_follow_the_book_order() -> None:
-    meetings = [Meeting(at(9), 30, "s-reiva"), Meeting(at(11), 30, "s-voicefin")]
-
-    periods = hours.tally(meetings, [], BOOK, NOW, TZ)
-
-    assert [item.name for item in today(periods).spheres] == ["VoiceFin", "РЕЙВА"]
+# --- окна -------------------------------------------------------------------------
 
 
 def test_today_yesterday_and_the_week_from_monday_by_the_owner_clock() -> None:
-    """Окна — по поясу владельца: вчерашняя встреча не в «сегодня», понедельничная
-    — в неделе, прошлое воскресенье — нигде."""
-    meetings = [
-        Meeting(at(10), 60, "s-voicefin"),
-        Meeting(at(10, day=FRIDAY), 90, "s-voicefin"),
-        Meeting(at(10, day=MONDAY), 30, "s-voicefin"),
-        Meeting(at(10, day=date(2026, 10, 4)), 45, "s-voicefin"),
-    ]
+    """Окна — по поясу владельца, правый край — «сейчас»: так бот спрашивает
+    базу (§31.2)."""
+    found = hours.windows(NOW, TZ)
 
-    periods = hours.tally(meetings, [], BOOK, NOW, TZ)
-
-    assert [period.label for period in periods] == [
-        "Сегодня, суббота, 10 октября",
-        "Вчера, пятница, 9 октября",
-        "Неделя с понедельника, 5 октября",
-    ]
-    assert [minutes_of(period) for period in periods] == [
-        {"VoiceFin": (60, 0)},
-        {"VoiceFin": (90, 0)},
-        {"VoiceFin": (180, 0)},
+    assert found == [
+        hours.Window("Сегодня, суббота, 10 октября", at(0), NOW),
+        hours.Window("Вчера, пятница, 9 октября", at(0, day=FRIDAY), at(0)),
+        hours.Window("Неделя с понедельника, 5 октября", at(0, day=MONDAY), NOW),
     ]
 
 
-def test_a_session_across_midnight_is_split_between_the_days() -> None:
-    stamps = chat("t1", None, (at(23, 55, day=FRIDAY), True), (at(0, 5), True))
+def test_windows_follow_the_owner_clock_not_the_utc_day() -> None:
+    """В 02:00 у владельца по UTC ещё вчера — окно всё равно его сегодня."""
+    late = datetime(2026, 10, 9, 21, 0, tzinfo=ZoneInfo("UTC"))
 
-    periods = hours.tally([], stamps, BOOK, NOW, TZ)
+    today = hours.windows(late, TZ)[0]
 
-    assert minutes_of(periods[0]) == {None: (0, 7)}
-    assert minutes_of(periods[1]) == {None: (0, 5)}
+    assert today.label == "Сегодня, суббота, 10 октября"
+    assert today.start == at(0)
 
 
 def test_on_monday_yesterday_is_last_sunday_and_the_week_is_today() -> None:
     monday_evening = at(20, day=MONDAY)
-    meetings = [Meeting(at(10, day=date(2026, 10, 4)), 60, "s-reiva")]
 
-    periods = hours.tally(meetings, [], BOOK, monday_evening, TZ)
+    found = hours.windows(monday_evening, TZ)
 
-    assert periods[1].label == "Вчера, воскресенье, 4 октября"
-    assert minutes_of(periods[1]) == {"РЕЙВА": (60, 0)}
-    assert minutes_of(periods[2]) == {}
+    assert found[1] == hours.Window(
+        "Вчера, воскресенье, 4 октября", at(0, day=date(2026, 10, 4)), at(0, day=MONDAY)
+    )
+    assert found[2].start == found[0].start == at(0, day=MONDAY)
 
 
-def test_reading_starts_a_day_before_the_earliest_window() -> None:
-    """Встреча до суток длиной и сессия, начатая накануне, задевают окно —
-    читать надо с запасом."""
-    assert hours.reading_since(NOW, TZ) == at(0, day=date(2026, 10, 4))
-    assert hours.reading_since(at(9, day=MONDAY), TZ) == at(0, day=date(2026, 10, 3))
+def test_period_keeps_the_order_of_the_database_and_drops_empty_spheres() -> None:
+    """Порядок — как отдала база: сферы по заведению, «без сферы» последней."""
+    window = hours.windows(NOW, TZ)[0]
+
+    found = hours.period(window, [row("VoiceFin", 60, 0), row("РЕЙВА", 0, 0), row(None, 0, 2)])
+
+    assert found == hours.Period(
+        window.label, (hours.SphereHours("VoiceFin", 60, 0), hours.SphereHours(None, 0, 2))
+    )
 
 
 # --- слова --------------------------------------------------------------------------
@@ -288,20 +134,18 @@ def test_hours_words(minutes: int, words: str) -> None:
 
 
 def test_lines_name_every_sphere_with_meetings_and_chat_and_the_total() -> None:
-    meetings = [Meeting(at(14), 120, "s-voicefin")]
-    stamps = [
-        *chat("t1", "s-voicefin", (at(16, 30), True), (at(16, 38), False)),
-        *chat(
-            "t2",
-            None,
-            (at(11, 0), True),
-            (at(11, 20), True),
-            (at(11, 10), False),
-            (at(11, 23), True),
-        ),
-    ]
+    """Те же строки, что до переезда счёта в базу: часы — те, что база
+    посчитала бы для встречи 14–16 и переписки (`sphere_hours.test.ts`)."""
+    counted = (hours.SphereHours("VoiceFin", 120, 10), hours.SphereHours(None, 0, 25))
+    labels = [window.label for window in hours.windows(NOW, TZ)]
 
-    lines = hours.lines(hours.tally(meetings, stamps, BOOK, NOW, TZ))
+    lines = hours.lines(
+        [
+            hours.Period(labels[0], counted),
+            hours.Period(labels[1], ()),
+            hours.Period(labels[2], counted),
+        ]
+    )
 
     assert lines == [
         "Сегодня, суббота, 10 октября: VoiceFin — 2 ч 10 мин (встречи 2 ч, переписка "
@@ -312,15 +156,80 @@ def test_lines_name_every_sphere_with_meetings_and_chat_and_the_total() -> None:
     ]
 
 
-def test_seconds_round_to_minutes_and_parts_add_up() -> None:
-    """Минуты округляются, а встречи и переписка в сумме — ровно итог сферы."""
-    meetings = [Meeting(at(9), 31, "s-voicefin")]
-    stamps = chat("t1", "s-voicefin", (at(9, 30) + timedelta(seconds=40), True))
+def test_parts_add_up_to_the_sphere_total() -> None:
+    """База округляет итог и встречи, переписка — их разность (§31.2)."""
+    item = hours.SphereHours("VoiceFin", 31, 2)
 
-    period = today(hours.tally(meetings, stamps, BOOK, NOW, TZ))
-
-    item = period.spheres[0]
     assert (item.meetings, item.chat, item.total) == (31, 2, 33)
+
+
+# --- чтение функции базы ------------------------------------------------------------
+
+
+async def test_sphere_hours_asks_the_database_for_the_window_of_this_owner() -> None:
+    fake = FakeClient(
+        data=[
+            {"sphere_id": "s1", "name": "VoiceFin", "meetings": 120, "chat": 10},
+            {"sphere_id": None, "name": None, "meetings": 0, "chat": 25},
+        ]
+    )
+
+    found = await db_hours.sphere_hours(
+        as_client(fake), owner_telegram_id=OWNER_ID, start=at(0), end=NOW
+    )
+
+    assert found == [
+        SphereMinutes(sphere_id="s1", name="VoiceFin", meetings=120, chat=10),
+        SphereMinutes(sphere_id=None, name=None, meetings=0, chat=25),
+    ]
+    assert fake.calls == [
+        (
+            "rpc",
+            "sphere_hours",
+            {
+                "window_start": at(0).isoformat(),
+                "window_end": NOW.isoformat(),
+                "owner_telegram_id": OWNER_ID,
+            },
+        )
+    ]
+
+
+async def test_empty_answer_is_no_hours() -> None:
+    fake = FakeClient(data=None)
+
+    found = await db_hours.sphere_hours(
+        as_client(fake), owner_telegram_id=OWNER_ID, start=at(0), end=NOW
+    )
+
+    assert found == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"sphere_id": None},
+        ["не строка"],
+        [{"sphere_id": None, "name": None, "meetings": "час", "chat": 0}],
+        [{"sphere_id": None, "name": None, "meetings": 10}],
+        [{"sphere_id": None, "name": None, "meetings": -1, "chat": 0}],
+    ],
+)
+async def test_broken_answer_is_a_failure(data: Any) -> None:
+    fake = FakeClient(data=data)
+
+    with pytest.raises(DatabaseError):
+        await db_hours.sphere_hours(
+            as_client(fake), owner_telegram_id=OWNER_ID, start=at(0), end=NOW
+        )
+
+
+def test_owner_is_required_by_the_hours_query() -> None:
+    """Инвариант 2 держится сигнатурой: владельца не забыть и не подставить."""
+    parameter = inspect.signature(db_hours.sphere_hours).parameters["owner_telegram_id"]
+
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
 
 
 # --- срок со временем и длительностью --------------------------------------------
@@ -395,6 +304,7 @@ async def test_forwarded_message_gets_no_hours_block() -> None:
 # --- сборка блока ботом -------------------------------------------------------------
 
 SPHERES = [Sphere(id="s-voicefin", name="VoiceFin", facts=())]
+TODAY, YESTERDAY, WEEK = ((window.start, window.end) for window in hours.windows(NOW, TZ))
 
 
 def hours_service(store: FakeEdits) -> tuple[TaskService, FakeAnalyst]:
@@ -412,20 +322,16 @@ def hours_service(store: FakeEdits) -> tuple[TaskService, FakeAnalyst]:
     return service, analyst
 
 
-async def test_own_message_gets_the_hours_counted_from_meetings_and_chats() -> None:
-    """Бот читает встречи и сообщения с запасом до самого раннего окна и кладёт
-    в промпт строки, посчитанные `tally`."""
-    store = FakeEdits(
-        spheres=SPHERES,
-        meetings=[DbMeeting(start=at(14), minutes=120, sphere_id="s-voicefin")],
-        stamps=[ChatStamp(thread_id="t1", sphere_id=None, sent_at=at(11), mine=True)],
-    )
+async def test_own_message_gets_the_hours_of_three_windows_from_the_database() -> None:
+    """Бот спрашивает `sphere_hours` на сегодня, вчера и неделю и кладёт в
+    промпт строки — те же, что считал сам до этапа 035."""
+    counted = [row("VoiceFin", 120, 0), row(None, 0, 2)]
+    store = FakeEdits(spheres=SPHERES, hours={TODAY: counted, WEEK: counted})
     service, analyst = hours_service(store)
 
     await service.record_from_message(chat_id=42, telegram_message_id=7, text="куда ушёл день?")
 
-    since = hours.reading_since(NOW, TZ)
-    assert sorted(store.hour_reads) == [("chat_stamps", since), ("meetings", since)]
+    assert sorted(store.hour_reads) == sorted([TODAY, YESTERDAY, WEEK])
     assert analyst.hours == [
         [
             "Сегодня, суббота, 10 октября: VoiceFin — 2 ч (встречи 2 ч); без сферы — 2 мин "
@@ -449,11 +355,9 @@ async def test_forwarded_message_does_not_read_the_hours() -> None:
     assert analyst.hours == [None]
 
 
-@pytest.mark.parametrize("broken", ["meetings", "chat_stamps", "spheres"])
-async def test_failed_read_leaves_the_parse_without_the_hours(broken: str) -> None:
-    """База не ответила — разбор идёт без блока: поручение важнее контекста.
-    Без сфер часы ушли бы в «без сферы» — тоже без блока."""
-    store = FakeEdits(spheres=SPHERES, broken=[broken])
+async def test_failed_hours_leave_the_parse_without_the_block() -> None:
+    """База не ответила — разбор идёт без блока: поручение важнее контекста."""
+    store = FakeEdits(spheres=SPHERES, broken=["sphere_hours"])
     service, analyst = hours_service(store)
 
     outcome = await service.record_from_message(
@@ -462,3 +366,18 @@ async def test_failed_read_leaves_the_parse_without_the_hours(broken: str) -> No
 
     assert outcome.ok
     assert analyst.hours == [None]
+
+
+async def test_hours_name_spheres_themselves_when_the_spheres_did_not_read() -> None:
+    """Названия сфер приходят из ответа `sphere_hours`: без списка сфер часы
+    не уходят в «без сферы» — блок тот же."""
+    store = FakeEdits(spheres=SPHERES, broken=["spheres"], hours={TODAY: [row("VoiceFin", 60, 0)]})
+    service, analyst = hours_service(store)
+
+    await service.record_from_message(chat_id=42, telegram_message_id=7, text="куда ушёл день?")
+
+    assert analyst.spheres == [None]
+    assert analyst.hours[0] is not None
+    assert analyst.hours[0][0] == (
+        "Сегодня, суббота, 10 октября: VoiceFin — 1 ч (встречи 1 ч). Всего 1 ч."
+    )

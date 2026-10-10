@@ -81,16 +81,17 @@ from solomon import texts
 from solomon.config import Settings
 from solomon.db import chats as db_chats
 from solomon.db import facts as db_facts
+from solomon.db import hours as db_hours
 from solomon.db import reminders as db_reminders
 from solomon.db import searches as db_searches
 from solomon.db import spheres as db_spheres
 from solomon.db import tasks as db_tasks
-from solomon.db.chats import ChatStamp, ReportedChat
+from solomon.db.chats import ReportedChat
+from solomon.db.hours import SphereMinutes
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.spheres import Sphere
 from solomon.db.tasks import (
-    Meeting,
     MessageKind,
     OpenQuestion,
     PickedMessage,
@@ -514,9 +515,7 @@ class EditStore(Protocol):
 
     async def spheres(self) -> list[Sphere]: ...
 
-    async def meetings(self, since: datetime, until: datetime) -> list[Meeting]: ...
-
-    async def chat_stamps(self, since: datetime) -> list[ChatStamp]: ...
+    async def sphere_hours(self, start: datetime, end: datetime) -> list[SphereMinutes]: ...
 
 
 class NameSource(Protocol):
@@ -651,13 +650,10 @@ class DatabaseEditStore:
             self._db, owner_telegram_id=self._owner, telegram_message_id=telegram_message_id
         )
 
-    async def meetings(self, since: datetime, until: datetime) -> list[Meeting]:
-        return await db_tasks.list_meetings(
-            self._db, owner_telegram_id=self._owner, since=since, until=until
+    async def sphere_hours(self, start: datetime, end: datetime) -> list[SphereMinutes]:
+        return await db_hours.sphere_hours(
+            self._db, owner_telegram_id=self._owner, start=start, end=end
         )
-
-    async def chat_stamps(self, since: datetime) -> list[ChatStamp]:
-        return await db_chats.chat_stamps(self._db, owner_telegram_id=self._owner, since=since)
 
 
 def rule_of(understanding: Understanding, due_at: datetime | None) -> RuleOutcome:
@@ -2674,15 +2670,14 @@ class TaskService:
             return EditContext(tasks=[], last_tasks=(), swipe=None)
         now = self._clock()
         since = now - edits.LAST_TASK_WINDOW
-        tasks, events, swiped, recent, book, sources = await asyncio.gather(
+        tasks, events, swiped, recent, book, counted = await asyncio.gather(
             self._open_tasks(store),
             self._last_events(store, since),
             self._swiped(store, chat_id, swipe),
             self._recent(store, since, before),
             self._spheres(store),
-            self._hour_sources(store, now),
+            self._hours(store, now),
         )
-        counted = self._hours_lines(sources, book, now)
         if tasks is None:
             return replace(NO_EDIT, recent=recent, spheres=book, hours=counted)
         last_tasks = tuple(edits.last_task_numbers(events, tasks, now))
@@ -2738,38 +2733,22 @@ class TaskService:
         logger.info("Список для сверки дублей: задач %s", len(tasks))
         return EditContext(tasks=tasks, last_tasks=(), swipe=None, edits=False, spheres=book)
 
-    async def _hour_sources(
-        self, store: EditStore, now: datetime
-    ) -> tuple[list[Meeting], list[ChatStamp]] | None:
-        """Встречи и сообщения чатов для часов по сферам (§31.1) — или `None`,
-        если база не ответила: разбор идёт без блока часов."""
-        since = hours.reading_since(now, self._settings.owner_timezone)
+    async def _hours(self, store: EditStore, now: datetime) -> tuple[str, ...] | None:
+        """Строки блока «Часы по сферам» (§31.2): три окна — сегодня, вчера,
+        неделя — считает база (`sphere_hours`, §31.4), разом. Не ответила —
+        блока нет, разбор идёт без него: поручение важнее контекста. Названия
+        сфер приходят из того же ответа. В журнал — только числа."""
+        spans = hours.windows(now, self._settings.owner_timezone)
         try:
-            meetings, stamps = await asyncio.gather(
-                store.meetings(since, now), store.chat_stamps(since)
+            counted = await asyncio.gather(
+                *(store.sphere_hours(window.start, window.end) for window in spans)
             )
         except DatabaseError as error:
             logger.warning("Часы по сферам не прочитаны, разбор без них: %s", error)
             return None
-        return meetings, stamps
-
-    def _hours_lines(
-        self,
-        sources: tuple[list[Meeting], list[ChatStamp]] | None,
-        book: Sequence[Sphere] | None,
-        now: datetime,
-    ) -> tuple[str, ...] | None:
-        """Строки блока «Часы по сферам» (§31.2). Не прочитались встречи,
-        переписка или сферы — блока нет: часы сферы без её названия ушли бы в
-        «без сферы» и обманули бы. В журнал — только числа."""
-        if sources is None or book is None:
-            return None
-        meetings, stamps = sources
-        periods = hours.tally(meetings, stamps, book, now, self._settings.owner_timezone)
+        periods = [hours.period(window, rows) for window, rows in zip(spans, counted, strict=True)]
         logger.info(
-            "Часы по сферам: встреч %s, сообщений чатов %s, минут сегодня %s, за неделю %s",
-            len(meetings),
-            len(stamps),
+            "Часы по сферам: минут сегодня %s, за неделю %s",
             sum(item.total for item in periods[0].spheres),
             sum(item.total for item in periods[-1].spheres),
         )

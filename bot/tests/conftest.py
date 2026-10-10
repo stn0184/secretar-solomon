@@ -45,12 +45,12 @@ from aiogram.types import (
 )
 
 from solomon.config import Settings
-from solomon.db.chats import ChatStamp, ReportedChat
+from solomon.db.chats import ReportedChat
+from solomon.db.hours import SphereMinutes
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.spheres import Sphere
 from solomon.db.tasks import (
-    Meeting,
     MessageKind,
     OpenQuestion,
     PickedMessage,
@@ -723,16 +723,14 @@ class FakeEdits:
         broken: Iterable[str] = (),
         spheres: Sequence[Sphere] = (),
         reports: Mapping[int, ReportedChat] | None = None,
-        meetings: Sequence[Meeting] = (),
-        stamps: Sequence[ChatStamp] = (),
+        hours: Mapping[tuple[datetime, datetime], Sequence[SphereMinutes]] | None = None,
     ) -> None:
         self.tasks = {task.id: task for task in tasks}
-        # Встречи и сообщения чатов для часов по сферам (`techspec/31-hours.md`
-        # §31.1); их чтения — в `hour_reads`, а не в `calls`. Встречи — с
-        # началом в окне чтения, как у запроса базы.
-        self.meeting_rows = list(meetings)
-        self.stamp_rows = list(stamps)
-        self.hour_reads: list[tuple[str, datetime]] = []
+        # Часы по сферам (`techspec/31-hours.md` §31.4): ответ `sphere_hours` по
+        # окну `(начало, конец)`, незнакомое окно — пусто; чтения — в
+        # `hour_reads`, а не в `calls`.
+        self.hour_rows = dict(hours or {})
+        self.hour_reads: list[tuple[datetime, datetime]] = []
         # Отчёты о переписке по сообщению бота (§30.2); их чтения — в
         # `report_reads`, а не в `calls`.
         self.reports = dict(reports or {})
@@ -780,17 +778,11 @@ class FakeEdits:
             raise DatabaseError("ConnectTimeout: timed out")
         return list(self.book)
 
-    async def meetings(self, since: datetime, until: datetime) -> list[Meeting]:
-        self.hour_reads.append(("meetings", since))
-        if "meetings" in self.broken:
+    async def sphere_hours(self, start: datetime, end: datetime) -> list[SphereMinutes]:
+        self.hour_reads.append((start, end))
+        if "sphere_hours" in self.broken:
             raise DatabaseError("ConnectTimeout: timed out")
-        return [row for row in self.meeting_rows if since <= row.start < until]
-
-    async def chat_stamps(self, since: datetime) -> list[ChatStamp]:
-        self.hour_reads.append(("chat_stamps", since))
-        if "chat_stamps" in self.broken:
-            raise DatabaseError("ConnectTimeout: timed out")
-        return [row for row in self.stamp_rows if row.sent_at >= since]
+        return list(self.hour_rows.get((start, end), ()))
 
     async def open_tasks(self, limit: int) -> list[TaskDetails]:
         self._touch("open_tasks", limit)

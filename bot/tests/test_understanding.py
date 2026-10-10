@@ -2286,7 +2286,7 @@ FIXTURE_COUNT = 123
 SPHERE_COUNT = 14
 HOURS_COUNT = 13
 # Окна блока часов в примере (`techspec/31-hours.md` §31.2): по порядку
-# `hours.tally` — сегодня, вчера, неделя.
+# `hours.windows` — сегодня, вчера, неделя.
 HOURS_WINDOWS = ("today", "yesterday", "week")
 SEVERAL_COUNT = 9
 SEARCH_COUNT = 13
@@ -2411,18 +2411,17 @@ def tasks_for(case: dict[str, Any]) -> list[TaskDetails]:
 
 
 def hours_for(case: dict[str, Any], now: datetime, timezone: ZoneInfo) -> list[str]:
-    """Блок часов примера — как его собрал бы бот (§31.2): окна `hours.tally` на
+    """Блок часов примера — как его собрал бы бот (§31.2): окна `hours.windows` на
     «сейчас» прогона, часы — из `spent` примера; без него — пустые окна, как у
     владельца без встреч и переписки. У своего сообщения блок есть всегда."""
-    periods = hours.tally([], [], [], now, timezone)
     filled = []
-    for window, period in zip(HOURS_WINDOWS, periods, strict=True):
+    for name, window in zip(HOURS_WINDOWS, hours.windows(now, timezone), strict=True):
         items = tuple(
             hours.SphereHours(raw["sphere"], raw["meetings"], raw["chat"])
             for raw in case.get("spent", [])
-            if raw["window"] == window
+            if raw["window"] == name
         )
-        filled.append(hours.Period(period.label, items))
+        filled.append(hours.Period(window.label, items))
     return hours.lines(filled)
 
 

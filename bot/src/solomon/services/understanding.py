@@ -915,8 +915,9 @@ def format_spheres(spheres: Sequence[KnownSphere], rules: str) -> str:
     return "\n".join((SPHERES_HEAD, *lines, rules))
 
 
-# Блок «Часы по сферам» (`techspec/31-hours.md` §31.2): строки считает бот
-# (`services/hours.py`), модель отвечает из них и ничего не досчитывает.
+# Блок «Часы по сферам» (`techspec/31-hours.md` §31.2): часы считает база
+# (`sphere_hours`), строки собирает бот (`services/hours.py`), модель отвечает
+# из них и ничего не досчитывает. Текст блока и правил — прежний (этап 033).
 HOURS_HEAD = (
     "Часы по сферам — примерно, только из встреч с длительностью и из переписки в личных чатах:"
 )
