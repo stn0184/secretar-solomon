@@ -467,6 +467,50 @@ export async function loadActiveTasks(db: Db): Promise<TasksResult> {
   return { ok: true, tasks: tasks.slice(0, TASKS_SHOWN), more: tasks.length > TASKS_SHOWN };
 }
 
+/** Дело дня для «Сегодня» (§32.3): само дело и сделано ли оно — ✓ в нити. */
+export interface DayTask {
+  task: Task;
+  done: boolean;
+}
+
+export type DayTasksResult = { ok: true; tasks: DayTask[] } | { ok: false; message: string };
+
+/** Дел со сроком в одном дне больше этого не бывает; выборка режется, а не падает. */
+const DAY_TASKS_LIMIT = 200;
+
+/**
+ * Дела со сроком в `[start, end)` — открытые и сделанные, по сроку: из них
+ * «Сегодня» строит нить (встречи и дела с часом) и «Без часа». Убранные не
+ * читаются. Владельца режет правило доступа, как у списка.
+ */
+export async function loadDayTasks(db: Db, start: Date, end: Date): Promise<DayTasksResult> {
+  const result = await query(db, (client: SupabaseClient) =>
+    client
+      .from("tasks")
+      .select(`${COLUMNS}, status`)
+      .gte("due_at", start.toISOString())
+      .lt("due_at", end.toISOString())
+      .in("status", ["active", "done"])
+      .order("due_at", { ascending: true })
+      .limit(DAY_TASKS_LIMIT),
+  );
+  if (!result.ok) {
+    return failed("Не получилось прочитать дела дня", result);
+  }
+  const tasks: DayTask[] = [];
+  for (const row of result.data ?? []) {
+    const task = parseTask(row);
+    if (task === null) {
+      return {
+        ok: false,
+        message: "Не получилось прочитать дела дня. База вернула задачу без названия.",
+      };
+    }
+    tasks.push({ task, done: recordOf(row)?.status === "done" });
+  }
+  return { ok: true, tasks };
+}
+
 /**
  * Докачать карточку: исходное сообщение и напоминания. Сама задача уже
  * в руках — из списка. Оба запроса идут под RLS (`techspec/03-schema.md` §3.6).

@@ -66,6 +66,20 @@
   --s-12: #c8b49a;
   --s-none: #8e877b;
   --mark-ink: #0b0b0b;
+  /* материал карты сферы — камень места; 1–4 из прототипа, 5–12 подобраны
+     на реализации (этап 035): белый текст не ниже 4,5:1 на каждом цвете */
+  --mat-1: linear-gradient(135deg, #132449 0%, #2f4f9e 55%, #0d1630 100%);
+  --mat-2: linear-gradient(135deg, #0a3326 0%, #155e44 55%, #082419 100%);
+  --mat-3: linear-gradient(135deg, #3b0f18 0%, #94384a 55%, #2a0a11 100%);
+  --mat-4: linear-gradient(135deg, #22163f 0%, #5c44a3 55%, #170f2c 100%);
+  --mat-5: linear-gradient(135deg, #0b2f35 0%, #1d6b77 55%, #082226 100%);
+  --mat-6: linear-gradient(135deg, #3a1d08 0%, #9a5a22 55%, #2a1405 100%);
+  --mat-7: linear-gradient(135deg, #1e2e0c 0%, #4f7424 55%, #141f07 100%);
+  --mat-8: linear-gradient(135deg, #3a1029 0%, #9a3a72 55%, #29091c 100%);
+  --mat-9: linear-gradient(135deg, #352c08 0%, #7a6418 55%, #251e05 100%);
+  --mat-10: linear-gradient(135deg, #1c2330 0%, #4a5a74 55%, #121821 100%);
+  --mat-11: linear-gradient(135deg, #1a1a4a 0%, #4646a8 55%, #111133 100%);
+  --mat-12: linear-gradient(135deg, #2e261c 0%, #6e5c44 55%, #1f1912 100%);
 
   /* смысловые: текст цветом на подложке -w */
   --c-high: #f0c46a;
@@ -1495,7 +1509,7 @@ button {
 /* ─── Сферы: карточка сферы ─────────────────────────────────────────── */
 /* «Без сферы и о себе» — та же карточка сферы без камня и полосы (design.md
    §3); в «Банк-люксе» — тёмный камень с линией, в «Тихой роскоши» — белая
-   карточка с серой полосой слева. Карточки сфер с часами добавит 035. */
+   карточка с серой полосой слева. Карточки сфер с часами — ниже. */
 
 .sph {
   appearance: none;
@@ -1568,6 +1582,581 @@ button {
   bottom: 0;
   width: 6px;
   background: var(--c);
+}
+
+/* Карточка сферы с часами (артборд 03): в «Банк-люксе» — карта из камня места
+   (--mat-N) с чипом и бликом, который проходит один раз; в «Тихой роскоши» —
+   белая карточка с цветной полосой слева. Карточка не нажимается. */
+
+.sph--stone {
+  cursor: default;
+}
+
+.sph__chip {
+  display: none;
+}
+
+.sph__h {
+  margin-left: auto;
+  font: var(--t-sph-h);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--sph-ink);
+}
+
+.sph__bar {
+  position: relative;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--sph-track);
+  overflow: hidden;
+}
+
+.sph__bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--sph-fill);
+}
+
+.sph__fact {
+  position: relative;
+  font: var(--t-sub);
+  color: var(--sph-ink-2);
+  overflow-wrap: anywhere;
+}
+
+.sph__fact b {
+  font-weight: 500;
+  color: var(--sph-ink);
+}
+
+:root[data-skin="bank"] .sph--stone {
+  background: var(--mat);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.16) inset,
+    0 12px 28px rgba(0, 0, 0, 0.5);
+}
+
+:root[data-skin="bank"] .sph--stone::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120% 90% at 100% 0%, rgba(255, 255, 255, 0.09), transparent 55%);
+  pointer-events: none;
+}
+
+/* Блик: полоса света проходит по карте один раз, карты — по очереди. */
+:root[data-skin="bank"] .sph--stone::after {
+  content: "";
+  position: absolute;
+  top: -40%;
+  bottom: -40%;
+  left: -60%;
+  width: 35%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.14), transparent);
+  transform: skewX(-18deg);
+  pointer-events: none;
+  animation: sheen 2.4s ease-in-out both;
+  animation-delay: var(--wait, 600ms);
+}
+
+@keyframes sheen {
+  to {
+    transform: skewX(-18deg) translateX(545%);
+  }
+}
+
+:root[data-skin="bank"] .sph__chip {
+  display: block;
+  flex: none;
+  width: 26px;
+  height: 19px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #f2dda4, #b48a3e 60%, #e9cf8c);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-skin="bank"] .sph--stone::after {
+    animation: none;
+  }
+}
+
+/* ─── Часы: крупная цифра и доли сфер ───────────────────────────────── */
+/* Артборды 01–02: итог крупной цифрой, единицы мельче и цветом темы; доли
+   сфер — полоса из кусков и подписи. */
+
+.big {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+  font: var(--t-big);
+  letter-spacing: -0.03em;
+  color: var(--ink);
+}
+
+.big .u {
+  font: var(--t-big-u);
+  letter-spacing: 0;
+  color: var(--num-acc);
+}
+
+.big-sub {
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.big-sub b {
+  font-weight: 500;
+  color: var(--num-acc);
+}
+
+/* Часы в строке: «9 ч 25 мин» — цифры с прокруткой, единицы словами. */
+.fig {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.split {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: var(--s1) var(--s2) 0;
+}
+
+.stripe {
+  display: flex;
+  gap: 2px;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.stripe i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--c);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c);
+}
+
+.legend b {
+  font-weight: 500;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── «Сегодня»: дела без часа и нить дня ───────────────────────────── */
+/* Нить: время, пунктир с капсулами (высота — по длительности), суть и
+   подпись, ✓ у сделанного. Встреча — заливка цвета сферы, переписка —
+   бледная заливка с кантом, будущее — контур, дело с часом — точка. */
+
+.inbox {
+  appearance: none;
+  border: 0;
+  background: none;
+  width: 100%;
+  margin: 0;
+  padding: 11px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.inbox + .inbox {
+  border-top: 1px solid var(--line);
+}
+
+.inbox:active {
+  background: var(--surface-2);
+}
+
+.inbox__ic {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-kind-w);
+  font-size: 14px;
+}
+
+.inbox__b {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.inbox__t {
+  font: var(--t-row);
+  overflow-wrap: anywhere;
+}
+
+.inbox__m {
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.inbox .chev {
+  margin: 0 0 0 auto;
+  font-size: 20px;
+}
+
+.thread {
+  padding: 2px 6px 0 2px;
+}
+
+.ti {
+  display: grid;
+  grid-template-columns: 44px 40px 1fr 22px;
+  column-gap: 10px;
+  align-items: start;
+}
+
+.ti__time {
+  padding-top: 2px;
+  text-align: right;
+  font: 500 12px/16px var(--font-ui);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.ti__rail,
+.gap__rail {
+  position: relative;
+}
+
+.ti__rail {
+  align-self: stretch;
+  display: flex;
+  justify-content: center;
+}
+
+.ti__rail::before,
+.gap__rail::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  border-left: 2px dotted var(--rail);
+}
+
+.cap {
+  position: relative;
+  z-index: 1;
+  width: 40px;
+  min-height: 40px;
+  border-radius: 20px;
+  display: flex;
+  justify-content: center;
+  padding-top: 10px;
+  font-size: 15px;
+  line-height: 20px;
+  background: var(--c);
+  box-shadow: var(--cap-shadow);
+}
+
+.cap--chat {
+  background: color-mix(in srgb, var(--c) 18%, var(--surface));
+  box-shadow: inset 0 0 0 1.5px var(--c);
+}
+
+.cap--future {
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1.5px var(--c);
+}
+
+.cap--point {
+  width: 30px;
+  min-height: 30px;
+  margin-top: 4px;
+  padding-top: 5px;
+  font-size: 13px;
+}
+
+.ti__b {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.ti__t {
+  font: var(--t-row);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.ti__m {
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+.ti--done .ti__t {
+  color: var(--ink-2);
+  text-decoration: line-through;
+  text-decoration-color: var(--ink-3);
+}
+
+.ti--future .ti__t {
+  color: var(--ink-2);
+}
+
+.done {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  border-radius: 50%;
+  background: var(--c);
+}
+
+.done::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 3.5px;
+  width: 4px;
+  height: 9px;
+  border: solid var(--done-ink);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.gap {
+  display: grid;
+  grid-template-columns: 44px 40px 1fr;
+  column-gap: 10px;
+}
+
+.gap p {
+  margin: 0;
+  padding: 7px 0 9px;
+  font: var(--t-gap);
+  color: var(--ink-3);
+}
+
+.now {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  column-gap: 10px;
+  align-items: center;
+  margin: 2px 0 4px;
+}
+
+.now span {
+  text-align: right;
+  font: 600 12px/16px var(--font-ui);
+  color: var(--now);
+  font-variant-numeric: tabular-nums;
+}
+
+.now i {
+  position: relative;
+  height: 1.5px;
+  background: var(--now);
+}
+
+.now i::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--now);
+}
+
+/* ─── «Неделя»: строка на день и сферы полосами ─────────────────────── */
+/* Артборд 02: день — полосы отрезков по оси 7–22 и часы дня справа;
+   переписка бледнее, будущая встреча — контуром, сегодня — линия «сейчас». */
+
+.wk {
+  padding: 12px 14px 6px;
+}
+
+.wk__axis,
+.wd {
+  display: grid;
+  grid-template-columns: 34px 1fr 58px;
+  gap: 10px;
+}
+
+.wk__axis {
+  margin-bottom: 4px;
+  font: 400 10.5px/12px var(--font-ui);
+  color: var(--ink-3);
+}
+
+.wk__axis div {
+  position: relative;
+  height: 12px;
+}
+
+.wk__axis div span {
+  position: absolute;
+  transform: translateX(-50%);
+}
+
+.wd {
+  align-items: center;
+  height: 40px;
+  border-top: 1px solid var(--line);
+}
+
+.wd__l {
+  font: 500 12.5px/15px var(--font-ui);
+  color: var(--ink);
+}
+
+.wd__l small {
+  display: block;
+  font: 400 10.5px/12px var(--font-ui);
+  color: var(--ink-3);
+}
+
+.wd--today .wd__l {
+  color: var(--today);
+  font-weight: 600;
+}
+
+.track {
+  position: relative;
+  height: 14px;
+  border-radius: 7px;
+  background: var(--track);
+}
+
+.bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 3px;
+  border-radius: 7px;
+  background: var(--c);
+}
+
+.bar--chat {
+  background: color-mix(in srgb, var(--c) 45%, var(--track));
+}
+
+.bar--future {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--c);
+}
+
+.nowline {
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  width: 1.5px;
+  background: var(--now);
+}
+
+.wd__v {
+  justify-self: end;
+  font: var(--t-dayv);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.wd__v--muted {
+  font: var(--t-sub);
+  color: var(--ink-3);
+}
+
+.wd__v--zero {
+  color: var(--ink-3);
+}
+
+.hbars {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 var(--s2);
+}
+
+.hb {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 10px;
+}
+
+.hb__n {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  font: var(--t-row);
+  color: var(--ink);
+}
+
+.hb__n i {
+  flex: none;
+  width: 4px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--c);
+}
+
+.hb__v {
+  font: var(--t-row);
+  color: var(--ink);
+}
+
+.hb__track {
+  grid-column: 1 / -1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.hb__track i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--c);
+}
+
+.hb__sub {
+  grid-column: 1 / -1;
+  margin-top: -2px;
+  font: var(--t-sub);
+  color: var(--ink-2);
 }
 
 /* ─── «Оформление» ──────────────────────────────────────────────────── */

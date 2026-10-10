@@ -139,6 +139,25 @@ describe("контраст: монограммы сфер в «Банк-люкс
   }
 });
 
+describe("карты сфер «Банк-люкса» — камень места: белый текст на каждом цвете градиента", () => {
+  const map = tokens("bank");
+  for (let place = 1; place <= 12; place += 1) {
+    const name = `--mat-${place}`;
+    const stops = [...(map.get(name) ?? "").matchAll(/#[0-9a-f]{6}/gi)].map((m) => m[0]);
+    it(`${name}: три цвета`, () => assert.equal(stops.length, 3));
+    for (const stop of stops) {
+      for (const ink of ["--sph-ink", "--sph-ink-2"]) {
+        it(`${ink} на ${name} ${stop}`, () => {
+          const n = Number.parseInt(stop.slice(1), 16);
+          const bg: Rgb = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+          const value = ratio(over(color(map, ink), bg), bg);
+          assert.ok(value >= 4.5, `${name} ${stop}: ${value.toFixed(2)}:1`);
+        });
+      }
+    }
+  }
+});
+
 describe("главная кнопка «Банк-люкса» — градиент: текст на каждом его цвете", () => {
   const map = tokens("bank");
   const stops = [...(map.get("--btn-main") ?? "").matchAll(/#[0-9a-f]{6}/gi)].map((m) => m[0]);

@@ -7,9 +7,10 @@ import { type ListState, type ListView, TaskList } from "./components/TaskList.t
 import { TaskCard } from "./components/TaskCard.tsx";
 import { ThemeSettings } from "./components/ThemeSettings.tsx";
 import { type Tab, Tabs } from "./components/Tabs.tsx";
-import { TodayTab } from "./components/TodayTab.tsx";
+import { type TodayState, TodayTab } from "./components/TodayTab.tsx";
 import { WeekTab } from "./components/WeekTab.tsx";
 import { type Fact, aboutFacts, confirmFact, loadFacts, removeFact } from "./lib/facts.ts";
+import { loadToday } from "./lib/hours.ts";
 import { createSession, readSupabaseEnv } from "./lib/session.ts";
 import { loadSpheres, sphereOf } from "./lib/spheres.ts";
 import { type ActionResult, type Db, createDb } from "./lib/supabase.ts";
@@ -39,6 +40,9 @@ import {
  * Собрать доступ к базе. Нет переменных сборки или приложение открыто не из
  * Telegram — база недоступна, и экран сразу говорит почему.
  */
+/** Часы старше минуты перечитываются при возврате на вкладку: «сейчас» ушло вперёд. */
+const HOURS_FRESH_MS = 60 * 1000;
+
 function bootstrap(): { db: Db } | { error: string } {
   const env = readSupabaseEnv();
   if (!env) {
@@ -81,6 +85,14 @@ export default function App() {
   // под ней держится до следующего чтения списка.
   const [justDone, setJustDone] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
+  // «Сегодня»: часы и отрезки дня и дела дня — при старте, по «Обновить» и
+  // при возврате на вкладку, если прочитано больше минуты назад. Перечитывание
+  // идёт поверх прочитанного: цифры едут от прежнего значения к новому.
+  const [today, setToday] = useState<TodayState>(() =>
+    "error" in boot ? { kind: "failed", message: boot.error } : { kind: "loading" },
+  );
+  const [todayKey, setTodayKey] = useState(0);
+  const todayAt = useRef(0);
   // Оформление: выбор владельца и схема Telegram; тема на экране — из обоих.
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>(readCachedChoice);
   const [scheme, setScheme] = useState<ColorScheme>(getColorScheme);
@@ -152,6 +164,24 @@ export default function App() {
       cancelled = true;
     };
   }, [boot, reloadKey]);
+
+  useEffect(() => {
+    if ("error" in boot) {
+      return;
+    }
+    let cancelled = false;
+    void loadToday(boot.db, new Date()).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      todayAt.current = Date.now();
+      setNow(new Date());
+      setToday(result.ok ? { kind: "ready", today: result.today } : { kind: "failed", message: result.message });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [boot, todayKey]);
 
   // Память читается при первом открытии «Сфер» или «О себе» и по «Обновить».
   useEffect(() => {
@@ -260,6 +290,13 @@ export default function App() {
     setEditing(true);
   }
 
+  /** Дело изменилось в карточке — часы и нить перечитываются, если уже прочитаны. */
+  function hoursChanged() {
+    if (today.kind === "ready") {
+      setTodayKey((k) => k + 1);
+    }
+  }
+
   /**
    * База записала правку: в списке и карточке — её строка, а не черновик.
    * Карточку успели закрыть, пока шёл запрос, — она не открывается снова.
@@ -271,6 +308,7 @@ export default function App() {
         : current,
     );
     setCard((current) => (current?.id === task.id ? task : current));
+    hoursChanged();
     closeEdit();
   }
 
@@ -288,6 +326,16 @@ export default function App() {
     if (next === "spheres") {
       loadFactsOnce();
     }
+    if (next === "today" && today.kind === "ready" && Date.now() - todayAt.current > HOURS_FRESH_MS) {
+      setTodayKey((k) => k + 1);
+    }
+  }
+
+  function reloadToday() {
+    if ("db" in boot) {
+      setToday({ kind: "loading" });
+    }
+    setTodayKey((k) => k + 1);
   }
 
   function openAbout() {
@@ -317,6 +365,7 @@ export default function App() {
         ? { ...current, tasks: current.tasks.filter((t) => t.id !== taskId) }
         : current,
     );
+    hoursChanged();
     back();
   }
 
@@ -331,6 +380,7 @@ export default function App() {
         : current,
     );
     setJustDone(task.id);
+    hoursChanged();
     back();
   }
 
@@ -414,7 +464,16 @@ export default function App() {
     }
     return (
       <>
-        {tab === "today" ? <TodayTab now={now} onClose={closeApp} /> : null}
+        {tab === "today" ? (
+          <TodayTab
+            state={today}
+            spheres={list.kind === "ready" ? list.spheres : []}
+            now={now}
+            onOpen={open}
+            onReload={reloadToday}
+            onClose={closeApp}
+          />
+        ) : null}
         {tab === "week" ? <WeekTab now={now} onClose={closeApp} /> : null}
         {tab === "spheres" ? (
           <SpheresTab
