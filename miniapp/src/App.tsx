@@ -8,9 +8,9 @@ import { TaskCard } from "./components/TaskCard.tsx";
 import { ThemeSettings } from "./components/ThemeSettings.tsx";
 import { type Tab, Tabs } from "./components/Tabs.tsx";
 import { type TodayState, TodayTab } from "./components/TodayTab.tsx";
-import { WeekTab } from "./components/WeekTab.tsx";
+import { type WeekState, WeekTab } from "./components/WeekTab.tsx";
 import { type Fact, aboutFacts, confirmFact, loadFacts, removeFact } from "./lib/facts.ts";
-import { loadToday } from "./lib/hours.ts";
+import { loadToday, loadWeek } from "./lib/hours.ts";
 import { createSession, readSupabaseEnv } from "./lib/session.ts";
 import { loadSpheres, sphereOf } from "./lib/spheres.ts";
 import { type ActionResult, type Db, createDb } from "./lib/supabase.ts";
@@ -93,6 +93,13 @@ export default function App() {
   );
   const [todayKey, setTodayKey] = useState(0);
   const todayAt = useRef(0);
+  // «Неделя» и «Сферы» делят одно чтение недели — при первом открытии любой
+  // из двух; дальше — как у «Сегодня».
+  const [week, setWeek] = useState<WeekState>(() =>
+    "error" in boot ? { kind: "failed", message: boot.error } : { kind: "idle" },
+  );
+  const [weekKey, setWeekKey] = useState(0);
+  const weekAt = useRef(0);
   // Оформление: выбор владельца и схема Telegram; тема на экране — из обоих.
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>(readCachedChoice);
   const [scheme, setScheme] = useState<ColorScheme>(getColorScheme);
@@ -182,6 +189,24 @@ export default function App() {
       cancelled = true;
     };
   }, [boot, todayKey]);
+
+  useEffect(() => {
+    if ("error" in boot || weekKey === 0) {
+      return;
+    }
+    let cancelled = false;
+    void loadWeek(boot.db, new Date()).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      weekAt.current = Date.now();
+      setNow(new Date());
+      setWeek(result.ok ? { kind: "ready", week: result.week } : { kind: "failed", message: result.message });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [boot, weekKey]);
 
   // Память читается при первом открытии «Сфер» или «О себе» и по «Обновить».
   useEffect(() => {
@@ -295,6 +320,9 @@ export default function App() {
     if (today.kind === "ready") {
       setTodayKey((k) => k + 1);
     }
+    if (week.kind === "ready") {
+      setWeekKey((k) => k + 1);
+    }
   }
 
   /**
@@ -329,6 +357,21 @@ export default function App() {
     if (next === "today" && today.kind === "ready" && Date.now() - todayAt.current > HOURS_FRESH_MS) {
       setTodayKey((k) => k + 1);
     }
+    if (next === "week" || next === "spheres") {
+      if (week.kind === "idle") {
+        setWeek({ kind: "loading" });
+        setWeekKey((k) => k + 1);
+      } else if (week.kind === "ready" && Date.now() - weekAt.current > HOURS_FRESH_MS) {
+        setWeekKey((k) => k + 1);
+      }
+    }
+  }
+
+  function reloadWeek() {
+    if ("db" in boot) {
+      setWeek({ kind: "loading" });
+    }
+    setWeekKey((k) => k + 1);
   }
 
   function reloadToday() {
@@ -474,7 +517,15 @@ export default function App() {
             onClose={closeApp}
           />
         ) : null}
-        {tab === "week" ? <WeekTab now={now} onClose={closeApp} /> : null}
+        {tab === "week" ? (
+          <WeekTab
+            state={week}
+            spheres={list.kind === "ready" ? list.spheres : []}
+            now={now}
+            onReload={reloadWeek}
+            onClose={closeApp}
+          />
+        ) : null}
         {tab === "spheres" ? (
           <SpheresTab
             state={spheresState}
