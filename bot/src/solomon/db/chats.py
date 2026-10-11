@@ -32,6 +32,7 @@ ERASE_FUNCTION = "erase_chat_messages"
 TO_ANALYZE_FUNCTION = "chats_to_analyze"
 RECORD_FUNCTION = "record_chat_analysis"
 FAILED_FUNCTION = "chat_failed"
+UNAVAILABLE_FUNCTION = "chat_unavailable"
 SKIP_FUNCTION = "skip_chat_messages"
 REPORT_FUNCTION = "chat_report"
 REPORT_SENT_FUNCTION = "mark_chat_report_sent"
@@ -80,12 +81,19 @@ class Stored:
 
 @dataclass(frozen=True, slots=True)
 class ChatToAnalyze:
-    """Чат, кусок которого пора разбирать (§25.3)."""
+    """Чат, кусок которого пора разбирать (§25.3).
+
+    `retry_failures` — временных неудач разбора текущего куска подряд,
+    `retry_since` — первая из них (`techspec/33-retry-later.md` §33.3): от неё
+    считаются сутки; у куска без временных неудач — ноль и пусто.
+    """
 
     thread_id: str
     platform: Platform
     chat_key: str
     name: str
+    retry_failures: int = 0
+    retry_since: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,6 +485,8 @@ async def chats_to_analyze(
                 platform=_platform(row.get("platform")),
                 chat_key=str(row.get("chat_key") or ""),
                 name=str(row.get("name") or ""),
+                retry_failures=_count(row.get("retry_failures") or 0, "временных неудач"),
+                retry_since=_optional_moment(row.get("retry_since"), "retry_since"),
             )
         )
     return found
@@ -568,6 +578,22 @@ async def chat_failed(db: Client, *, owner_telegram_id: int, thread_id: str) -> 
     if single_row(data) is None:
         return None
     return _count(data, "сколько неудач подряд")
+
+
+async def chat_unavailable(
+    db: Client, *, owner_telegram_id: int, thread_id: str, retry_at: datetime
+) -> int | None:
+    """Временная неудача разбора (§33.3): сколько их теперь у куска; следующая
+    попытка — не раньше `retry_at`. `None` — чата нет."""
+    params = {
+        "owner_telegram_id": owner_telegram_id,
+        "thread_id": thread_id,
+        "retry_at": retry_at.isoformat(),
+    }
+    data = await ask(lambda: db.rpc(UNAVAILABLE_FUNCTION, params).execute().data)
+    if single_row(data) is None:
+        return None
+    return _count(data, "сколько временных неудач подряд")
 
 
 async def skip_chat_messages(

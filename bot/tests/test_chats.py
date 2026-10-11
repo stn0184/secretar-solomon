@@ -34,7 +34,7 @@ from aiogram.types import (
     VideoNote,
     Voice,
 )
-from anthropic import APITimeoutError
+from anthropic import APIStatusError, APITimeoutError
 from supabase import Client
 
 from solomon import handlers, texts
@@ -1075,6 +1075,10 @@ class FakeChatStore:
                 "waiting_to": None,
                 "waiting_reminded_at": None,
                 "failures": 0,
+                # Временные неудачи текущего куска (§33.3): счёт, начало, попытка.
+                "retry_failures": 0,
+                "retry_since": None,
+                "retry_at": None,
             },
         )
         thread["name"] = incoming.chat_name or thread["name"]
@@ -1179,12 +1183,16 @@ class FakeChatStore:
             if not consented or not pending:
                 continue
             first = min(message["created_at"] for message in pending)
-            if thread["last_message_at"] < quiet_before or first < stale_before:
+            # Пауза после временной неудачи (§33.3) — по часам базы, как `now()`.
+            waits = thread.get("retry_at") is not None and thread["retry_at"] > self.now
+            if not waits and (thread["last_message_at"] < quiet_before or first < stale_before):
                 chat = ChatToAnalyze(
                     thread_id=thread["id"],
                     platform=thread["platform"],
                     chat_key=thread["chat_key"],
                     name=thread["name"],
+                    retry_failures=thread.get("retry_failures", 0),
+                    retry_since=thread.get("retry_since"),
                 )
                 found.append((first, chat))
         return [chat for _, chat in sorted(found, key=lambda pair: pair[0])]
@@ -1269,6 +1277,7 @@ class FakeChatStore:
             )
         thread = self._thread_by_id(thread_id)
         thread["failures"] = 0
+        self._clear_retry(thread)
         # Сфера чата липкая, как в базе (§30.2): ставится, пока её нет.
         if thread.get("sphere") is None:
             thread["sphere"] = sphere
@@ -1286,6 +1295,14 @@ class FakeChatStore:
         thread = self._thread_by_id(thread_id)
         thread["failures"] += 1
         return int(thread["failures"])
+
+    async def unavailable(self, thread_id: str, retry_at: datetime) -> int | None:
+        self._call("unavailable")
+        thread = self._thread_by_id(thread_id)
+        thread["retry_failures"] = thread.get("retry_failures", 0) + 1
+        thread["retry_since"] = thread.get("retry_since") or self.now
+        thread["retry_at"] = retry_at
+        return int(thread["retry_failures"])
 
     async def skip(self, thread_id: str, message_ids: Sequence[str]) -> str | None:
         self._call("skip")
@@ -1305,7 +1322,15 @@ class FakeChatStore:
             }
         )
         self._thread_by_id(thread_id)["failures"] = 0
+        self._clear_retry(self._thread_by_id(thread_id))
         return analysis_id
+
+    @staticmethod
+    def _clear_retry(thread: dict[str, Any]) -> None:
+        """Любой разбор куска обнуляет временные неудачи — триггер базы (§3.12)."""
+        thread["retry_failures"] = 0
+        thread["retry_since"] = None
+        thread["retry_at"] = None
 
     async def reports_to_send(self) -> list[str]:
         self._call("reports_to_send")
@@ -3536,3 +3561,150 @@ async def test_live_chat_analysis_finds_deals_and_the_unanswered() -> None:
     assert all("отмен" not in deal.title.lower() for deal in command.deals)
 
     assert outcomes["дубль"].answer.deals == []
+
+
+# --- Модель недоступна (`techspec/33-retry-later.md` §33.3) -----------------------------
+
+
+def unavailable(code: int = 503) -> FakeChatCall:
+    """Посредник отвечает кодом `code` — как 2026-10-11."""
+    response = httpx2.Response(code, request=httpx2.Request("POST", "https://x"))
+    return FakeChatCall(error=APIStatusError("boom", response=response, body=None))
+
+
+async def test_run_analysis_marks_an_unavailable_model_as_temporary() -> None:
+    timer = ticking(0.0, 1.0)
+
+    down = await chats.run_chat_analysis(unavailable(), system="s", text="t", timer=timer)
+    bad = await chats.run_chat_analysis(unavailable(400), system="s", text="t", timer=timer)
+    refused = await chats.run_chat_analysis(
+        FakeChatCall(stop_reason="refusal"), system="s", text="t", timer=timer
+    )
+
+    assert isinstance(down, chats.NotAnalyzed) and down.temporary
+    assert isinstance(bad, chats.NotAnalyzed) and not bad.temporary
+    assert isinstance(refused, chats.NotAnalyzed) and not refused.temporary
+
+
+async def test_unavailable_model_is_not_a_failure_and_waits_a_pause() -> None:
+    store = FakeChatStore()
+    await igor_said(store, ("in", "Пришлёшь расчёт?"))
+    store.now = QUIET_LATER
+    call = unavailable()
+    service = analyzing_service(store, call)
+
+    assert await service.analyze_due() == 0
+
+    thread = store.thread()
+    assert thread["failures"] == 0, "три неудачи подряд — только постоянные"
+    assert thread["retry_failures"] == 1
+    assert thread["retry_at"] == QUIET_LATER + timedelta(minutes=1)
+    # Пауза не прошла — к разбору чат не идёт.
+    assert await service.analyze_due() == 0
+    assert len(call.calls) == 1
+
+
+async def test_unavailable_model_does_not_skip_the_chunk_within_a_day() -> None:
+    """Приёмка 6: недоступная модель — не повод пометить кусок без дел раньше суток."""
+    store = FakeChatStore()
+    await igor_said(store, ("in", "Пришлёшь расчёт в пятницу?"))
+    call = unavailable()
+    at = QUIET_LATER
+    for _ in range(8):
+        store.now = at
+        assert await analyzing_service(store, call, at=at).analyze_due() == 0
+        at = store.thread()["retry_at"]
+
+    assert len(call.calls) == 8
+    assert store.analyses == []
+    assert store.messages[0]["analysis_id"] is None
+    assert at - store.thread()["retry_since"] < chats.LATER_LIMIT
+
+
+async def test_a_day_without_the_model_skips_the_chunk() -> None:
+    store = FakeChatStore()
+    await igor_said(store, ("in", "Пришлёшь расчёт?"))
+    thread = store.thread()
+    thread["retry_failures"] = 40
+    thread["retry_since"] = QUIET_LATER - chats.LATER_LIMIT
+
+    store.now = QUIET_LATER
+    assert await analyzing_service(store, unavailable()).analyze_due() == 1
+
+    assert [analysis["status"] for analysis in store.analyses] == ["skipped"]
+    assert store.thread()["retry_failures"] == 0
+    assert store.tasks == []
+
+
+async def test_last_chat_attempt_lands_on_the_end_of_the_day() -> None:
+    store = FakeChatStore()
+    await igor_said(store, ("in", "Пришлёшь расчёт?"))
+    thread = store.thread()
+    thread["retry_failures"] = 30
+    thread["retry_since"] = QUIET_LATER - chats.LATER_LIMIT + timedelta(minutes=10)
+
+    store.now = QUIET_LATER
+    await analyzing_service(store, unavailable()).analyze_due()
+
+    assert store.thread()["retry_at"] == QUIET_LATER + timedelta(minutes=10)
+
+
+async def test_analysis_after_the_outage_clears_the_wait() -> None:
+    store = FakeChatStore()
+    await igor_said(store, ("in", "Пришлёшь расчёт?"))
+    store.now = QUIET_LATER
+    await analyzing_service(store, unavailable()).analyze_due()
+
+    later = QUIET_LATER + timedelta(minutes=2)
+    store.now = later
+    assert await analyzing_service(store, FakeChatCall(), at=later).analyze_due() == 1
+
+    thread = store.thread()
+    assert (thread["retry_failures"], thread["retry_since"], thread["retry_at"]) == (0, None, None)
+
+
+async def test_chats_to_analyze_read_the_temporary_failures() -> None:
+    client = rpc(
+        {
+            "chats_to_analyze": [
+                {
+                    "thread_id": THREAD_ID,
+                    "platform": "telegram",
+                    "chat_key": IGOR_CHAT,
+                    "name": "Игорь",
+                    "retry_failures": 3,
+                    "retry_since": "2026-10-07T06:00:00+00:00",
+                }
+            ]
+        }
+    )
+
+    [found] = await db_chats.chats_to_analyze(
+        cast(Client, client),
+        owner_telegram_id=OWNER_ID,
+        quiet_before=NOW - timedelta(minutes=20),
+        stale_before=NOW - timedelta(hours=2),
+    )
+
+    assert found.retry_failures == 3
+    assert found.retry_since == datetime(2026, 10, 7, 11, 0, tzinfo=TZ)
+
+
+async def test_chat_unavailable_counts_and_a_missing_thread_is_none() -> None:
+    counted = rpc({"chat_unavailable": 2})
+    missing = rpc({"chat_unavailable": None})
+    at = NOW + timedelta(minutes=2)
+
+    assert (
+        await db_chats.chat_unavailable(
+            cast(Client, counted), owner_telegram_id=OWNER_ID, thread_id=THREAD_ID, retry_at=at
+        )
+        == 2
+    )
+    assert counted.params[0]["retry_at"] == at.isoformat()
+    assert (
+        await db_chats.chat_unavailable(
+            cast(Client, missing), owner_telegram_id=OWNER_ID, thread_id=THREAD_ID, retry_at=at
+        )
+        is None
+    )

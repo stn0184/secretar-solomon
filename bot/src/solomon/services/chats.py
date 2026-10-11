@@ -97,6 +97,8 @@ from solomon.services.understanding import (
     format_known,
     format_moment,
     format_spheres,
+    is_temporary,
+    next_retry,
     open_task_lines,
 )
 from solomon.services.understanding import TIMEOUT_SECONDS as MESSAGE_TIMEOUT_SECONDS
@@ -193,9 +195,12 @@ STALE = timedelta(hours=2)
 NEW_LIMIT = 50
 EARLIER_LIMIT = 20
 TEXT_LIMIT = batches.TEXT_LIMIT
-# Дел из одного куска — не больше пяти (§25.3); три неудачи подряд — пропуск.
+# Дел из одного куска — не больше пяти (§25.3); три постоянные неудачи подряд —
+# пропуск. Временные (`techspec/33-retry-later.md` §33.3) — не неудачи: кусок
+# ждёт с растущей паузой до суток от первой из них, текст хранится семь дней.
 DEALS_LIMIT = 5
 MAX_FAILURES = 3
+LATER_LIMIT = timedelta(hours=24)
 # Пределы того, что уходит владельцу дословно от модели (`plan.md`, 1).
 TITLE_LIMIT = 300
 NAME_LIMIT = 80
@@ -522,9 +527,11 @@ class ChatAnalysis:
 
 @dataclass(frozen=True, slots=True)
 class NotAnalyzed:
-    """Разбор не удался (§5.4). Причина — для журнала."""
+    """Разбор не удался (§5.4). Причина — для журнала. `temporary` — модель
+    недоступна (§33.1): кусок ждёт, неудачей это не считается."""
 
     reason: str
+    temporary: bool = False
 
 
 Timer = Callable[[], float]
@@ -539,14 +546,14 @@ async def run_chat_analysis(
     try:
         answer = await call(system=system, text=text)
     except (APITimeoutError, APIConnectionError) as error:
-        return NotAnalyzed(f"модель недоступна: {type(error).__name__}")
+        return NotAnalyzed(f"модель недоступна: {type(error).__name__}", temporary=True)
     except AuthenticationError:
         logger.error("Ключ ANTHROPIC_API_KEY не подошёл для разбора чата")
         return NotAnalyzed("ключ не подошёл")
     except RateLimitError:
-        return NotAnalyzed("лимит запросов")
+        return NotAnalyzed("лимит запросов", temporary=True)
     except APIStatusError as error:
-        return NotAnalyzed(f"модель ответила {error.status_code}")
+        return NotAnalyzed(f"модель ответила {error.status_code}", temporary=is_temporary(error))
     except ValidationError as error:
         return NotAnalyzed(f"ответ не по схеме: полей с ошибкой {error.error_count()}")
     duration_ms = round((timer() - started) * 1000)
@@ -733,6 +740,8 @@ class ChatStore(Protocol):
 
     async def failed(self, thread_id: str) -> int | None: ...
 
+    async def unavailable(self, thread_id: str, retry_at: datetime) -> int | None: ...
+
     async def skip(self, thread_id: str, message_ids: Sequence[str]) -> str | None: ...
 
     async def reports_to_send(self) -> list[str]: ...
@@ -882,6 +891,11 @@ class DatabaseChatStore:
     async def failed(self, thread_id: str) -> int | None:
         return await db_chats.chat_failed(
             self._db, owner_telegram_id=self._owner, thread_id=thread_id
+        )
+
+    async def unavailable(self, thread_id: str, retry_at: datetime) -> int | None:
+        return await db_chats.chat_unavailable(
+            self._db, owner_telegram_id=self._owner, thread_id=thread_id, retry_at=retry_at
         )
 
     async def skip(self, thread_id: str, message_ids: Sequence[str]) -> str | None:
@@ -1344,6 +1358,8 @@ class ChatService:
         system = build_chat_system(now, timezone, known, tasks, spheres)
         outcome = await run_chat_analysis(call, system=system, text=text, timer=self._timer)
         if isinstance(outcome, NotAnalyzed):
+            if outcome.temporary:
+                return await self._unavailable(chat, covered, outcome.reason)
             return await self._failed(chat, covered, outcome.reason)
         answer = trim_answer(outcome.answer, timezone)
         # Сфера чата — только из списка (§30.2): разбор сфер не заводит.
@@ -1393,12 +1409,42 @@ class ChatService:
         )
         return saved is not None
 
+    async def _unavailable(
+        self, chat: ChatToAnalyze, covered: Sequence[ChatMessage], reason: str
+    ) -> bool:
+        """Модель недоступна (§33.3): не неудача — кусок остаётся неразобранным,
+        следующая попытка — через растущую паузу, как у сообщения владельца.
+        Сутки от первой такой неудачи куска без успеха — кусок помечается
+        разобранным без дел, в журнал: текст хранится семь дней, а дольше суток
+        договорённость уже не новость."""
+        now = self._clock()
+        deadline = (chat.retry_since or now) + LATER_LIMIT
+        failures = chat.retry_failures + 1
+        if now >= deadline:
+            await self._store.skip(chat.thread_id, [message.id for message in covered])
+            logger.warning(
+                "Чат %s: сутки модель недоступна (%s) — кусок помечен разобранным без дел",
+                chat.thread_id,
+                reason,
+            )
+            return True
+        retry_at = next_retry(now, failures, deadline)
+        await self._store.unavailable(chat.thread_id, retry_at)
+        logger.warning(
+            "Чат %s не разобран — модель недоступна (%s): временных неудач %s, следующая %s",
+            chat.thread_id,
+            reason,
+            failures,
+            retry_at.isoformat(),
+        )
+        return False
+
     async def _failed(
         self, chat: ChatToAnalyze, covered: Sequence[ChatMessage], reason: str
     ) -> bool:
-        """Неудача разбора (§25.3): сообщения остаются, следующий тик попробует
-        снова; третья подряд — кусок помечается разобранным без дел, чтобы один
-        битый кусок не жёг деньги."""
+        """Постоянная неудача разбора (§25.3): сообщения остаются, следующий тик
+        попробует снова; третья подряд — кусок помечается разобранным без дел,
+        чтобы один битый кусок не жёг деньги."""
         logger.warning("Чат %s не разобран: %s", chat.thread_id, reason)
         failures = await self._store.failed(chat.thread_id)
         if failures is None or failures < MAX_FAILURES:
