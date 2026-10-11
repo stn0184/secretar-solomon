@@ -1,0 +1,317 @@
+/*
+ * Прототип 036 — понятный список дел. Два раздела:
+ *  1. Новое в продукте — предложение для styles.css: строка дела со сроком
+ *     справа (.trow), полоса высокого приоритета, заголовок группы с числом
+ *     (.grp) и его шрифт у каждой темы. Цвета — только токены styles.css,
+ *     новых цветов нет.
+ *  2. Рама прототипа (.p36-*) — не продукт, уходит вместе с этапом.
+ */
+
+/* ─── 1. Новое в продукте ───────────────────────────────────────────── */
+
+/* Заголовок группы — заметнее прежнего: шрифт у темы свой. «Банк-люкс» —
+   капитель, как надзаголовок, но текстом, а не серым; «Тихая роскошь» —
+   антиква, как заголовок экрана, только мельче. */
+:root[data-skin="bank"] {
+  --t-grp: 600 12px/16px var(--font-ui);
+  --grp-case: uppercase;
+  --grp-ls: 0.12em;
+}
+
+:root[data-skin="quiet"] {
+  --t-grp: 500 18px/24px var(--font-serif);
+  --grp-case: none;
+  --grp-ls: 0;
+}
+
+.grp {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  padding: 14px var(--s2) 8px;
+  font: var(--t-grp);
+  letter-spacing: var(--grp-ls);
+  text-transform: var(--grp-case);
+  color: var(--ink);
+}
+
+/* число — тем же шрифтом, тише */
+.grp__n {
+  color: var(--ink-3);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* «Просрочено» — цветом «просрочено» */
+.grp--late,
+.grp--late .grp__n {
+  color: var(--c-late);
+}
+
+/* «По сферам»: точка цвета сферы перед названием */
+.grp__dot {
+  flex: none;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c);
+}
+
+/* Строка: [отметка сферы] суть и метки · срок справа · «›». Отметки нет,
+   пока у владельца нет сфер (.trow--bare); у дела без сферы среди дел со
+   сферами колонка пустая — суть не прыгает. */
+.trow {
+  appearance: none;
+  border: 0;
+  background: none;
+  position: relative;
+  width: 100%;
+  margin: 0;
+  text-align: left;
+  display: grid;
+  grid-template-columns: var(--mark-col) minmax(0, 1fr) auto 12px;
+  column-gap: 12px;
+  align-items: start;
+  padding: 11px 12px 11px 14px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.trow--bare {
+  grid-template-columns: minmax(0, 1fr) auto 12px;
+}
+
+.trow + .trow {
+  border-top: 1px solid var(--line);
+}
+
+.trow:active {
+  background: var(--surface-2);
+}
+
+.trow__nomark {
+  width: var(--mark-col);
+}
+
+.trow__b {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.trow__t {
+  font: var(--t-row);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.trow__m {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font: var(--t-sub);
+  color: var(--ink-2);
+}
+
+/* Срок справа, на линии сути: цифры моноширинные, не переносится. */
+.trow__due {
+  margin-top: 2px;
+  font: 500 13px/17px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--ink-2);
+}
+
+.trow__due--late {
+  color: var(--c-late);
+  font-weight: 600;
+}
+
+.trow__due--today {
+  color: var(--today);
+  font-weight: 600;
+}
+
+.trow .chev {
+  margin-top: 0;
+}
+
+/* Высокий приоритет: тёплая полоса слева во всю высоту строки и тёплый
+   отсвет, тающий к середине, — видно издалека, без отдельной метки. */
+.trow--high {
+  background: linear-gradient(90deg, var(--c-high-w), transparent 55%);
+}
+
+.trow--high::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--c-high);
+}
+
+/* Метка в строке: значок и имя — «🤝 Игорь», «⏳ Олег». */
+.trow__m .chip {
+  gap: 3px;
+}
+
+/* Только для диктора: «Высокий приоритет.», «Просрочено:». */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ─── 2. Рама прототипа — не продукт ────────────────────────────────── */
+
+.p36 {
+  min-height: 100vh;
+  padding: 28px 32px 48px;
+  background: color-mix(in srgb, var(--ink) 7%, var(--bg));
+  font: var(--t-body);
+  color: var(--ink);
+}
+
+.p36-head {
+  max-width: 64rem;
+}
+
+.p36-head h1 {
+  margin: 0 0 6px;
+  font: 600 20px/26px var(--font-ui);
+}
+
+.p36-head p {
+  margin: 0 0 6px;
+  font: 400 14px/20px var(--font-ui);
+  color: var(--ink-2);
+}
+
+.p36-switch a {
+  color: var(--acc);
+  font-weight: 600;
+}
+
+.p36-sub {
+  margin: 28px 0 12px;
+  font: 600 15px/20px var(--font-ui);
+  color: var(--ink);
+}
+
+.p36-strip {
+  display: flex;
+  gap: 28px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 12px;
+}
+
+.p36-board {
+  flex: none;
+  width: 390px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.p36-cap {
+  min-height: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font: 400 13px/18px var(--font-ui);
+  color: var(--ink-2);
+}
+
+.p36-cap b {
+  font: 600 14px/18px var(--font-ui);
+  color: var(--ink);
+}
+
+.p36-phone {
+  width: 390px;
+  height: 844px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 44px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.18);
+}
+
+.p36-tg {
+  flex: none;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px 0;
+  background: var(--bg);
+  font: 400 15px/20px var(--font-system);
+  color: var(--ink);
+}
+
+.p36-tg__side {
+  width: 90px;
+  color: var(--ink-2);
+}
+
+.p36-tg__side--end {
+  text-align: right;
+  font-size: 20px;
+}
+
+.p36-tg__mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.p36-tg__mid b {
+  font-weight: 600;
+}
+
+.p36-tg__mid small {
+  font-size: 12px;
+  line-height: 15px;
+  color: var(--ink-2);
+}
+
+/* Видимая часть: прокручивается внутри телефона, вкладки прилипают к низу. */
+.p36-vp {
+  position: relative;
+  isolation: isolate;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.p36-vp .screen {
+  width: 100%;
+  min-height: 0;
+  flex: 1 0 auto;
+}
+
+.p36-vp .screen--tabs {
+  padding-bottom: 20px;
+}
+
+.p36-vp .tabs {
+  position: sticky;
+  bottom: 0;
+  padding-bottom: 18px;
+}
