@@ -1,5 +1,12 @@
 # Прототип 036 — понятный список дел
 
+> **Этап 036 закрыт (11.10.2026).** Витрина, её моки и dev-маршрут удалены
+> из `miniapp/` закрывающим коммитом — адреса и файлы ниже больше не
+> открываются. Одобренное живёт в коде: `components/TaskRow.tsx`,
+> `TaskGroup.tsx`, `TaskList.tsx`, `TodayTab.tsx`, `lib/tasks.ts`
+> (`rowDue`, группа «Завтра»), `styles.css` (`.grp`, `.task`); описание —
+> `design.md` §1. Посмотреть витрину — `git show` коммита `563d2f3`.
+
 Режим: **витрина**. Экраны собраны из настоящих компонентов Mini App
 (`Header`, `Choice`, `Tabs`, `SphereMark`, метки `Chip`, `HoursFigure`,
 `SphereSplit`, `DayThread`, `Backdrop`, а пустое — целиком `TaskList`) на
