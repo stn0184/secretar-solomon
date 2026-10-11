@@ -28,7 +28,6 @@ import {
   dayThread,
   eventMeta,
   hoursParts,
-  inboxMeta,
   isTodayEmpty,
   loadDaySpans,
   loadSphereHours,
@@ -319,8 +318,6 @@ describe("«Сегодня»", () => {
       noHourTasks(tasks).map((t) => t.id),
       ["pills", "bulb"],
     );
-    assert.equal(inboxMeta(morning, SPHERES), "Семья · утром");
-    assert.equal(inboxMeta(DAY_TASKS[5]!.task, SPHERES), "Без сферы");
   });
 
   it("пусто — ни часов, ни переписки, ни дел на сегодня", () => {

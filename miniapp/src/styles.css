@@ -141,6 +141,10 @@
   --t-quote: 400 14.5px/20px var(--font-ui);
   --t-btn: 500 15px/1 var(--font-ui);
   --t-empty: 300 30px/36px var(--font-ui);
+  /* заголовок группы «Дел» и «Без часа» — капителью, цветом текста (этап 036) */
+  --t-grp: 600 12px/16px var(--font-ui);
+  --grp-case: uppercase;
+  --grp-ls: 0.12em;
 }
 
 /* ─── Тема «Тихая роскошь»: бумага, воздух, антиква ─────────────────── */
@@ -239,6 +243,10 @@
   --t-quote: italic 400 15px/21px var(--font-serif);
   --t-btn: 500 15px/1 var(--font-ui);
   --t-empty: 500 26px/32px var(--font-serif);
+  /* заголовок группы «Дел» и «Без часа» — антиквой, строчными (этап 036) */
+  --t-grp: 500 18px/24px var(--font-serif);
+  --grp-case: none;
+  --grp-ls: 0;
 }
 
 /* ─── Основа ────────────────────────────────────────────────────────── */
@@ -447,8 +455,10 @@ button {
 }
 
 /* ─── Группы и строки списка ────────────────────────────────────────── */
-/* Артборд 04: группа — заголовок капителью и число справа, ниже карточка со
-   строками. Строка — отметка сферы, суть, «сфера · срок», метки, «›». */
+/* Прототип 036: группа — заголовок «Просрочено · 2» шрифтом темы, ниже
+   карточка со строками. Строка — [отметка сферы] суть и ряд «сфера · ↻ ·
+   метки» · срок справа · «›». Прочие заголовки секций («День» и др.) —
+   .sec__h, капителью и тише. */
 
 .sec {
   display: flex;
@@ -476,6 +486,42 @@ button {
   color: var(--ink-3);
 }
 
+/* Заголовок группы — заметнее прочих: шрифт у темы свой (--t-grp). */
+.grp {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  padding: 14px var(--s2) 8px;
+  font: var(--t-grp);
+  letter-spacing: var(--grp-ls);
+  text-transform: var(--grp-case);
+  color: var(--ink);
+}
+
+/* число — тем же шрифтом, тише */
+.grp__n {
+  color: var(--ink-3);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* «Просрочено» — целиком цветом «просрочено» */
+.grp--late,
+.grp--late .grp__n {
+  color: var(--c-late);
+}
+
+/* «По сферам»: точка цвета сферы перед названием */
+.grp__dot {
+  flex: none;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c);
+}
+
 .card {
   background: var(--surface);
   border: var(--card-border);
@@ -484,20 +530,27 @@ button {
   overflow: hidden;
 }
 
+/* Колонки отметки нет, пока у владельца нет сфер (.task--bare); у дела без
+   сферы среди дел со сферами колонка пустая (.task__nomark) — суть не прыгает. */
 .task {
   appearance: none;
   border: 0;
   background: none;
+  position: relative;
   width: 100%;
   margin: 0;
   text-align: left;
   display: grid;
-  grid-template-columns: var(--mark-col) 1fr 14px;
-  gap: 12px;
+  grid-template-columns: var(--mark-col) minmax(0, 1fr) auto 12px;
+  column-gap: 12px;
   align-items: start;
-  padding: 11px 14px;
+  padding: 11px 12px 11px 14px;
   color: var(--ink);
   cursor: pointer;
+}
+
+.task--bare {
+  grid-template-columns: minmax(0, 1fr) auto 12px;
 }
 
 .task + .task {
@@ -508,10 +561,14 @@ button {
   background: var(--surface-2);
 }
 
+.task__nomark {
+  width: var(--mark-col);
+}
+
 .task__b {
   display: flex;
   flex-direction: column;
-  gap: var(--s1);
+  gap: 5px;
   min-width: 0;
 }
 
@@ -530,30 +587,58 @@ button {
   color: var(--ink-2);
 }
 
-.task__due,
+/* метка в строке: значок и имя — «🤝 Игорь», «⏳ Олег» */
+.task__m .chip {
+  gap: 3px;
+}
+
 .task__rep {
   display: inline-flex;
   align-items: baseline;
   gap: var(--s1);
-}
-
-.task__due i,
-.task__rep i {
-  font-style: normal;
-}
-
-.task__rep {
   white-space: nowrap;
 }
 
 .task__rep i {
+  font-style: normal;
   color: var(--ink-3);
 }
 
-/* просрочено — цветом необратимого, словами срока */
-.task__late {
+/* Срок справа, на линии сути: цифры моноширинные, не переносится. Цвет —
+   просрочено (--c-late), сегодня (--today), иначе спокойный. */
+.task__due {
+  margin-top: 2px;
+  font: 500 13px/17px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--ink-2);
+}
+
+.task__due--late {
   color: var(--c-late);
-  font-weight: 500;
+  font-weight: 600;
+}
+
+.task__due--today {
+  color: var(--today);
+  font-weight: 600;
+}
+
+/* Высокий приоритет: тёплая полоса слева во всю высоту строки и тёплый
+   отсвет, тающий к середине, — видно издалека, без отдельной метки. */
+.task--high {
+  background: linear-gradient(90deg, var(--c-high-w), transparent 55%);
+}
+
+.task--high::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--c-high);
 }
 
 /* После «Сделано» в карточке: что вернула база — цветом «ок». */
@@ -567,6 +652,20 @@ button {
   margin-top: 2px;
   color: var(--ink-3);
   font: 400 18px/20px var(--font-ui);
+}
+
+.task .chev {
+  margin-top: 0;
+}
+
+/* Только для диктора: «Высокий приоритет.», «Просрочено:», «Я обещал:». */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* Отметка сферы: монограмма-«логотип» в «Банк-люксе», полоска в «Тихой роскоши». */
@@ -1781,66 +1880,11 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-/* ─── «Сегодня»: дела без часа и нить дня ───────────────────────────── */
-/* Нить: время, пунктир с капсулами (высота — по длительности), суть и
+/* ─── «Сегодня»: нить дня ──────────────────────────────────────────── */
+/* «Без часа» — та же группа и строка дела, что в «Делах» (.grp, .task).
+   Нить: время, пунктир с капсулами (высота — по длительности), суть и
    подпись, ✓ у сделанного. Встреча — заливка цвета сферы, переписка —
    бледная заливка с кантом, будущее — контур, дело с часом — точка. */
-
-.inbox {
-  appearance: none;
-  border: 0;
-  background: none;
-  width: 100%;
-  margin: 0;
-  padding: 11px 14px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  text-align: left;
-  color: var(--ink);
-  cursor: pointer;
-}
-
-.inbox + .inbox {
-  border-top: 1px solid var(--line);
-}
-
-.inbox:active {
-  background: var(--surface-2);
-}
-
-.inbox__ic {
-  flex: none;
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--c-kind-w);
-  font-size: 14px;
-}
-
-.inbox__b {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.inbox__t {
-  font: var(--t-row);
-  overflow-wrap: anywhere;
-}
-
-.inbox__m {
-  font: var(--t-sub);
-  color: var(--ink-2);
-}
-
-.inbox .chev {
-  margin: 0 0 0 auto;
-  font-size: 20px;
-}
 
 .thread {
   padding: 2px 6px 0 2px;

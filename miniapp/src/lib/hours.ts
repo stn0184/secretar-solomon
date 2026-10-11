@@ -20,7 +20,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Fact } from "./facts.ts";
-import { PART_WORDS, formatShortDate, formatTime, hoursWords, isPart, plural, sameDay, weekStart } from "./format.ts";
+import { formatShortDate, formatTime, hoursWords, plural, sameDay, weekStart } from "./format.ts";
 import { dateOrNull, recordOf } from "./parse.ts";
 import { type Sphere, sphereName, sphereOf, spheresEyebrow } from "./spheres.ts";
 import { type Db, failed, query } from "./supabase.ts";
@@ -322,12 +322,6 @@ export function noHourTasks(tasks: readonly DayTask[]): Task[] {
     .filter(({ task, done }) => !done && task.dueAt !== null && task.duePrecision !== "time")
     .map(({ task }) => task)
     .sort((a, b) => (a.dueAt?.getTime() ?? 0) - (b.dueAt?.getTime() ?? 0));
-}
-
-/** Подпись дела без часа: сфера, у части дня — и она: «Семья · утром». */
-export function inboxMeta(task: Task, spheres: readonly Sphere[]): string {
-  const sphere = sphereName(sphereOf(task.sphereId, spheres));
-  return isPart(task.duePrecision) ? `${sphere} · ${PART_WORDS[task.duePrecision]}` : sphere;
 }
 
 /** Что прочитано для «Сегодня»: часы дня, отрезки дня и дела дня. */

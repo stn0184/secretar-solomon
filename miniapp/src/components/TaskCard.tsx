@@ -202,7 +202,7 @@ export function TaskCard({
         {task.kind !== "task" ? <Field label="Вид">{KIND_WORD[task.kind]}</Field> : null}
         {task.priority === "high" ? (
           <Field label="Приоритет">
-            <PriorityChip task={task} compact={false} />
+            <PriorityChip task={task} />
           </Field>
         ) : null}
         {task.priority === "low" ? <Field label="Приоритет">низкий</Field> : null}

@@ -15,27 +15,42 @@ export function Chip({ tone, children }: { tone: ChipTone; children: ReactNode }
   return <span className={`chip chip--${tone}`}>{children}</span>;
 }
 
-/* Метки задачи — те же слова, что у бота в подтверждении. `compact` — строка
-   списка: слова длиннее и с именем, на карточке имя стоит в своей строке. */
+/* Метки задачи — те же слова, что у бота в подтверждении. В строке списка
+   обещание коротко — «🤝 Игорь» (`compact`), полные слова — в карточке. */
 
-/** Только «Высокий»: обычный и низкий приоритет в списке не помечаются. */
-export function PriorityChip({ task, compact }: { task: Task; compact: boolean }) {
-  if (task.priority !== "high") {
-    return null;
-  }
-  return <Chip tone="high">{compact ? "Высокий приоритет" : "Высокий"}</Chip>;
+/** Только «Высокий» и только в карточке: в строке важное — тёплой полосой слева. */
+export function PriorityChip({ task }: { task: Task }) {
+  return task.priority === "high" ? <Chip tone="high">Высокий</Chip> : null;
 }
 
-/** «Я обещал» / «Обещали мне», в списке — с первым названным человеком. */
+/**
+ * «Я обещал» / «Обещали мне» — в карточке. В строке (`compact`) коротко:
+ * «🤝 Игорь» — вы обещали, «⏳ Олег» — обещали вам; имя — первое названное и
+ * как записано, без склонения. Людей нет — значок и те же слова. Диктору
+ * слова остаются и при имени.
+ */
 export function PromiseChip({ task, compact }: { task: Task; compact: boolean }) {
   if (!task.promise) {
     return null;
   }
-  const word = task.promise === "mine" ? "Я обещал" : "Обещали мне";
-  const person = compact ? task.people[0] : undefined;
+  const mine = task.promise === "mine";
+  const word = mine ? "Я обещал" : "Обещали мне";
+  const tone = mine ? "mine" : "theirs";
+  if (!compact) {
+    return <Chip tone={tone}>{word}</Chip>;
+  }
+  const person = task.people[0];
   return (
-    <Chip tone={task.promise === "mine" ? "mine" : "theirs"}>
-      {person ? `${word}: ${person}` : word}
+    <Chip tone={tone}>
+      <span aria-hidden="true">{mine ? "🤝" : "⏳"}</span>
+      {person ? (
+        <span>
+          <span className="sr">{word}: </span>
+          {person}
+        </span>
+      ) : (
+        <span>{word}</span>
+      )}
     </Chip>
   );
 }

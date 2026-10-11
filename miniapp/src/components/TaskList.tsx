@@ -38,9 +38,11 @@ function eyebrow(state: ListState, overdue: number): string | undefined {
 }
 
 /**
- * «Дела» (артборд 04): надзаголовок со счётом, переключатель «По сроку / По
- * сферам» и группы. Переключатель только перегруппировывает тот же список —
- * данных и действий не добавляет; на пустом экране его нет.
+ * «Дела» (артборд 04, прототип 036): надзаголовок со счётом, переключатель
+ * «По сроку / По сферам» и группы с числом дел. Переключатель только
+ * перегруппировывает тот же список — данных и действий не добавляет; на
+ * пустом экране его нет. Пока у владельца нет ни одной сферы, его нет тоже:
+ * группировать по сферам нечего, список — по сроку, без колонки отметки.
  */
 export function TaskList({
   state,
@@ -66,10 +68,8 @@ export function TaskList({
   const spheres = state.kind === "ready" ? state.spheres : [];
   const byDue = groupTasks(tasks, now);
   const overdue = byDue.find((g) => g.key === "overdue")?.tasks.length ?? 0;
-  const groups =
-    view === "sphere"
-      ? groupBySphere(tasks, spheres, now).map((g) => ({ key: g.key, title: g.title, tasks: g.tasks }))
-      : byDue;
+  const marks = spheres.length > 0;
+  const bySphere = view === "sphere" && marks;
 
   return (
     <main className="screen screen--tabs">
@@ -85,20 +85,36 @@ export function TaskList({
           onClose={onClose}
         />
       ) : null}
-      {tasks.length > 0 ? (
+      {tasks.length > 0 && marks ? (
         <Choice label="Как сгруппировать" options={VIEWS} value={view} variant="view" onChange={onView} />
       ) : null}
-      {groups.map((group) => (
-        <TaskGroup
-          key={group.key}
-          title={group.title}
-          tasks={group.tasks}
-          spheres={spheres}
-          now={now}
-          doneId={doneId}
-          onOpen={onOpen}
-        />
-      ))}
+      {bySphere
+        ? groupBySphere(tasks, spheres, now).map((group) => (
+            <TaskGroup
+              key={group.key}
+              title={group.title}
+              tasks={group.tasks}
+              spheres={spheres}
+              now={now}
+              doneId={doneId}
+              onOpen={onOpen}
+              sphere={group.sphere}
+              showSphere={false}
+            />
+          ))
+        : byDue.map((group) => (
+            <TaskGroup
+              key={group.key}
+              title={group.title}
+              tasks={group.tasks}
+              spheres={spheres}
+              now={now}
+              doneId={doneId}
+              onOpen={onOpen}
+              late={group.key === "overdue"}
+              showSphere
+            />
+          ))}
       {state.kind === "ready" && state.more ? (
         <p className="note">Показаны первые {TASKS_SHOWN}.</p>
       ) : null}

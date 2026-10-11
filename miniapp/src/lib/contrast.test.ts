@@ -4,8 +4,8 @@
  * `:root[data-skin="bank"]` и `:root[data-skin="quiet"]`: второго списка
  * цветов, который мог бы разойтись с CSS, нет.
  *
- * Полупрозрачная подложка (метка, выбранный вариант) считается поверх
- * карточки, на которой стоит. Формула — WCAG 2.x: относительная яркость
+ * Полупрозрачная подложка (метка, выбранный вариант, отсвет важного дела)
+ * считается поверх карточки, на которой стоит. Формула — WCAG 2.x: относительная яркость
  * sRGB и (L1 + 0,05) / (L2 + 0,05).
  */
 
@@ -68,17 +68,16 @@ function ratio(a: Rgb, b: Rgb): number {
 }
 
 /**
- * Фон: одна переменная (поверх фона экрана, если прозрачна) или подложка
- * поверх карточки: `["--c-high-w", "--surface"]`.
+ * Фон: одна переменная (поверх фона экрана, если прозрачна) или стопка
+ * подложек сверху вниз: `["--c-high-w", "--surface"]` — подложка поверх
+ * карточки; `["--c-mine-w", "--c-high-w", "--surface"]` — метка в строке
+ * важного дела, поверх его тёплого отсвета (этап 036).
  */
-type Ground = string | [string, string];
+type Ground = string | string[];
 
 function ground(map: Map<string, string>, g: Ground): Rgb {
-  const page = color(map, "--bg");
-  if (typeof g === "string") {
-    return over(color(map, g), over(page, [0, 0, 0]));
-  }
-  return over(color(map, g[0]), over(color(map, g[1]), over(page, [0, 0, 0])));
+  const layers = typeof g === "string" ? [g] : g;
+  return layers.reduceRight<Rgb>((base, name) => over(color(map, name), base), over(color(map, "--bg"), [0, 0, 0]));
 }
 
 /** Текст → на чём он стоит. */
@@ -111,6 +110,18 @@ const PAIRS: [string, Ground][] = [
   ["--ink-2", ["--c-kind-w", "--surface"]],
   ["--ink-2", "--seg-bg"],
   ["--seg-on-ink", "--seg-on"],
+  // Строка дела (этап 036): срок справа — сегодня цветом темы; у важного дела
+  // текст, срок и метки стоят на тёплом отсвете --c-high-w поверх карточки.
+  // --ink-3 в такой строке — только значки: «↻» (aria-hidden) и «›» справа,
+  // где отсвет уже растаял; текста этим цветом на отсвете нет.
+  ["--today", "--surface"],
+  ...["--ink", "--ink-2", "--today", "--c-late"].map((text): [string, Ground] => [
+    text,
+    ["--c-high-w", "--surface"],
+  ]),
+  ["--c-mine", ["--c-mine-w", "--c-high-w", "--surface"]],
+  ["--c-guess", ["--c-guess-w", "--c-high-w", "--surface"]],
+  ["--ink-2", ["--c-kind-w", "--c-high-w", "--surface"]],
 ];
 
 /** Монограмма сферы — текст только в «Банк-люксе», в «Тихой роскоши» отметка без букв. */

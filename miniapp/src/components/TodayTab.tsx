@@ -1,18 +1,15 @@
-import type { CSSProperties } from "react";
-
-import { formatDay, formatTime, plural } from "../lib/format.ts";
+import { formatDay, formatTime } from "../lib/format.ts";
 import {
   type TodayData,
   addDays,
   aheadMinutes,
   dayThread,
-  inboxMeta,
   isTodayEmpty,
   noHourTasks,
   todaySub,
   totalMinutes,
 } from "../lib/hours.ts";
-import { type Sphere, sphereColor, sphereOf } from "../lib/spheres.ts";
+import type { Sphere } from "../lib/spheres.ts";
 import type { Task } from "../lib/tasks.ts";
 import { DayThread } from "./DayThread.tsx";
 import { Empty } from "./Empty.tsx";
@@ -21,6 +18,7 @@ import { Header } from "./Header.tsx";
 import { HoursFigure } from "./HoursFigure.tsx";
 import { Skeleton } from "./Skeleton.tsx";
 import { SphereSplit } from "./SphereSplit.tsx";
+import { TaskGroup } from "./TaskGroup.tsx";
 
 /** Что знает «Сегодня»: часы и отрезки дня и дела дня читаются вместе (`App`). */
 export type TodayState =
@@ -36,7 +34,9 @@ export type TodayState =
  * «Часов пока нет»: нулей не показываем. Нет ничего — одобренное пустое
  * (`design.md` §2, артборд 07).
  *
- * Касание дела без часа открывает его карточку; нить не нажимается.
+ * «Без часа» — та же строка дела, что в «Делах» (`TaskRow`, прототип 036):
+ * день не повторяется, справа — часть дня или ничего. Касание открывает
+ * карточку дела; нить не нажимается.
  */
 export function TodayTab({
   state,
@@ -107,36 +107,16 @@ export function TodayTab({
       </header>
       {total > 0 ? <SphereSplit rows={today.rows} spheres={spheres} /> : null}
       {inbox.length > 0 ? (
-        <section className="sec">
-          <h2 className="sec__h">
-            <span>Без часа</span>
-            <em>
-              {inbox.length} {plural(inbox.length, "дело", "дела", "дел")}
-            </em>
-          </h2>
-          <div className="card">
-            {inbox.map((task) => (
-              <button
-                key={task.id}
-                type="button"
-                className="inbox"
-                style={{ "--c": sphereColor(sphereOf(task.sphereId, spheres)) } as CSSProperties}
-                onClick={() => onOpen(task)}
-              >
-                <span className="inbox__ic" aria-hidden="true">
-                  🔔
-                </span>
-                <span className="inbox__b">
-                  <span className="inbox__t">{task.title}</span>
-                  <span className="inbox__m">{inboxMeta(task, spheres)}</span>
-                </span>
-                <span className="chev" aria-hidden="true">
-                  ›
-                </span>
-              </button>
-            ))}
-          </div>
-        </section>
+        <TaskGroup
+          title="Без часа"
+          tasks={inbox}
+          spheres={spheres}
+          now={now}
+          doneId={null}
+          onOpen={onOpen}
+          showSphere
+          dayKnown
+        />
       ) : null}
       {thread.length > 0 ? (
         <section className="sec">

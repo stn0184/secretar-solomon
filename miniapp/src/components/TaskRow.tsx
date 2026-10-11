@@ -2,66 +2,78 @@ import type { CSSProperties } from "react";
 
 import { formatDue } from "../lib/format.ts";
 import { repeatShort } from "../lib/repeat.ts";
-import { type Sphere, sphereColor, sphereName } from "../lib/spheres.ts";
+import { type Sphere, sphereColor } from "../lib/spheres.ts";
 import { type Task, rowDue } from "../lib/tasks.ts";
-import { KindChip, PriorityChip, PromiseChip, ReviewChip } from "./Chip.tsx";
+import { KindChip, PromiseChip, ReviewChip } from "./Chip.tsx";
 import { SphereMark } from "./SphereMark.tsx";
 
 /**
- * Строка дела (`techspec/32-redesign.md` §32.2, артборд 04): отметка сферы,
- * суть, «сфера · срок» со значком из чата, метки вторым рядом и «›». Вся
- * строка — кнопка: касание открывает карточку. Кружка «Сделано» нет —
- * «Сделано» только в карточке.
+ * Строка дела (`design.md` §1, прототип 036) — одна в «Делах» и в «Без часа»
+ * на «Сегодня»: `[отметка сферы] суть · срок справа · «›»`, под сутью — один
+ * ряд: имя сферы (`showSphere`), «↻ правило», метки. Ряда нет, если показать
+ * нечего. Вся строка — кнопка: касание открывает карточку. Кружка «Сделано»
+ * нет — «Сделано» только в карточке.
  *
- * У повторяющегося дела за сроком — «↻» и правило коротко, подписью, а не
- * меткой. `justDone` — его только что отметили в карточке: под строкой срок,
- * который вернула база, до следующего чтения списка.
+ * Колонка отметки есть, только когда у владельца есть сферы (`marks`); у дела
+ * без сферы она пустая — суть не прыгает. «Без сферы» в строке не пишется
+ * никогда. Высокий приоритет — тёплая полоса у левого края, без метки: диктору
+ * слова остаются. Срок — цветом: просрочено, сегодня или спокойно; `dayKnown`
+ * — экран и так про сегодня, день не повторяется.
+ *
+ * `justDone` — повторяющееся дело только что отметили в карточке: под сутью
+ * срок, который вернула база, до следующего чтения списка.
  */
 export function TaskRow({
   task,
   sphere,
+  marks,
+  showSphere,
+  dayKnown = false,
   now,
   justDone,
   onOpen,
 }: {
   task: Task;
   sphere: Sphere | null;
+  /** У владельца есть сферы — колонка отметки есть у каждой строки. */
+  marks: boolean;
+  /** Имя сферы под сутью — в «По сроку» и на «Сегодня»; в «По сферам» его называет группа. */
+  showSphere: boolean;
+  dayKnown?: boolean;
   now: Date;
   justDone: boolean;
   onOpen: (task: Task) => void;
 }) {
-  const due = rowDue(task, now);
-  const chips =
-    task.kind !== "task" || task.priority === "high" || task.promise !== null || task.needsReview;
+  const due = rowDue(task, now, dayKnown);
+  const high = task.priority === "high";
+  const named = showSphere && sphere !== null;
+  const meta = named || task.repeat !== null || task.kind !== "task" || task.promise !== null || task.needsReview;
+  const cls = ["task", marks ? "" : "task--bare", high ? "task--high" : ""].filter(Boolean).join(" ");
+  const dueCls = due?.tone ? `task__due task__due--${due.tone}` : "task__due";
 
   return (
     <button
       type="button"
-      className="task"
+      className={cls}
       style={{ "--c": sphereColor(sphere) } as CSSProperties}
       onClick={() => onOpen(task)}
     >
-      <SphereMark sphere={sphere} />
+      {marks ? sphere ? <SphereMark sphere={sphere} /> : <span className="task__nomark" aria-hidden="true" /> : null}
       <span className="task__b">
-        <span className="task__t">{task.title}</span>
-        <span className="task__m">
-          <span>{sphereName(sphere)}</span>
-          {due ? (
-            <span className={due.tone === "late" ? "task__due task__late" : "task__due"}>
-              {due.text}
-            </span>
-          ) : null}
-          {task.repeat ? (
-            <span className="task__rep">
-              <i aria-hidden="true">↻</i>
-              {repeatShort(task.repeat)}
-            </span>
-          ) : null}
+        <span className="task__t">
+          {high ? <span className="sr">Высокий приоритет. </span> : null}
+          {task.title}
         </span>
-        {chips ? (
+        {meta ? (
           <span className="task__m">
+            {named ? <span>{sphere.name}</span> : null}
+            {task.repeat ? (
+              <span className="task__rep">
+                <i aria-hidden="true">↻</i>
+                {repeatShort(task.repeat)}
+              </span>
+            ) : null}
             <KindChip task={task} />
-            <PriorityChip task={task} compact />
             <PromiseChip task={task} compact />
             <ReviewChip task={task} />
           </span>
@@ -71,6 +83,10 @@ export function TaskRow({
             ✓ Сделано. Следующий раз: {formatDue(task.dueAt, task.duePrecision, now, task.duration)}
           </span>
         ) : null}
+      </span>
+      <span className={dueCls}>
+        {due?.tone === "late" ? <span className="sr">Просрочено: </span> : null}
+        {due?.text ?? ""}
       </span>
       <span className="chev" aria-hidden="true">
         ›
