@@ -1239,3 +1239,25 @@ def test_saved_message_knows_it_is_waiting() -> None:
 
     assert waiting.deferred
     assert not plain.deferred
+
+
+async def test_later_last_task_ignores_a_reminder_sent_after_the_message() -> None:
+    from solomon.db.tasks import TaskEvent
+
+    call = make_details(id="5b0c7a52-8f3e-4c1d-9a6b-2e4f1d3c8b91", title="созвон с Олегом")
+    report = make_details(id="5b0c7a52-8f3e-4c1d-9a6b-2e4f1d3c8b92", title="расчёт Игорю")
+    edits = FakeEdits(
+        [call, report],
+        message_event=TaskEvent(task_id=call.id, at=RECEIVED - timedelta(minutes=10)),
+        reminder_event=TaskEvent(task_id=report.id, at=RECEIVED + timedelta(minutes=10)),
+    )
+    analyst = recorded()
+    service = build(analyst, edits=edits, clock=lambda: RECEIVED + timedelta(minutes=30))
+
+    await service.retry(row(text="перенеси его на пятницу"))
+
+    # Номер последней задачи — по тому же списку, что ушёл модели.
+    [numbers] = analyst.last_tasks
+    assert len(numbers) == 1
+    listed = analyst.tasks[0] or []
+    assert [task.title for task in listed][numbers[0] - 1] == "созвон с Олегом"

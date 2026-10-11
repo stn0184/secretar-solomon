@@ -3199,6 +3199,10 @@ class TaskService:
         )
         if tasks is None:
             return replace(NO_EDIT, recent=recent, spheres=book, hours=counted)
+        if later is not None:
+            # Напоминание, ушедшее после отложенного сообщения, — не то, о чём
+            # оно говорило: последние задачи — как были тогда (§33.2).
+            events = [event for event in events if event is None or event.at <= later]
         last_tasks = tuple(edits.last_task_numbers(events, tasks, now))
         line = None
         if swiped is not None:
