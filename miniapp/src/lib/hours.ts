@@ -9,6 +9,10 @@
  * Здесь часов не досчитывают — только раскладывают ответ базы по экрану:
  * нить дня, строки недели, полосы и карточки сфер.
  *
+ * Переписка отдельно не показывается (правка владельца на прототипе 036): её
+ * минуты входят в часы — итог, доли, полосы, — но в нити дня капсул
+ * «Переписка» нет и подписей «встречи · переписка» нет.
+ *
  * Владельца приложение не передаёт — база берёт его из токена. Окна — по
  * часам устройства, как и все даты приложения (`format.ts`): «сегодня» — то,
  * что показывает телефон.
@@ -127,13 +131,6 @@ export function clockWords(minutes: number): string {
   return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
-/** «встречи 8 ч 30 мин · переписка 55 мин» — только ненулевые части. */
-export function partsWords(meetings: number, chat: number): string {
-  return [meetings > 0 ? `встречи ${hoursWords(meetings)}` : "", chat > 0 ? `переписка ${hoursWords(chat)}` : ""]
-    .filter(Boolean)
-    .join(" · ");
-}
-
 /** Длина объединения отрезков в минутах: пересечения — один раз. */
 function unionMinutes(parts: readonly (readonly [number, number])[]): number {
   const sorted = [...parts].sort((a, b) => a[0] - b[0]);
@@ -166,10 +163,13 @@ export function aheadMinutes(spans: readonly Span[], now: Date, dayEnd: Date): n
   return unionMinutes(parts);
 }
 
-/** Строка под крупной цифрой; часов нет — «Часов пока нет», а не ноль. */
+/**
+ * Строка под крупной цифрой: «примерно» — откуда часы, не называется (036);
+ * часов нет — «Часов пока нет», а не ноль.
+ */
 export function todaySub(total: number, ahead: number): { text: string; ahead: string | null } {
   return {
-    text: total > 0 ? "примерно — из встреч и переписки" : "Часов пока нет",
+    text: total > 0 ? "примерно" : "Часов пока нет",
     ahead: ahead > 0 ? hoursWords(ahead) : null,
   };
 }
@@ -185,10 +185,10 @@ export function capsuleHeight(minutes: number | null): number {
   return Math.min(120, Math.max(40, Math.round(40 + (minutes - 30) * 0.32)));
 }
 
-/** Событие нити: встреча, дело с часом без длительности («точка») или переписка. */
+/** Событие нити: встреча или дело с часом без длительности («точка»). */
 export interface ThreadEvent {
   key: string;
-  kind: "meeting" | "point" | "chat";
+  kind: "meeting" | "point";
   start: Date;
   /** У точки — тот же момент, что начало. */
   end: Date;
@@ -208,7 +208,7 @@ export type ThreadEntry =
 /** «Свободно N» — только промежутки длиннее этого (на артборде 40 минут подписаны, 30 — нет). */
 export const FREE_GAP_MINUTES = 30;
 
-const KIND_ORDER: Record<ThreadEvent["kind"], number> = { meeting: 0, point: 1, chat: 2 };
+const KIND_ORDER: Record<ThreadEvent["kind"], number> = { meeting: 0, point: 1 };
 
 function minutesBetween(from: Date, to: Date): number {
   return Math.round((to.getTime() - from.getTime()) / MINUTE_MS);
@@ -219,13 +219,14 @@ function later(a: Date, b: Date): Date {
 }
 
 /**
- * Нить дня (артборд 01): встречи и дела с часом из дел дня, переписка — из
- * отрезков дня, обрезанная днём; по времени. Между событиями — «Свободно N»,
- * если промежуток длиннее получаса; линия «сейчас» — перед первым событием,
- * которое ещё не началось (всё прошло — в конце), промежуток после неё
- * считается от «сейчас». Событий нет — нити нет.
+ * Нить дня (артборд 01): встречи и дела с часом из дел дня, по времени.
+ * Переписки в нити нет (036): её минуты — в часах дня, отдельным пунктом она
+ * не показывается. Между событиями — «Свободно N», если промежуток длиннее
+ * получаса; линия «сейчас» — перед первым событием, которое ещё не началось
+ * (всё прошло — в конце), промежуток после неё считается от «сейчас».
+ * Событий нет — нити нет.
  */
-export function dayThread(tasks: readonly DayTask[], spans: readonly Span[], now: Date): ThreadEntry[] {
+export function dayThread(tasks: readonly DayTask[], now: Date): ThreadEntry[] {
   const dayStart = startOfDay(now);
   const dayEnd = addDays(dayStart, 1);
   const events: ThreadEvent[] = [];
@@ -244,23 +245,6 @@ export function dayThread(tasks: readonly DayTask[], spans: readonly Span[], now
       sphereId: task.sphereId,
       title: task.title,
       state: done ? "done" : start > now ? "future" : "past",
-    });
-  }
-  for (const span of spans) {
-    const start = later(span.start, dayStart);
-    const end = span.end < dayEnd ? span.end : dayEnd;
-    if (span.kind !== "chat" || start >= end) {
-      continue;
-    }
-    events.push({
-      key: `chat-${start.getTime()}-${span.sphereId ?? ""}`,
-      kind: "chat",
-      start,
-      end,
-      minutes: minutesBetween(start, end),
-      sphereId: span.sphereId,
-      title: "Переписка",
-      state: "past",
     });
   }
   if (events.length === 0) {
@@ -304,16 +288,17 @@ export function dayThread(tasks: readonly DayTask[], spans: readonly Span[], now
 
 /**
  * Подпись события: «14:00–16:00 · 2 ч · VoiceFin», у точки — «09:00 · без
- * длительности · Семья», у будущего — «· впереди». У переписки нет имени
- * собеседника и площадки: приложение знает о ней только время и сферу.
+ * длительности · Семья», у будущего — «· впереди». Пока у владельца нет ни
+ * одной сферы, сфера не называется вовсе — «Без сферы» у каждого события
+ * ничего не говорит (036).
  */
 export function eventMeta(event: ThreadEvent, spheres: readonly Sphere[]): string {
-  const sphere = sphereName(sphereOf(event.sphereId, spheres));
   const when =
     event.minutes === null
       ? `${formatTime(event.start)} · без длительности`
       : `${formatTime(event.start)}–${formatTime(event.end)} · ${hoursWords(event.minutes)}`;
-  return `${when} · ${sphere}${event.state === "future" ? " · впереди" : ""}`;
+  const sphere = spheres.length > 0 ? sphereName(sphereOf(event.sphereId, spheres)) : null;
+  return [when, sphere, event.state === "future" ? "впереди" : null].filter(Boolean).join(" · ");
 }
 
 /** «Без часа» — открытые дела на сегодня без часа: день или часть дня, по сроку. */
@@ -334,13 +319,12 @@ export interface TodayData {
 
 /**
  * Показывать нечего — одобренное пустое (`design.md` §2): ни часов, ни
- * переписки, ни видимых дел на сегодня (сделанное дело без часа не видно).
+ * видимых дел на сегодня (сделанное дело без часа не видно). Переписка без
+ * часов отдельно не показывается (036) — она экран не наполняет.
  */
 export function isTodayEmpty(today: TodayData): boolean {
-  const dayEnd = addDays(today.day, 1);
-  const talked = today.spans.some((span) => span.kind === "chat" && span.end > today.day && span.start < dayEnd);
   const timed = today.tasks.some(({ task }) => task.duePrecision === "time");
-  return totalMinutes(today.rows) === 0 && !talked && !timed && noHourTasks(today.tasks).length === 0;
+  return totalMinutes(today.rows) === 0 && !timed && noHourTasks(today.tasks).length === 0;
 }
 
 /* ---------------------------------------------------------------- «Неделя» */
@@ -440,9 +424,8 @@ export function weekRows(
 export interface SphereBar {
   sphereId: string | null;
   name: string;
+  /** Встречи и переписка вместе: по отдельности не показываются (036). */
   minutes: number;
-  meetings: number;
-  chat: number;
   /** Длина полосы — доля от наибольшей сферы, в процентах. */
   width: number;
 }
@@ -456,8 +439,6 @@ export function sphereBars(rows: readonly SphereMinutes[]): SphereBar[] {
       sphereId: row.sphereId,
       name: row.name ?? "Без сферы",
       minutes,
-      meetings: row.meetings,
-      chat: row.chat,
       width: max > 0 ? (minutes / max) * 100 : 0,
     };
   });
@@ -476,10 +457,8 @@ export interface WeekData {
 
 export interface SphereCardData {
   sphere: Sphere;
-  /** Часы за неделю; не прочитались — `null`. */
+  /** Часы за неделю — встречи и переписка вместе; не прочитались — `null`. */
   minutes: number | null;
-  meetings: number;
-  chat: number;
   /** Полоса сравнения в процентах от наибольшей; у всех ноль или часов нет — `null`. */
   width: number | null;
   /** Открытых дел сферы. */
@@ -509,8 +488,6 @@ export function sphereCards(
     return {
       sphere,
       minutes,
-      meetings: row?.meetings ?? 0,
-      chat: row?.chat ?? 0,
       width: minutes === null || max === 0 ? null : (minutes / max) * 100,
       open: tasks.filter((task) => task.sphereId === sphere.id).length,
       fact: known[0]?.text ?? null,
@@ -519,13 +496,13 @@ export function sphereCards(
   });
 }
 
-/** «3 открытых дела · встречи 8 ч 30 мин · переписка 55 мин»; нулей не пишем — словами. */
+/**
+ * «3 открытых дела»; часы — крупно рядом, без разбивки на встречи и переписку
+ * (036). Нулей не пишем — словами: «открытых дел нет · часов за неделю нет».
+ */
 export function cardMeta(card: SphereCardData): string {
   const open = card.open > 0 ? `${card.open} ${plural(card.open, "открытое дело", "открытых дела", "открытых дел")}` : "открытых дел нет";
-  if (card.minutes === null) {
-    return open;
-  }
-  return `${open} · ${card.minutes > 0 ? partsWords(card.meetings, card.chat) : "часов за неделю нет"}`;
+  return card.minutes === 0 ? `${open} · часов за неделю нет` : open;
 }
 
 /** Часы «без сферы» за неделю — у карточки «Без сферы и о себе»; не прочитались — `null`. */

@@ -4,13 +4,10 @@ import { formatTime, hoursWords } from "../lib/format.ts";
 import { type ThreadEntry, type ThreadEvent, capsuleHeight, eventMeta } from "../lib/hours.ts";
 import { type Sphere, sphereColor, sphereOf } from "../lib/spheres.ts";
 
-/** Значок капсулы — из чата (`techspec/29-icons.md`): 📅 — с часом, 💬 — переписка. */
-const ICON: Record<ThreadEvent["kind"], string> = { meeting: "📅", point: "📅", chat: "💬" };
-
+/** Капсула: значок из чата (`techspec/29-icons.md`) — 📅, дело с часом; точка и будущее — видом. */
 function capClass(event: ThreadEvent): string {
   return [
     "cap",
-    event.kind === "chat" ? "cap--chat" : "",
     event.kind === "point" ? "cap--point" : "",
     event.state === "future" ? "cap--future" : "",
   ]
@@ -28,7 +25,7 @@ function Event({ event, spheres }: { event: ThreadEvent; spheres: readonly Spher
       <span className="ti__time">{formatTime(event.start)}</span>
       <span className="ti__rail" aria-hidden="true">
         <span className={capClass(event)} style={{ height: `${height}px` }}>
-          {ICON[event.kind]}
+          📅
         </span>
       </span>
       <span className="ti__b">
@@ -43,7 +40,8 @@ function Event({ event, spheres }: { event: ThreadEvent; spheres: readonly Spher
 /**
  * Нить дня (артборд 01): капсулы событий по времени — встреча заливкой
  * цвета сферы, высотой по длительности; дело с часом без длительности —
- * маленькой точкой; переписка — бледной капсулой с кантом; будущее — контуром.
+ * маленькой точкой; будущее — контуром. Переписки в нити нет (036): её
+ * минуты — в часах дня.
  * Между событиями — «Свободно 40 мин», линия «сейчас» — перед будущим.
  * ✓ у сделанного — только состояние: нить не нажимается, «Сделано» — в
  * карточке дела.

@@ -299,7 +299,7 @@ function TodayScreen({ today, spheres }: { today: TodayData; spheres: readonly S
   const total = totalMinutes(today.rows);
   const sub = todaySub(total, aheadMinutes(today.spans, NOW, addDays(today.day, 1)));
   const inbox = noHourTasks(today.tasks);
-  const thread = dayThread(today.tasks, today.spans, NOW);
+  const thread = dayThread(today.tasks, NOW);
   const marks = spheres.length > 0;
 
   return (

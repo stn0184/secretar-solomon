@@ -29,10 +29,10 @@ export type TodayState =
 /**
  * Вкладка «Сегодня» (`techspec/32-redesign.md` §32.3, артборд 01): часы дня
  * крупной цифрой «примерно» и сколько встреч ещё впереди, доли сфер полосой,
- * дела без часа и нить дня. Часы считает база (`sphere_hours`), нить — из
- * отрезков дня и дел дня. Часов ещё нет, а дела есть — без цифры и полосы,
- * «Часов пока нет»: нулей не показываем. Нет ничего — одобренное пустое
- * (`design.md` §2, артборд 07).
+ * дела без часа и нить дня. Часы считает база (`sphere_hours`) — с минутами
+ * переписки, но переписка отдельно не называется (036); нить — из дел дня.
+ * Часов ещё нет, а дела есть — без цифры и полосы, «Часов пока нет»: нулей не
+ * показываем. Нет ничего — одобренное пустое (`design.md` §2, артборд 07).
  *
  * «Без часа» — та же строка дела, что в «Делах» (`TaskRow`, прототип 036):
  * день не повторяется, справа — часть дня или ничего. Касание открывает
@@ -88,7 +88,7 @@ export function TodayTab({
   const total = totalMinutes(today.rows);
   const sub = todaySub(total, aheadMinutes(today.spans, now, addDays(today.day, 1)));
   const inbox = noHourTasks(today.tasks);
-  const thread = dayThread(today.tasks, today.spans, now);
+  const thread = dayThread(today.tasks, now);
 
   return (
     <main className="screen screen--tabs">

@@ -1,14 +1,14 @@
 import type { CSSProperties } from "react";
 
-import { type SphereBar, partsWords } from "../lib/hours.ts";
+import type { SphereBar } from "../lib/hours.ts";
 import { type Sphere, sphereColor, sphereOf } from "../lib/spheres.ts";
 import { HoursFigure } from "./HoursFigure.tsx";
 
 /**
- * «По сферам» (артборд 02): сфера — название, часы за неделю цифрами,
- * полоса относительно наибольшей и разбивка «встречи · переписка» — только
- * ненулевые части. Порядок — как отдала база: по заведению, «без сферы»
- * последней. Полосы вырастают лесенкой.
+ * «По сферам» (артборд 02): сфера — название, часы за неделю цифрами и
+ * полоса относительно наибольшей. Разбивки «встречи · переписка» нет (036):
+ * минуты переписки — внутри часов. Порядок — как отдала база: по заведению,
+ * «без сферы» последней. Полосы вырастают лесенкой.
  */
 export function SphereBars({ bars, spheres }: { bars: readonly SphereBar[]; spheres: readonly Sphere[] }) {
   return (
@@ -31,7 +31,6 @@ export function SphereBars({ bars, spheres }: { bars: readonly SphereBar[]; sphe
             <span className="hb__track" aria-hidden="true">
               <i className="grow" style={{ width: `${bar.width}%`, "--wait": `${wait}ms` } as CSSProperties} />
             </span>
-            <span className="hb__sub">{partsWords(bar.meetings, bar.chat)}</span>
           </div>
         );
       })}

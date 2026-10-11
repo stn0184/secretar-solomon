@@ -36,7 +36,6 @@ import {
   noHourTasks,
   parseSpans,
   parseSphereMinutes,
-  partsWords,
   sphereBars,
   sphereCards,
   spheresHoursEyebrow,
@@ -185,12 +184,6 @@ describe("цифры часов", () => {
     assert.equal(clockWords(605), "10:05");
     assert.equal(clockWords(0), "0:00");
   });
-
-  it("разбивка — только ненулевые части", () => {
-    assert.equal(partsWords(510, 55), "встречи 8 ч 30 мин · переписка 55 мин");
-    assert.equal(partsWords(180, 0), "встречи 3 ч");
-    assert.equal(partsWords(0, 85), "переписка 1 ч 25 мин");
-  });
 });
 
 describe("weekDays", () => {
@@ -207,9 +200,9 @@ describe("weekDays", () => {
 });
 
 describe("«Сегодня»", () => {
-  it("под цифрой — «примерно» и сколько встреч ещё впереди", () => {
-    assert.deepEqual(todaySub(310, 90), { text: "примерно — из встреч и переписки", ahead: "1 ч 30 мин" });
-    assert.deepEqual(todaySub(310, 0), { text: "примерно — из встреч и переписки", ahead: null });
+  it("под цифрой — просто «примерно» и сколько встреч ещё впереди; переписка не называется (036)", () => {
+    assert.deepEqual(todaySub(310, 90), { text: "примерно", ahead: "1 ч 30 мин" });
+    assert.deepEqual(todaySub(310, 0), { text: "примерно", ahead: null });
     assert.deepEqual(todaySub(0, 60), { text: "Часов пока нет", ahead: "1 ч" });
   });
 
@@ -236,26 +229,23 @@ describe("«Сегодня»", () => {
   });
 
   it("нить дня артборда: события по времени, «Свободно» больше получаса, «сейчас» перед будущим", () => {
-    const thread = dayThread(DAY_TASKS, DAY_CHATS, NOW);
+    const thread = dayThread(DAY_TASKS, NOW);
     assert.deepEqual(brief(thread), [
       "Тренировка done",
       "Позвонить маме done",
       "gap 60",
       "Планёрка с отделом продаж past",
-      "Переписка past",
-      "gap 40",
-      "Переписка past",
-      "gap 70",
+      "gap 180",
       "Созвон с Игорем past",
-      "Переписка past",
+      "gap 40",
       "now",
       "gap 140",
       "Ужин с родителями future",
     ]);
   });
 
-  it("встречи — с длительностью, звонок без конца — точкой, переписка — без имени собеседника", () => {
-    const thread = dayThread(DAY_TASKS, DAY_CHATS, NOW);
+  it("встречи — с длительностью, звонок без конца — точкой; переписки в нити нет (036)", () => {
+    const thread = dayThread(DAY_TASKS, NOW);
     const events = thread.flatMap((entry) => (entry.type === "event" ? [entry.event] : []));
     assert.deepEqual(
       events.map((event) => [event.kind, event.minutes]),
@@ -263,10 +253,7 @@ describe("«Сегодня»", () => {
         ["meeting", 60],
         ["point", null],
         ["meeting", 60],
-        ["chat", 35],
-        ["chat", 20],
         ["meeting", 120],
-        ["chat", 15],
         ["meeting", 90],
       ],
     );
@@ -276,35 +263,38 @@ describe("«Сегодня»", () => {
         "07:30–08:30 · 1 ч · Спорт",
         "09:00 · без длительности · Семья",
         "10:00–11:00 · 1 ч · РЕЙВА",
-        "11:15–11:50 · 35 мин · РЕЙВА",
-        "12:30–12:50 · 20 мин · Без сферы",
         "14:00–16:00 · 2 ч · VoiceFin",
-        "16:10–16:25 · 15 мин · VoiceFin",
         "19:00–20:30 · 1 ч 30 мин · Семья · впереди",
       ],
     );
   });
 
+  it("подпись события: сферы есть — дело без сферы так и названо; сфер нет совсем — без «Без сферы» (036)", () => {
+    const [event] = dayThread([meeting("x", "Созвон", at(14), 60, null)], NOW).flatMap((entry) =>
+      entry.type === "event" ? [entry.event] : [],
+    );
+    assert.ok(event);
+    assert.equal(eventMeta(event, SPHERES), "14:00–15:00 · 1 ч · Без сферы");
+    assert.equal(eventMeta(event, []), "14:00–15:00 · 1 ч");
+    assert.equal(eventMeta({ ...event, start: at(19), end: at(20), state: "future" }, []), "19:00–20:00 · 1 ч · впереди");
+  });
+
   it("идущая встреча — до «сейчас», промежуток после неё — от её конца", () => {
     const thread = dayThread(
       [meeting("igor", "Созвон с Игорем", at(16), 60, "vf"), meeting("dinner", "Ужин", at(19), 60, null)],
-      [],
       NOW,
     );
     assert.deepEqual(brief(thread), ["Созвон с Игорем past", "now", "gap 120", "Ужин future"]);
   });
 
   it("всё прошло — «сейчас» в конце, перед ней свободное время", () => {
-    const thread = dayThread([meeting("plan", "Планёрка", at(10), 60, "rv")], [], NOW);
+    const thread = dayThread([meeting("plan", "Планёрка", at(10), 60, "rv")], NOW);
     assert.deepEqual(brief(thread), ["Планёрка past", "gap 340", "now"]);
   });
 
-  it("переписка через полночь режется днём; без событий нити нет", () => {
-    const thread = dayThread([], [chat(at(23, 50, 7), at(0, 20), null)], NOW);
-    const [first] = thread;
-    assert.ok(first?.type === "event");
-    assert.deepEqual([first.event.start, first.event.minutes], [at(0), 20]);
-    assert.deepEqual(dayThread([], [], NOW), []);
+  it("без встреч и дел с часом нити нет — даже если была переписка", () => {
+    assert.deepEqual(dayThread([], NOW), []);
+    assert.deepEqual(dayThread([DAY_TASKS[5]!], NOW), []);
   });
 
   it("дела без часа — открытые на сегодня: день или часть дня", () => {
@@ -320,11 +310,12 @@ describe("«Сегодня»", () => {
     );
   });
 
-  it("пусто — ни часов, ни переписки, ни дел на сегодня", () => {
+  it("пусто — ни часов, ни дел на сегодня", () => {
     const day = at(0);
     assert.equal(isTodayEmpty({ day, rows: [], spans: [], tasks: [] }), true);
     assert.equal(isTodayEmpty({ day, rows: [], spans: [], tasks: [DAY_TASKS[5]!] }), false);
-    assert.equal(isTodayEmpty({ day, rows: [], spans: [DAY_CHATS[0]!], tasks: [] }), false);
+    // Переписка без часов: отдельно она не показывается (036) — показывать нечего.
+    assert.equal(isTodayEmpty({ day, rows: [], spans: [DAY_CHATS[0]!], tasks: [] }), true);
     assert.equal(isTodayEmpty({ day, rows: [minutes(null, null, 0, 2)], spans: [], tasks: [] }), false);
     // Сделанное дело без часа на экране не видно — день пуст.
     assert.equal(isTodayEmpty({ day, rows: [], spans: [], tasks: [{ ...DAY_TASKS[5]!, done: true }] }), true);
@@ -441,10 +432,10 @@ describe("«Сферы»", () => {
     assert.equal(cards[1]!.width, 0);
   });
 
-  it("подпись: дела и разбивка; без часов и дел — словами, а не нулями", () => {
+  it("подпись: дела, без разбивки на встречи и переписку (036); без часов и дел — словами, а не нулями", () => {
     const [voicefin, reiva, family] = sphereCards(SPHERES, week, tasks, facts);
-    assert.equal(cardMeta(voicefin!), "3 открытых дела · встречи 8 ч 30 мин · переписка 55 мин");
-    assert.equal(cardMeta(family!), "1 открытое дело · встречи 3 ч");
+    assert.equal(cardMeta(voicefin!), "3 открытых дела");
+    assert.equal(cardMeta(family!), "1 открытое дело");
     assert.equal(cardMeta(reiva!), "открытых дел нет · часов за неделю нет");
   });
 
