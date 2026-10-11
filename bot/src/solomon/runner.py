@@ -18,6 +18,7 @@ from solomon.config import Settings
 from solomon.middlewares import OwnerOnlyMiddleware
 from solomon.services.chats import ChatService, Connection, OwnerSender
 from solomon.services.instagram import InstagramService
+from solomon.services.later import LaterService
 from solomon.services.max_bot import MaxService
 from solomon.services.relay import register_relay
 from solomon.services.reminders import ReminderService, mirror_timezone
@@ -68,6 +69,46 @@ def build_searches(
         return message.message_id
 
     return SearchService.with_database(settings, db, client, reply)
+
+
+def build_later(
+    settings: Settings,
+    db: Client,
+    bot: Bot,
+    tasks: TaskService,
+    searches: SearchService | None = None,
+) -> LaterService:
+    """Отложенные сообщения (`techspec/33-retry-later.md` §33.2): база, разбор
+    приёма и ответ на исходное сообщение владельца.
+
+    Ответ уходит ответом на исходное — и тогда, когда его уже удалили
+    (`allow_sending_without_reply`), — с кнопками разбора. Снимок скачивается
+    заново тем же `load_file` с повтором, что при приёме; поиск из ответа
+    запускается сразу, как после «Ищу» при приёме (§24.3).
+    """
+
+    async def reply(
+        *, chat_id: int, reply_to: int, text: str, buttons: Sequence[Button] = ()
+    ) -> int:
+        message = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_parameters=ReplyParameters(message_id=reply_to, allow_sending_without_reply=True),
+            reply_markup=handlers.keyboard(buttons),
+        )
+        return message.message_id
+
+    async def load_file(file_id: str) -> bytes:
+        return await handlers.load_file(bot, file_id)
+
+    return LaterService.with_database(
+        settings,
+        db,
+        tasks,
+        reply,
+        load_file=load_file,
+        launch_search=searches.launch if searches is not None else None,
+    )
 
 
 def owner_sender(settings: Settings, bot: Bot) -> OwnerSender:
@@ -135,6 +176,7 @@ def build_reminders(
     searches: SearchService | None = None,
     chats: ChatService | None = None,
     instagram: InstagramService | None = None,
+    later: LaterService | None = None,
 ) -> ReminderService:
     """Цикл напоминаний: база своя, отправка — через этого бота.
 
@@ -144,7 +186,8 @@ def build_reminders(
     с id пользователя, других чатов у помощника нет. Строка «Перенёс»
     (`techspec/11-edit.md` §11.4) уходит своим замыканием — без кнопки:
     это не напоминание. Шаг тика о поисках (§24.3) — `searches`, о личных
-    чатах (§25) — `chats`, опрос Direct (§26) — `instagram`. Ставить ли
+    чатах (§25) — `chats`, опрос Direct (§26) — `instagram`, отложенные
+    сообщения (§33) — `later`. Ставить ли
     кнопку «Сделано», решает сервис (`button`): о встрече с часом
     напоминание уходит без неё (§6.3).
     """
@@ -164,7 +207,14 @@ def build_reminders(
         return message.message_id
 
     return ReminderService.with_database(
-        settings, db, notify, announce, searches=searches, chats=chats, instagram=instagram
+        settings,
+        db,
+        notify,
+        announce,
+        searches=searches,
+        chats=chats,
+        instagram=instagram,
+        later=later,
     )
 
 
@@ -211,8 +261,15 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     chats = build_chats(settings, db, bot, client, speech) if db is not None else None
     instagram = build_instagram(settings, bot, chats) if chats is not None else None
     max_bot = build_max(settings, chats) if chats is not None else None
+    later = (
+        build_later(settings, db, bot, tasks, searches)
+        if db is not None and tasks is not None
+        else None
+    )
     reminders = (
-        build_reminders(settings, db, bot, searches, chats, instagram) if db is not None else None
+        build_reminders(settings, db, bot, searches, chats, instagram, later)
+        if db is not None
+        else None
     )
     dispatcher = build_dispatcher(
         settings, db=db, tasks=tasks, reminders=reminders, searches=searches, chats=chats
@@ -252,6 +309,10 @@ async def run(settings: Settings, db: Client | None = None) -> None:
             ticking.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await ticking
+        if later is not None:
+            # Разбор отложенного обрывается: сообщение остаётся взятым, и после
+            # запуска тик возьмёт его через десять минут (§33.2).
+            await later.stop()
         if searches is not None:
             # Поиски в работе обрываются: строка остаётся начатой, и после
             # запуска тик возьмёт её через десять минут (§24.3).

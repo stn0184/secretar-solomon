@@ -44,7 +44,7 @@ TASK_COLUMNS = "id, title, status"
 # с правилом повтора и разом (`techspec/13-repeat.md` §13.2).
 DETAIL_COLUMNS = (
     "id, title, kind, status, due_at, due_precision, priority, promise, people, created_at, "
-    "repeat, occurrence_at, sphere_id, duration"
+    "repeat, occurrence_at, sphere_id, duration, updated_at"
 )
 # Сообщение владельца, на которое ответили свайпом или по которому нажали
 # кнопку кандидата: текст, задача, разбор и ответ бота (§12.2, §12.6).
@@ -109,7 +109,10 @@ class TaskDetails:
     кнопке приходит и закрытая задача. `repeat` и `occurrence_at` — правило
     повтора и раз, который задача сейчас представляет (§13.2); у разовой
     оба пусты. `sphere_id` — сфера дела (`techspec/30-spheres.md` §30.2),
-    `duration` — минуты встречи (`techspec/31-hours.md` §31.1).
+    `duration` — минуты встречи (`techspec/31-hours.md` §31.1). `updated_at`
+    — последняя правка задачи: правка из отложенного сообщения применяется,
+    только если задачу не меняли после него (`techspec/33-retry-later.md`
+    §33.2); пусто — не известно.
     """
 
     id: str
@@ -126,6 +129,7 @@ class TaskDetails:
     occurrence_at: datetime | None = None
     sphere_id: str | None = None
     duration: int | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,11 +190,14 @@ class SavedMessage:
     заведено, либо прошлый заход упал между шагами и разбирать нужно заново.
     `received_at` — когда строка заведена: до этого момента берётся недавний
     разговор (§17.3); нет поля в ответе — пусто, и границу даёт часы бота.
+    `deferred` — сообщение ждёт разбора позже (`techspec/33-retry-later.md`
+    §33.2): повтор обновления не зовёт модель, а снова говорит «Принял».
     """
 
     id: str
     reply: str | None
     received_at: datetime | None = None
+    deferred: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +229,7 @@ def _message_from_row(row: Any) -> SavedMessage:
         id=message_id,
         reply=None if reply is None else str(reply),
         received_at=optional_moment(row.get("received_at"), "received_at"),
+        deferred=row.get("retry_at") is not None,
     )
 
 
@@ -317,6 +325,7 @@ def task_details_from_row(row: Any) -> TaskDetails:
             # Сфера читается мягко, как повтор: строка без колонки — без сферы.
             sphere_id=_optional_text(row.get("sphere_id")),
             duration=_optional_minutes(row.get("duration")),
+            updated_at=optional_moment(row.get("updated_at"), "updated_at"),
         )
     except KeyError as error:
         raise DatabaseError(f"В ответе базы нет поля задачи: {error}.") from error

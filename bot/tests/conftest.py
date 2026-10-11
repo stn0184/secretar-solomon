@@ -586,6 +586,9 @@ class FakeAnalyst:
         # Тексты переписок, с которыми звали модель (§18.2). Открытый вопрос,
         # список задач и блок 6 ложатся в общие `questions`, `tasks` и `recents`.
         self.conversations: list[str] = []
+        # Момент разбора по вызову (`techspec/33-retry-later.md` §33.2): у
+        # отложенного сообщения — когда оно пришло; `None` — часы сервиса.
+        self.moments: list[datetime | None] = []
 
     async def analyze(
         self,
@@ -600,8 +603,10 @@ class FakeAnalyst:
         recent: str | None = None,
         spheres: Sequence[KnownSphere] | None = None,
         hours: Sequence[str] | None = None,
+        now: datetime | None = None,
     ) -> Verdict:
         self.calls.append((text, forwarded_from, spoken))
+        self.moments.append(now)
         self.spheres.append(None if spheres is None else list(spheres))
         self.hours.append(None if hours is None else list(hours))
         self.questions.append(open_question)
@@ -621,8 +626,10 @@ class FakeAnalyst:
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
         spheres: Sequence[KnownSphere] | None = None,
+        now: datetime | None = None,
     ) -> PhotoVerdict:
         self.photos.append((image, media_type, caption, forwarded_from))
+        self.moments.append(now)
         self.spheres.append(None if spheres is None else list(spheres))
         self.questions.append(open_question)
         self.tasks.append(None if tasks is None else list(tasks))
@@ -639,8 +646,10 @@ class FakeAnalyst:
         tasks: Sequence[OpenTask] | None = None,
         recent: str | None = None,
         spheres: Sequence[KnownSphere] | None = None,
+        now: datetime | None = None,
     ) -> ConversationVerdict:
         self.conversations.append(text)
+        self.moments.append(now)
         self.spheres.append(None if spheres is None else list(spheres))
         self.questions.append(open_question)
         self.tasks.append(None if tasks is None else list(tasks))

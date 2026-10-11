@@ -73,6 +73,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 from supabase import Client
@@ -82,12 +83,14 @@ from solomon.config import Settings
 from solomon.db import chats as db_chats
 from solomon.db import facts as db_facts
 from solomon.db import hours as db_hours
+from solomon.db import later as db_later
 from solomon.db import reminders as db_reminders
 from solomon.db import searches as db_searches
 from solomon.db import spheres as db_spheres
 from solomon.db import tasks as db_tasks
 from solomon.db.chats import ReportedChat
 from solomon.db.hours import SphereMinutes
+from solomon.db.later import DeferredMessage
 from solomon.db.reminders import Planned
 from solomon.db.rpc import DatabaseError
 from solomon.db.spheres import Sphere
@@ -156,6 +159,7 @@ from solomon.services.understanding import (
     Verdict,
     also_of,
     fact_status,
+    next_retry,
     searches_of,
 )
 
@@ -182,6 +186,15 @@ MAX_ITEMS = edits.ITEM_LIMIT
 # Виды записи под значком 💡 (`techspec/29-icons.md` §29.1); дело — ✅.
 IDEA_KINDS = ("idea", "wish")
 
+# Разобрать позже (`techspec/33-retry-later.md` §33.2): сколько сообщение
+# ждёт модель, считая от получения, — решение владельца; дальше «как есть».
+LATER_LIMIT = timedelta(hours=6)
+# Голосовые виды: у отложенного голоса разбор идёт по сохранённой расшифровке.
+SPEECH_KINDS = ("voice", "video_note")
+# Виды картинки, которые уходят модели (§14.1): вид отложенного снимка —
+# из `retry_input`, а не угадан.
+IMAGE_TYPES: tuple[ImageType, ...] = ("image/jpeg", "image/png", "image/webp")
+
 
 def summarize(text: str) -> str:
     """Пересказ поручения для ответа: длинное обрезается, целое уже в базе."""
@@ -190,10 +203,60 @@ def summarize(text: str) -> str:
     return text[:SUMMARY_LIMIT] + "…"
 
 
-def as_is_reply(text: str) -> str:
+def as_is_reply(text: str, template: str = texts.RECORDED_AS_IS) -> str:
     """«Записал как есть» при отказе модели (`techspec/05-ai.md` §5.4): задача
-    есть, а разбора нет — значок «не получилось» (`techspec/29-icons.md`)."""
-    return texts.iconed(texts.ICON_TROUBLE, texts.RECORDED_AS_IS.format(text=summarize(text)))
+    есть, а разбора нет — значок «не получилось» (`techspec/29-icons.md`).
+    У отложенного сообщения, которое так и не разобрали, — свой текст
+    (`techspec/33-retry-later.md` §33.2, шаг 4)."""
+    return texts.iconed(texts.ICON_TROUBLE, template.format(text=summarize(text)))
+
+
+def changed_since(task: TaskDetails, moment: datetime | None) -> bool:
+    """Задачу поменяли после отложенного сообщения (§33.2, шаг 3) — правку из
+    него вслепую не применять.
+
+    Задача, заведённая позже сообщения (её завело более раннее сообщение той же
+    очереди), — не «поменяли»: владелец говорил о ней такой, какой её завели.
+    Время правки не известно — не поменяли.
+    """
+    if moment is None or task.updated_at is None:
+        return False
+    return task.created_at <= moment < task.updated_at
+
+
+def swipe_input(swipe: Swipe | None) -> dict[str, Any]:
+    """Свайп в `retry_input` отложенного сообщения: разбор позже его не увидит
+    иначе (§33.2)."""
+    if swipe is None:
+        return {}
+    return {
+        "swipe": {
+            "telegram_message_id": swipe.telegram_message_id,
+            "from_bot": swipe.from_bot,
+            "text": swipe.text,
+        }
+    }
+
+
+def swipe_of(retry_input: Mapping[str, Any]) -> Swipe | None:
+    """Свайп обратно из `retry_input`; кривой — без свайпа: поручение важнее."""
+    value = retry_input.get("swipe")
+    if not isinstance(value, Mapping):
+        return None
+    number = value.get("telegram_message_id")
+    if isinstance(number, bool) or not isinstance(number, int):
+        return None
+    text = value.get("text")
+    return Swipe(
+        telegram_message_id=number,
+        from_bot=bool(value.get("from_bot")),
+        text=text if isinstance(text, str) else None,
+    )
+
+
+def clock_time(moment: datetime, timezone: ZoneInfo) -> str:
+    """«16:18» — время в поясе владельца для «Разобрал ваше сообщение от …»."""
+    return moment.astimezone(timezone).strftime("%H:%M")
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,12 +282,17 @@ class RecordOutcome:
     `search_id` — поиск, заведённый этим сообщением (`techspec/24-search.md`
     §24.3): обработчик запускает его, когда ответ «Ищу» уже ушёл. У повтора
     обновления его нет — брошенный поиск подхватит тик.
+
+    `later` — модель временно недоступна (`techspec/33-retry-later.md`
+    §33.2): сообщение ждёт в базе. При приёме `message` — «⏳ Принял…»; при
+    разборе позже — пусто, и сообщение возвращается в очередь.
     """
 
     ok: bool
     message: str
     buttons: tuple[Button, ...] = ()
     search_id: str | None = None
+    later: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,8 +407,44 @@ class QuestionReader(Protocol):
     async def __call__(self, *, owner_telegram_id: int, since: datetime) -> OpenQuestion | None: ...
 
 
+class Deferrer(Protocol):
+    """Отложить сообщение (`techspec/33-retry-later.md` §33.2, шаг 1).
+
+    `attempts` — сколько раз модель уже звали; `retry_input` — что нужно
+    разбору сверх строки; `transcript` — расшифровка голоса, она станет
+    текстом сообщения. `False` — у сообщения уже есть ответ. Отказ —
+    `DatabaseError`.
+    """
+
+    async def __call__(
+        self,
+        *,
+        message_id: str,
+        retry_at: datetime,
+        attempts: int,
+        retry_input: Mapping[str, Any] | None = None,
+        transcript: str | None = None,
+        transcript_confidence: float | None = None,
+    ) -> bool: ...
+
+
+class QueueReader(Protocol):
+    """Ждёт ли другое сообщение владельца (§33.2, шаг 5). Отказ — `DatabaseError`."""
+
+    async def __call__(self, *, message_id: str) -> bool: ...
+
+
+# Файл из Telegram по `file_id` — у отложенного снимка (§33.2): разбор позже
+# скачивает его заново, сам снимок не хранится (§14.6).
+FileLoader = Callable[[str], Awaitable[bytes]]
+
+
 class Analyst(Protocol):
-    """Разбор сообщения моделью — то, что подменяет тест вместо сети."""
+    """Разбор сообщения моделью — то, что подменяет тест вместо сети.
+
+    `now` — момент разбора для модели: у отложенного сообщения — когда оно
+    пришло (`techspec/33-retry-later.md` §33.2); пусто — часы разбора.
+    """
 
     async def analyze(
         self,
@@ -355,6 +459,7 @@ class Analyst(Protocol):
         recent: str | None = None,
         spheres: Sequence[KnownSphere] | None = None,
         hours: Sequence[str] | None = None,
+        now: datetime | None = None,
     ) -> Verdict: ...
 
     async def analyze_photo(
@@ -367,6 +472,7 @@ class Analyst(Protocol):
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
         spheres: Sequence[KnownSphere] | None = None,
+        now: datetime | None = None,
     ) -> PhotoVerdict: ...
 
     async def analyze_conversation(
@@ -377,6 +483,7 @@ class Analyst(Protocol):
         tasks: Sequence[OpenTask] | None = None,
         recent: str | None = None,
         spheres: Sequence[KnownSphere] | None = None,
+        now: datetime | None = None,
     ) -> ConversationVerdict: ...
 
 
@@ -406,6 +513,9 @@ class Pending:
 # Ответ сообщению переписки, которое не голова (§18.1): обработчик его не
 # отправляет — переписке отвечает одна голова.
 SILENT = RecordOutcome(ok=True, message="")
+# Разбор позже снова не удался — модель недоступна или база не записала:
+# сообщение возвращается в очередь, владельцу ничего не уходит (§33.2).
+STILL_DOWN = RecordOutcome(ok=False, message="", later=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,7 +547,9 @@ class EditContext:
     §30.2); `None` — не прочитались, и блока сфер нет. `chat` — чат, на отчёт
     о котором ответили свайпом: правка сферы — его (§30.2). `hours` — строки
     часов по сферам (`techspec/31-hours.md` §31.2), только у своего
-    сообщения; `None` — блока нет.
+    сообщения; `None` — блока нет. `changed_after` — момент отложенного
+    сообщения (`techspec/33-retry-later.md` §33.2): задачу, поменянную после
+    него, правка не трогает, а спрашивает.
     """
 
     tasks: list[TaskDetails] | None
@@ -448,6 +560,7 @@ class EditContext:
     spheres: list[Sphere] | None = None
     chat: ReportedChat | None = None
     hours: tuple[str, ...] | None = None
+    changed_after: datetime | None = None
 
 
 NO_EDIT = EditContext(tasks=None, last_tasks=(), swipe=None)
@@ -1140,6 +1253,8 @@ class TaskService:
         names: NameSource | None = None,
         batches: Batches[Pending] | None = None,
         start_search: SearchStarter | None = None,
+        defer: Deferrer | None = None,
+        queue: QueueReader | None = None,
     ) -> None:
         self._settings = settings
         self._record_message = record_message
@@ -1169,6 +1284,10 @@ class TaskService:
         # Без него поиск завести некуда: на просьбу найти — «Не получилось
         # записать поиск» (§24.6). Обычная сборка его подключает.
         self._start_search = start_search
+        # Без них временный отказ модели — запись «как есть», как до этапа 037
+        # (`techspec/33-retry-later.md`). Обычная сборка их подключает.
+        self._defer_message = defer
+        self._queue = queue
         # «Сейчас» внедряется: от него зависит расписание напоминаний, и
         # тесты не должны угадывать, который час (`services/reminders.py`).
         self._clock = clock or self._now
@@ -1268,6 +1387,31 @@ class TaskService:
                 query=query,
             )
 
+        async def defer(
+            *,
+            message_id: str,
+            retry_at: datetime,
+            attempts: int,
+            retry_input: Mapping[str, Any] | None = None,
+            transcript: str | None = None,
+            transcript_confidence: float | None = None,
+        ) -> bool:
+            return await db_later.defer_message(
+                db,
+                owner_telegram_id=settings.owner_telegram_id,
+                message_id=message_id,
+                retry_at=retry_at,
+                attempts=attempts,
+                retry_input=retry_input,
+                transcript=transcript,
+                transcript_confidence=transcript_confidence,
+            )
+
+        async def queue(*, message_id: str) -> bool:
+            return await db_later.deferred_waiting(
+                db, owner_telegram_id=settings.owner_telegram_id, message_id=message_id
+            )
+
         return cls(
             settings=settings,
             record_message=record_message,
@@ -1281,6 +1425,8 @@ class TaskService:
             names=DatabaseNames(settings, db),
             batches=Batches(),
             start_search=start_search,
+            defer=defer,
+            queue=queue,
         )
 
     @classmethod
@@ -1328,6 +1474,8 @@ class TaskService:
 
         if saved.reply:
             return self._repeated(saved.id, saved.reply)
+        if saved.deferred:
+            return self._waiting_again(saved.id)
 
         line = Line(
             sent_at=sent_at or self._clock(),
@@ -1387,6 +1535,8 @@ class TaskService:
 
         if saved.reply:
             return self._repeated(saved.id, saved.reply)
+        if saved.deferred:
+            return self._waiting_again(saved.id)
 
         line = Line(
             sent_at=sent_at or self._clock(),
@@ -1455,12 +1605,47 @@ class TaskService:
 
         if saved.reply:
             return self._repeated(saved.id, saved.reply)
+        if saved.deferred:
+            return self._waiting_again(saved.id)
 
         image = await self._load_image(load_image)
         if image is None:
             return await self._unrecorded(saved, texts.PHOTO_NOT_OPENED, "снимок не скачан")
+        return await self._photo(
+            saved,
+            image,
+            media_type=media_type,
+            caption=caption,
+            forwarded_from=forwarded_from,
+            telegram_message_id=telegram_message_id,
+        )
 
-        asked, context = await asyncio.gather(self._open_question(), self._check_context())
+    async def _photo(
+        self,
+        saved: SavedMessage,
+        image: bytes,
+        *,
+        media_type: ImageType,
+        caption: str,
+        forwarded_from: str | None,
+        telegram_message_id: int,
+        later: datetime | None = None,
+    ) -> RecordOutcome:
+        """Снимок уже скачан: разбор моделью и запись (§14.2–14.4).
+
+        Модель временно недоступна или очередь не пуста — снимок ждёт
+        (`techspec/33-retry-later.md` §33.2): вид картинки уходит в
+        `retry_input`, сам снимок разбор позже скачает заново. `later` —
+        момент отложенного снимка, его разбирают сейчас.
+        """
+        retry_input = {"media_type": media_type}
+        asked, context, queued = await asyncio.gather(
+            self._open_question(later), self._check_context(), self._queued(saved, later)
+        )
+        if queued:
+            deferred = await self._defer(saved, attempts=0, retry_input=retry_input)
+            if deferred is not None:
+                return deferred
         verdict = await self._analyst.analyze_photo(
             image,
             media_type=media_type,
@@ -1469,19 +1654,21 @@ class TaskService:
             open_question=asked,
             tasks=context.tasks,
             spheres=context.spheres,
+            now=later,
         )
         if not isinstance(verdict, PhotoAnalysis):
+            if verdict.temporary:
+                if later is not None:
+                    return STILL_DOWN
+                deferred = await self._defer(saved, attempts=1, retry_input=retry_input)
+                if deferred is not None:
+                    return deferred
             said = caption.strip()
             if not said:
                 # Записывать нечего: без разбора и задачи вопрос остаётся (§3.4).
                 return await self._unrecorded(saved, texts.PHOTO_NOT_UNDERSTOOD, verdict.reason)
             # Подпись — слова человека: как текст при отказе модели (§5.4).
-            decision = Decision(
-                reply=as_is_reply(said),
-                task=literal_fields(said),
-                reminders=[],
-            )
-            return await self._write(saved, decision, analysis=None, facts=[], verdict=None)
+            return await self._as_is(saved, said, later=later)
 
         understanding = verdict.understanding
         dropped = [name for name in ("edit", "facts") if getattr(understanding, name)]
@@ -1510,7 +1697,7 @@ class TaskService:
                 )
             except DatabaseError as error:
                 logger.warning("Расписание не получено, разбор снимка не записан: %s", error)
-                return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
+                return self._not_saved(later)
             if photo.more_tasks and any(
                 part is not None for part in (decision.task, decision.amend, decision.same_task)
             ):
@@ -1524,7 +1711,116 @@ class TaskService:
             facts=[],
             verdict=verdict,
             photo_text=photo.photo_text,
+            later=later,
         )
+
+    async def retry(
+        self,
+        row: DeferredMessage,
+        *,
+        give_up: bool = False,
+        load_file: FileLoader | None = None,
+    ) -> RecordOutcome:
+        """Разобрать отложенное сообщение (`techspec/33-retry-later.md` §33.2).
+
+        Тем же путём, что при приёме, но с моментом получения: «завтра» — от
+        того дня, блок 6 — каким был тогда, открытые задачи — нынешние. Запись
+        — прежний `record_understanding`, его проверка повтора не даст второй
+        задачи. Ответ начинается «Разобрал ваше сообщение от ЧЧ:ММ:».
+
+        `give_up` — шесть часов прошли (§33.2, шаг 4): модель не зовётся,
+        сообщение пишется «как есть» с «Разобрать так и не смог». Постоянный
+        отказ на повторе — так же. Модель снова недоступна или база не
+        записала — `later`, сообщение остаётся в очереди. Снимок скачивается
+        заново по `file_id` (`load_file`); не скачался — «Не смог открыть
+        снимок», как при приёме. Голос — по сохранённой расшифровке.
+        """
+        saved = SavedMessage(id=row.id, reply=None, received_at=row.received_at)
+        later = row.received_at
+        conversation = row.retry_input.get("conversation")
+        if isinstance(conversation, Mapping):
+            title = str(conversation.get("title") or batches.AS_IS_TITLE)
+            if give_up:
+                return await self._as_is(saved, title, later=later)
+            return await self._read_conversation(
+                saved,
+                text=str(conversation.get("text") or ""),
+                title=title,
+                caption=bool(conversation.get("caption")),
+                telegram_message_id=row.telegram_message_id,
+                before=self._moment_of(conversation.get("before"), row.received_at),
+                later=later,
+            )
+        if row.kind == "photo":
+            return await self._retry_photo(saved, row, give_up=give_up, load_file=load_file)
+        transcript = None
+        if row.kind in SPEECH_KINDS:
+            transcript = Transcript(text=row.text, confidence=row.transcript_confidence)
+        if give_up:
+            return await self._as_is(saved, row.text, later=later, transcript=transcript)
+        return await self._understand(
+            saved,
+            row.text,
+            chat_id=row.chat_id,
+            telegram_message_id=row.telegram_message_id,
+            forwarded_from=row.forwarded_from,
+            swipe=swipe_of(row.retry_input),
+            transcript=transcript,
+            later=later,
+        )
+
+    async def _retry_photo(
+        self,
+        saved: SavedMessage,
+        row: DeferredMessage,
+        *,
+        give_up: bool,
+        load_file: FileLoader | None,
+    ) -> RecordOutcome:
+        """Отложенный снимок: «как есть» — подпись, без подписи — «не разобрал»;
+        иначе скачать заново и разобрать (§33.2)."""
+        caption = row.text
+        if give_up:
+            said = caption.strip()
+            if not said:
+                return await self._unrecorded(
+                    saved, texts.PHOTO_NOT_UNDERSTOOD, "снимок так и не разобран"
+                )
+            return await self._as_is(saved, said, later=row.received_at)
+        file_id = row.telegram_file_id
+        image = None
+        if load_file is not None and file_id is not None:
+
+            async def load_image() -> bytes:
+                return await load_file(file_id)
+
+            image = await self._load_image(load_image)
+        if image is None:
+            return await self._unrecorded(saved, texts.PHOTO_NOT_OPENED, "снимок не скачан")
+        named = row.retry_input.get("media_type")
+        media_type: ImageType = "image/jpeg"
+        for kind in IMAGE_TYPES:
+            if kind == named:
+                media_type = kind
+        return await self._photo(
+            saved,
+            image,
+            media_type=media_type,
+            caption=caption,
+            forwarded_from=row.forwarded_from,
+            telegram_message_id=row.telegram_message_id,
+            later=row.received_at,
+        )
+
+    @staticmethod
+    def _moment_of(value: Any, default: datetime) -> datetime:
+        """Время из `retry_input` строкой ISO; кривое — `default`."""
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                pass
+        return default
 
     async def _as_conversation(self, chat_id: int, pending: Pending) -> RecordOutcome | None:
         """Встать в пачку чата и, если она переписка, ответить за неё (§18.1).
@@ -1588,23 +1884,81 @@ class TaskService:
             )
 
         text = batches.conversation_text(lines, self._clock(), self._settings.owner_timezone)
-        asked, context, recent = await asyncio.gather(
-            self._open_question(), self._check_context(), self._conversation_recent(items)
+        # Граница блока 6 — первое сообщение пачки: сама переписка в блок не
+        # попадает (§18.2); времени у строк нет — часы бота.
+        before = min(
+            (item.saved.received_at for item in items if item.saved.received_at is not None),
+            default=self._clock(),
         )
+        return await self._read_conversation(
+            saved,
+            text=text,
+            title=batches.as_is_title(lines),
+            caption=caption,
+            telegram_message_id=items[head].telegram_message_id,
+            before=before,
+            transcript=transcript,
+        )
+
+    async def _read_conversation(
+        self,
+        saved: SavedMessage,
+        *,
+        text: str,
+        title: str,
+        caption: bool,
+        telegram_message_id: int,
+        before: datetime,
+        transcript: Transcript | None = None,
+        later: datetime | None = None,
+    ) -> RecordOutcome:
+        """Переписка собрана в текст: разбор моделью и запись на голову (§18.2–18.4).
+
+        `title` — суть задачи «как есть» при отказе модели, `caption` — была ли
+        подпись, `before` — граница блока 6. Модель временно недоступна или
+        очередь не пуста — переписка ждёт (`techspec/33-retry-later.md` §33.2):
+        всё это уходит в `retry_input`, потому что пачки после перезапуска уже
+        нет. `later` — момент отложенной переписки, её разбирают сейчас.
+        """
+        retry_input = {
+            "conversation": {
+                "text": text,
+                "title": title,
+                "caption": caption,
+                "before": before.isoformat(),
+            }
+        }
+        asked, context, recent, queued = await asyncio.gather(
+            self._open_question(later),
+            self._check_context(),
+            self._conversation_recent(before, later),
+            self._queued(saved, later),
+        )
+        if queued:
+            deferred = await self._defer(
+                saved, attempts=0, retry_input=retry_input, transcript=transcript
+            )
+            if deferred is not None:
+                return deferred
         verdict = await self._analyst.analyze_conversation(
-            text, open_question=asked, tasks=context.tasks, recent=recent, spheres=context.spheres
+            text,
+            open_question=asked,
+            tasks=context.tasks,
+            recent=recent,
+            spheres=context.spheres,
+            now=later,
         )
         if not isinstance(verdict, ConversationAnalysis):
+            if verdict.temporary:
+                if later is not None:
+                    return STILL_DOWN
+                deferred = await self._defer(
+                    saved, attempts=1, retry_input=retry_input, transcript=transcript
+                )
+                if deferred is not None:
+                    return deferred
             # Отказ модели (§5.4): одна задача «как есть» — кто писал и подпись.
-            title = batches.as_is_title(lines)
-            decision = Decision(
-                reply=as_is_reply(title),
-                task=literal_fields(title),
-                reminders=[],
-            )
-            return await self._write(
-                saved, decision, analysis=None, facts=[], verdict=None, transcript=transcript
-            )
+            return await self._as_is(saved, title, later=later, transcript=transcript)
 
         understanding = verdict.understanding
         dropped = [name for name in ("edit", "facts") if getattr(understanding, name)]
@@ -1617,11 +1971,11 @@ class TaskService:
         )
         try:
             decision = await self._conversation_decision(
-                read, asked, context, items[head].telegram_message_id, caption=caption
+                read, asked, context, telegram_message_id, caption=caption
             )
         except DatabaseError as error:
             logger.warning("Расписание не получено, разбор переписки не записан: %s", error)
-            return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
+            return self._not_saved(later)
         return await self._write(
             saved,
             decision,
@@ -1629,6 +1983,7 @@ class TaskService:
             facts=[],
             verdict=verdict,
             transcript=transcript,
+            later=later,
         )
 
     async def _conversation_decision(
@@ -1668,20 +2023,18 @@ class TaskService:
             decision = replace(decision, reply=paragraphs(decision.reply, more))
         return decision
 
-    async def _conversation_recent(self, items: Sequence[Pending]) -> str | None:
+    async def _conversation_recent(self, before: datetime, later: datetime | None) -> str | None:
         """Блок 6 у переписки (§18.2): тот же час, что у своего сообщения.
 
-        Граница — первое сообщение пачки, чтобы сама переписка в блок не
-        попала; времени у строк нет — часы бота. Без хранилища блока нет.
+        Граница `before` — первое сообщение пачки, чтобы сама переписка в блок
+        не попала. Час — до сейчас, а у отложенной переписки — до момента, когда
+        она пришла (§33.2): блок такой, каким был тогда. Без хранилища блока нет.
         """
         store = self._edits
         if store is None:
             return None
-        before = min(
-            (item.saved.received_at for item in items if item.saved.received_at is not None),
-            default=self._clock(),
-        )
-        return await self._recent(store, self._clock() - edits.LAST_TASK_WINDOW, before)
+        moment = later or self._clock()
+        return await self._recent(store, moment - edits.LAST_TASK_WINDOW, before)
 
     async def _hear_conversation(self, items: Sequence[Pending]) -> dict[int, TranscriptionResult]:
         """Голосовые переписки — параллельно, с одними подсказками имён (§18.2).
@@ -1855,22 +2208,28 @@ class TaskService:
         logger.info("Сообщение %s без разбора: %s", saved.id, reason)
         return RecordOutcome(ok=False, message=reply)
 
-    async def _open_question(self) -> OpenQuestion | None:
+    async def _open_question(self, later: datetime | None = None) -> OpenQuestion | None:
         """Открытый вопрос не старше суток — или ничего, если база не ответила.
 
         Поручение важнее контекста: отказ чтения не останавливает разбор, а
         уходит в журнал (как известные факты, `techspec/08-memory.md` §8.2).
+        У отложенного сообщения (`later`) вопрос, заданный после него, — не
+        тот, на который оно отвечало (`techspec/33-retry-later.md` §33.2).
         """
         if self._read_question is None:
             return None
         try:
-            return await self._read_question(
+            asked = await self._read_question(
                 owner_telegram_id=self._settings.owner_telegram_id,
-                since=self._clock() - QUESTION_TTL,
+                since=(later or self._clock()) - QUESTION_TTL,
             )
         except DatabaseError as error:
             logger.error("Открытый вопрос не прочитан, разбор без него: %s", error)
             return None
+        if asked is not None and later is not None and asked.asked_at > later:
+            logger.info("Вопрос задан после отложенного сообщения — разбор без него")
+            return None
+        return asked
 
     async def _understand(
         self,
@@ -1882,6 +2241,7 @@ class TaskService:
         forwarded_from: str | None,
         swipe: Swipe | None = None,
         transcript: Transcript | None = None,
+        later: datetime | None = None,
     ) -> RecordOutcome:
         """Разбор моделью и запись разбора — общий хвост текста и голоса.
 
@@ -1899,6 +2259,12 @@ class TaskService:
         записалась ли его строка, зависит абзац ответа — «Ищу» или «Не
         получилось записать поиск». Ответ записан — его id уходит наружу, и
         обработчик запустит поиск.
+
+        Модель временно недоступна (`techspec/33-retry-later.md` §33.2) — «как
+        есть» не пишется: сообщение ждёт в базе, ответ — «⏳ Принял…». Так же
+        оно ждёт, если очередь не пуста: порядок разбора — порядок получения.
+        `later` — момент отложенного сообщения, его разбирают сейчас: модель и
+        блок 6 видят тот момент, а план и слова ответа — нынешний.
         """
         spoken: SpeechQuality | None = None
         if transcript is not None:
@@ -1907,10 +2273,19 @@ class TaskService:
         # Граница блока 6 — само сообщение: ни оно, ни пришедшие после него в
         # блок не попадают (§17.3). Время записи даёт база; нет его — часы.
         before = saved.received_at or self._clock()
+        retry_input = swipe_input(swipe)
 
-        asked, context = await asyncio.gather(
-            self._open_question(), self._edit_context(chat_id, forwarded_from, swipe, before)
+        asked, context, queued = await asyncio.gather(
+            self._open_question(later),
+            self._edit_context(chat_id, forwarded_from, swipe, before, later),
+            self._queued(saved, later),
         )
+        if queued:
+            deferred = await self._defer(
+                saved, attempts=0, retry_input=retry_input, transcript=transcript
+            )
+            if deferred is not None:
+                return deferred
         verdict = await self._analyst.analyze(
             text,
             forwarded_from=forwarded_from,
@@ -1922,6 +2297,7 @@ class TaskService:
             recent=context.recent,
             spheres=context.spheres,
             hours=context.hours,
+            now=later,
         )
         if isinstance(verdict, Analysis):
             # Сфера — как её запишет бот: дела по смыслу — только из списка;
@@ -1946,7 +2322,7 @@ class TaskService:
                 # Без плана «Напомню» было бы неправдой, а задача без
                 # напоминаний — тихой потерей: честнее не записать (§11.3).
                 logger.warning("Расписание не получено, разбор не записан: %s", error)
-                return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
+                return self._not_saved(later)
             outcome = await self._write(
                 saved,
                 decision,
@@ -1955,20 +2331,130 @@ class TaskService:
                 verdict=verdict,
                 transcript=transcript,
                 spheres=sphere_ops(plan, decision.chat_sphere),
+                later=later,
             )
             if outcome.ok and search_id is not None:
                 return replace(outcome, search_id=search_id)
             return outcome
+        if verdict.temporary:
+            if later is not None:
+                return STILL_DOWN
+            deferred = await self._defer(
+                saved, attempts=1, retry_input=retry_input, transcript=transcript
+            )
+            if deferred is not None:
+                return deferred
         # Разбора не случилось: записываем буквально и говорим об этом.
-        # Срока у такой задачи нет, значит и напоминать не о чем.
+        return await self._as_is(saved, text, later=later, transcript=transcript)
+
+    async def _as_is(
+        self,
+        saved: SavedMessage,
+        text: str,
+        *,
+        later: datetime | None = None,
+        transcript: Transcript | None = None,
+    ) -> RecordOutcome:
+        """Записать буквально и сказать об этом (§5.4). Срока у такой задачи
+        нет, значит и напоминать не о чем.
+
+        У отложенного сообщения (`later`) — «Разобрать так и не смог»: шесть
+        часов прошли или отказ на повторе постоянный (§33.2, шаг 4).
+        """
+        template = texts.RECORDED_AS_IS if later is None else texts.RECORDED_AS_IS_LATER
         decision = Decision(
-            reply=as_is_reply(text),
+            reply=as_is_reply(text, template),
             task=literal_fields(text),
             reminders=[],
         )
         return await self._write(
-            saved, decision, analysis=None, facts=[], verdict=None, transcript=transcript
+            saved,
+            decision,
+            analysis=None,
+            facts=[],
+            verdict=None,
+            transcript=transcript,
+            later=later,
+            heading=False,
         )
+
+    async def _queued(self, saved: SavedMessage, later: datetime | None) -> bool:
+        """Ждёт ли очередь другое сообщение (§33.2, шаг 5): тогда это встаёт за
+        ним, а модель не зовётся. Разбор позже очередь не проверяет — он сам
+        её голова. База не ответила — очереди нет: поручение важнее порядка.
+        """
+        if later is not None or self._queue is None or self._defer_message is None:
+            return False
+        try:
+            return await self._queue(message_id=saved.id)
+        except DatabaseError as error:
+            logger.warning("Очередь отложенных не прочитана, разбор без неё: %s", error)
+            return False
+
+    async def _defer(
+        self,
+        saved: SavedMessage,
+        *,
+        attempts: int,
+        retry_input: Mapping[str, Any] | None = None,
+        transcript: Transcript | None = None,
+    ) -> RecordOutcome | None:
+        """Отложить сообщение и ответить «⏳ Принял…» (§33.2, шаг 1).
+
+        `attempts` — сколько раз модель уже звали: ноль — сообщение встало в
+        очередь и пробуется сразу за её головой, иначе — через паузу, но не
+        позже шести часов от получения. `None` — отложить не вышло (нечем или
+        база не ответила): сообщение идёт прежним путём «как есть», чтобы не
+        потеряться (инвариант 5).
+        """
+        if self._defer_message is None:
+            return None
+        now = self._clock()
+        deadline = (saved.received_at or now) + LATER_LIMIT
+        retry_at = now if attempts == 0 else next_retry(now, attempts, deadline)
+        try:
+            deferred = await self._defer_message(
+                message_id=saved.id,
+                retry_at=retry_at,
+                attempts=attempts,
+                retry_input=retry_input or None,
+                transcript=transcript.text if transcript is not None else None,
+                transcript_confidence=transcript.confidence if transcript is not None else None,
+            )
+        except DatabaseError as error:
+            logger.warning("Сообщение %s не отложено, пишу как есть: %s", saved.id, error)
+            return None
+        if not deferred:
+            logger.warning("Сообщение %s не отложено: ответ у него уже есть", saved.id)
+            return None
+        logger.info(
+            "Сообщение %s ждёт разбора: попыток %s, следующая %s",
+            saved.id,
+            attempts,
+            retry_at.isoformat(),
+        )
+        return self._waiting_reply()
+
+    def _waiting_again(self, message_id: str) -> RecordOutcome:
+        """Повтор обновления у ждущего сообщения: модель не зовём, снова
+        «⏳ Принял…» (§33.2)."""
+        logger.info("Повтор сообщения %s: оно ждёт разбора позже", message_id)
+        return self._waiting_reply()
+
+    @staticmethod
+    def _waiting_reply() -> RecordOutcome:
+        return RecordOutcome(
+            ok=True, message=texts.iconed(texts.ICON_WAITING, texts.TAKEN_LATER), later=True
+        )
+
+    @staticmethod
+    def _not_saved(later: datetime | None) -> RecordOutcome:
+        """База не ответила на плане или записи. При приёме — «Не смог
+        записать»; у отложенного сообщения — снова в очередь: разбор позже
+        попробует ещё раз и ничего не потеряет (§33.2)."""
+        if later is not None:
+            return STILL_DOWN
+        return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
 
     async def _search_note(
         self, saved: SavedMessage, understanding: Understanding, *, talk: bool
@@ -2018,13 +2504,23 @@ class TaskService:
         transcript: Transcript | None = None,
         photo_text: str | None = None,
         spheres: Mapping[str, Any] | None = None,
+        later: datetime | None = None,
+        heading: bool = True,
     ) -> RecordOutcome:
         """Второй шаг и ответ — общий хвост текста, голоса, снимка и переписки.
 
         `verdict` — ответ модели, из него модель и токены (§3.2); `None` —
         разбора не было, и записан текст «как есть». `spheres` — что
         сообщение делает со сферами (`techspec/30-spheres.md` §30.2).
+
+        `later` — момент отложенного сообщения (`techspec/33-retry-later.md`
+        §33.2): ответ начинается строкой «Разобрал ваше сообщение от ЧЧ:ММ:»
+        (`heading`; у «как есть» её нет) и в `reply` лежит ровно тем, что уйдёт
+        владельцу. База не записала — сообщение остаётся в очереди.
         """
+        reply = decision.reply
+        if later is not None and heading and reply:
+            reply = texts.parsed_later(clock_time(later, self._settings.owner_timezone), reply)
         try:
             recorded = await self._record_understanding(
                 message_id=saved.id,
@@ -2033,7 +2529,7 @@ class TaskService:
                 ai_model=verdict.model if verdict is not None else None,
                 ai_input_tokens=verdict.input_tokens if verdict is not None else None,
                 ai_output_tokens=verdict.output_tokens if verdict is not None else None,
-                reply=decision.reply,
+                reply=reply,
                 tasks=decision.task_rows(),
                 facts=facts,
                 transcript=transcript.text if transcript is not None else None,
@@ -2047,9 +2543,10 @@ class TaskService:
         except DatabaseError as error:
             # Правку и дубль база отклоняет и тогда, когда задачу закрыли или
             # удалили, пока модель думала (§12.3, §15.3): откат целиком,
-            # честное «не смог».
+            # честное «не смог». Отложенное — снова в очередь: следующая
+            # попытка разберёт его по нынешнему списку задач.
             logger.warning("Разбор не записан: %s", error)
-            return RecordOutcome(ok=False, message=texts.NOT_SAVED_MESSAGE)
+            return self._not_saved(later)
 
         if facts:
             logger.info("Записано сведений о владельце: %s", len(facts))
@@ -2078,7 +2575,7 @@ class TaskService:
             logger.info("Записано задач из сообщения: %s", len(new))
         elif not recorded:
             logger.info("Задачи нет: сообщение %s сохранено с разбором", saved.id)
-        return RecordOutcome(ok=True, message=decision.reply, buttons=decision.buttons)
+        return RecordOutcome(ok=True, message=reply, buttons=decision.buttons)
 
     async def _decide(
         self,
@@ -2217,6 +2714,7 @@ class TaskService:
                 now,
                 telegram_message_id,
                 context.spheres or [],
+                changed_after=context.changed_after,
             )
         return _Top(first=understanding)
 
@@ -2315,6 +2813,8 @@ class TaskService:
         now: datetime,
         telegram_message_id: int,
         spheres: Sequence[Sphere] = (),
+        *,
+        changed_after: datetime | None = None,
     ) -> _Top:
         """Правка словом (§12.3): задача узнана, кандидаты или не найдено.
 
@@ -2322,10 +2822,13 @@ class TaskService:
         промпт. Кандидаты — вопрос с кнопками, до выбора ничего не меняется.
         Не найдено: перенос записывается новой задачей (инвариант 5) — это
         дело номер 1 (§23.3), остальное — не записывается ничего.
+        `changed_after` — момент отложенного сообщения (§33.2).
         """
         task = edits.task_by_number(tasks, edit.task)
         if task is not None:
-            edited = await self._edit_known(understanding, edit, task, now, spheres)
+            edited = await self._edit_known(
+                understanding, edit, task, now, spheres, changed_after=changed_after
+            )
             return _Top(
                 head=None if edited.unclear else edited.head,
                 icon=edited.icon,
@@ -2649,7 +3152,12 @@ class TaskService:
         return Decision(reply=paragraphs(reply, clash), task=task_row, reminders=planned)
 
     async def _edit_context(
-        self, chat_id: int, forwarded_from: str | None, swipe: Swipe | None, before: datetime
+        self,
+        chat_id: int,
+        forwarded_from: str | None,
+        swipe: Swipe | None,
+        before: datetime,
+        later: datetime | None = None,
     ) -> EditContext:
         """Подсказки для правки (§12.2) и недавний разговор (§17.3) — или их
         отсутствие.
@@ -2662,13 +3170,18 @@ class TaskService:
         разговор — нет только этой части. `before` — время самого сообщения,
         граница блока 6. Часы по сферам (`techspec/31-hours.md` §31.2) — тоже
         только у своего сообщения: разговор ведёт только оно.
+
+        `later` — момент отложенного сообщения (`techspec/33-retry-later.md`
+        §33.2): час разговора, последние задачи и часы — как были тогда,
+        открытые задачи — нынешние, а поменянную после сообщения правка не
+        тронет (`changed_after`).
         """
         if forwarded_from is not None:
             return await self._check_context()
         store = self._edits
         if store is None:
-            return EditContext(tasks=[], last_tasks=(), swipe=None)
-        now = self._clock()
+            return EditContext(tasks=[], last_tasks=(), swipe=None, changed_after=later)
+        now = later or self._clock()
         since = now - edits.LAST_TASK_WINDOW
         tasks, events, swiped, recent, book, counted = await asyncio.gather(
             self._open_tasks(store),
@@ -2700,6 +3213,7 @@ class TaskService:
             spheres=book,
             chat=swiped.chat if swiped is not None else None,
             hours=counted,
+            changed_after=later,
         )
 
     async def _recent(self, store: EditStore, since: datetime, before: datetime) -> str | None:
@@ -2932,6 +3446,8 @@ class TaskService:
         task: TaskDetails,
         now: datetime,
         spheres: Sequence[Sphere] = (),
+        *,
+        changed_after: datetime | None = None,
     ) -> Edited:
         """Правка узнанной задачи (§12.3, §12.5): что записать и что ответить.
 
@@ -2949,9 +3465,23 @@ class TaskService:
         она будет в момент записи.
 
         Правка сферы (`techspec/30-spheres.md` §30.2) — `_sphere_edit`.
+
+        Отложенное сообщение (`changed_after`, `techspec/33-retry-later.md`
+        §33.2) правит задачу, только если её не меняли после него: иначе —
+        вопрос, как у неясной правки, и ничего не меняется. Сфера — не
+        состояние дела, её правка идёт как обычно.
         """
         if edit.action == SPHERE_ACTION:
             return self._sphere_edit(understanding, task, spheres)
+        if changed_since(task, changed_after):
+            logger.info("Задачу %s меняли после отложенного сообщения — спрашиваю", task.id)
+            return Edited(
+                edit=edit_row(task, "change", question=texts.CHANGED_SINCE),
+                head=texts.unclear_edit(task.title, texts.CHANGED_SINCE),
+                title=task.title,
+                unclear=True,
+                stays=(task.due_at, task.due_precision),
+            )
         if edit.action in ("done", "skip") and task.repeat is not None:
             return await self._advance(task, edit.action, task.repeat, now)
         if edit.action in ("done", "cancel", "skip"):

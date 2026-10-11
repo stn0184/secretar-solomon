@@ -29,6 +29,10 @@ aiogram, ни про сеть, и тест подставляет свою за�
 границы и слова — в `services/overdue.py`, отбор и запись — в базе, здесь —
 «отправить → записать» и память о делах, о которых процесс спрашивал сегодня.
 
+Отложенные сообщения (`techspec/33-retry-later.md` §33.2) — шаг тика после
+строк «Перенёс», перед поисками: он только запускает разбор очереди в фоне —
+очередь и ответы в `services/later.py`.
+
 Поиски по поручению (`techspec/24-search.md` §24.3) — шаг тика после строк
 «Перенёс»: брошенные перезапуском поиски, записанные и не ушедшие ответы и
 отказы — в `services/search.py`, здесь — только место шага и счёт ушедшего.
@@ -285,6 +289,13 @@ class SearchResumer(Protocol):
     async def resume(self, now: datetime | None = None) -> int: ...
 
 
+class LaterTicker(Protocol):
+    """Шаг тика об отложенных сообщениях (`techspec/33-retry-later.md` §33.2):
+    запускает разбор очереди в фоне; ушедшего этим шагом нет — тик его не ждёт."""
+
+    async def tick(self, now: datetime | None = None) -> int: ...
+
+
 class ChatTicker(Protocol):
     """Шаг тика о личных чатах (`techspec/25-chats.md`): возвращает, сколько
     сообщений ушло владельцу; разбор — фоновый, тик его не ждёт."""
@@ -352,6 +363,7 @@ class ReminderService:
         searches: SearchResumer | None = None,
         chats: ChatTicker | None = None,
         instagram: ChatTicker | None = None,
+        later: LaterTicker | None = None,
     ) -> None:
         self._settings = settings
         self._due = due
@@ -393,6 +405,8 @@ class ReminderService:
         self._chats = chats
         # Без него Direct не опрашивается — ключа Instagram нет (§26.1).
         self._instagram = instagram
+        # Без него отложенные сообщения не разбираются — как до этапа 037 (§33.2).
+        self._later = later
         self._clock = clock or self._now
 
     def _now(self) -> datetime:
@@ -408,10 +422,11 @@ class ReminderService:
         searches: SearchResumer | None = None,
         chats: ChatTicker | None = None,
         instagram: ChatTicker | None = None,
+        later: LaterTicker | None = None,
     ) -> ReminderService:
         """Обычная сборка: настоящая база и настоящая отправка в Telegram;
         `searches` — шаг тика о поисках (§24.3), `chats` — о личных чатах (§25),
-        `instagram` — опрос Direct (§26)."""
+        `instagram` — опрос Direct (§26), `later` — отложенные сообщения (§33)."""
 
         async def due(*, owner_telegram_id: int, now: datetime) -> list[DueReminder]:
             return await db_reminders.due_reminders(
@@ -537,14 +552,16 @@ class ReminderService:
             searches=searches,
             chats=chats,
             instagram=instagram,
+            later=later,
         )
 
     async def tick(self, now: datetime | None = None) -> int:
         """Один заход: перекатывание (§13.4), утренний план (§20.2), созревшее
-        (§6.2), строки «Перенёс» (§11.4), поиски (§24.3), Instagram (§26), чаты
-        (§25), затем вопрос о прошедшем деле (§22.2) и последним — вопрос о деле
-        без срока (§19.2): каждый из двух вопросов — только если до него в этом
-        тике ничего не ушло; ответ или отказ поиска — тоже ушедшее сообщение.
+        (§6.2), строки «Перенёс» (§11.4), отложенные сообщения (§33.2), поиски
+        (§24.3), Instagram (§26), чаты (§25), затем вопрос о прошедшем деле
+        (§22.2) и последним — вопрос о деле без срока (§19.2): каждый из двух
+        вопросов — только если до него в этом тике ничего не ушло; ответ или
+        отказ поиска — тоже ушедшее сообщение.
 
         Порядок нарочно такой: новый раз получает свои ступени до выборки, и
         созревшая уходит этим же тиком; план называет дела уже на сегодняшнем
@@ -566,6 +583,7 @@ class ReminderService:
         for task in await self._moved(owner_telegram_id=owner):
             if await self._announce_one(task, moment):
                 sent += 1
+        await self._later_step(moment)
         sent += await self._resume_searches(moment)
         sent += await self._instagram_step(moment)
         sent += await self._chats_step(moment)
@@ -577,6 +595,16 @@ class ReminderService:
         if sent == 0 and await self._ask_undated(moment):
             sent += 1
         return sent
+
+    async def _later_step(self, now: datetime) -> None:
+        """Шаг отложенных сообщений (§33.2): разбор очереди — в фоне, тик его
+        не ждёт. Сбой шага — строка в журнал, тик идёт дальше."""
+        if self._later is None:
+            return
+        try:
+            await self._later.tick(now)
+        except Exception:  # шаг отложенных не роняет тик: напоминания важнее
+            logger.exception("Шаг отложенных сообщений в тике не удался")
 
     async def _resume_searches(self, now: datetime) -> int:
         """Шаг поисков (§24.3): сколько сообщений ушло. Сбой шага — строка в

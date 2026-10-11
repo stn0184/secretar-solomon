@@ -1712,6 +1712,7 @@ class UnderstandingService:
         recent: str | None = None,
         spheres: Sequence[KnownSphere] | None = None,
         hours: Sequence[str] | None = None,
+        now: datetime | None = None,
     ) -> Verdict:
         """Разобрать сообщение или честно сказать, что не вышло.
 
@@ -1733,11 +1734,15 @@ class UnderstandingService:
         разговора не ведут (§17.1). `spheres` — живые сферы со знаниями
         (§30.2), `None` — блока сфер нет. `hours` — строки часов по сферам
         (`techspec/31-hours.md` §31.2); у пересланного блока нет, как и блока 6.
+
+        `now` — момент разбора; у отложенного сообщения — когда оно пришло
+        (`techspec/33-retry-later.md` §33.2): «завтра» считается от того дня.
+        Пусто — часы сервиса.
         """
         known = await self._known_facts()
         forwarded = forwarded_from is not None
         system = build_system_prompt(
-            self._clock(),
+            now or self._clock(),
             self._settings.owner_timezone,
             known,
             open_question,
@@ -1789,6 +1794,7 @@ class UnderstandingService:
         open_question: AskedQuestion | None = None,
         tasks: Sequence[OpenTask] | None = None,
         spheres: Sequence[KnownSphere] | None = None,
+        now: datetime | None = None,
     ) -> PhotoVerdict:
         """Разобрать снимок или честно сказать, что не вышло (§14.3).
 
@@ -1797,13 +1803,13 @@ class UnderstandingService:
         правит. Отказы — те же, что у текста (§5.4), и наружу исключением не
         выходят. `photo_text` и `more_tasks` в ответе уже обрезаны; `edit` и
         `facts` — как их отдала модель: отбрасывает их запись
-        (`services/tasks.py`).
+        (`services/tasks.py`). `now` — момент разбора, как у текста.
         """
         if self._photo_call is None:
             return self._not_understood("снимок разобрать нечем")
         known = await self._known_facts()
         system = build_system_prompt(
-            self._clock(),
+            now or self._clock(),
             self._settings.owner_timezone,
             known,
             open_question,
@@ -1851,6 +1857,7 @@ class UnderstandingService:
         tasks: Sequence[OpenTask] | None = None,
         recent: str | None = None,
         spheres: Sequence[KnownSphere] | None = None,
+        now: datetime | None = None,
     ) -> ConversationVerdict:
         """Разобрать переписку, пересланную разом, или честно сказать, что не
         вышло (§18.2).
@@ -1861,13 +1868,13 @@ class UnderstandingService:
         переписке бывает продолжением разговора. Последней задачи и свайпа
         нет. Отказы — те же, что у текста (§5.4). `more_tasks` в ответе уже
         обрезаны; `edit` и `facts` — как их отдала модель: отбрасывает их
-        запись (`services/tasks.py`).
+        запись (`services/tasks.py`). `now` — момент разбора, как у текста.
         """
         if self._conversation_call is None:
             return self._not_understood("переписку разобрать нечем")
         known = await self._known_facts()
         system = build_system_prompt(
-            self._clock(),
+            now or self._clock(),
             self._settings.owner_timezone,
             known,
             open_question,
