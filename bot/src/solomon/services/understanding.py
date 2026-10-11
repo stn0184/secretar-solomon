@@ -25,7 +25,7 @@ import base64
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
 
@@ -67,6 +67,15 @@ TIMEOUT_SECONDS = 60.0
 # запросе целиком — поэтому свои токены и таймаут.
 PHOTO_MAX_TOKENS = 2048
 PHOTO_TIMEOUT_SECONDS = 60.0
+# Временный отказ (`techspec/33-retry-later.md` §33.1) — посредник или сеть:
+# обрыв и таймаут, 429 и 5xx (503, 529). Кроме них — 408 и 409: их, как и
+# 429, повторяет сам SDK. Остальные коды — ответ по существу, повтор его не
+# вылечит.
+TEMPORARY_STATUSES = frozenset({408, 409, 429})
+SERVER_ERRORS = 500
+# Растущая пауза между попытками (§33.2): 1, 2, 5, 10, 15, 30 минут, дальше —
+# каждые 30. Общая у отложенного сообщения и у куска переписки (§33.3).
+RETRY_PAUSES = tuple(timedelta(minutes=minutes) for minutes in (1, 2, 5, 10, 15, 30))
 # Пределы полей снимка держит бот, а не схема: нарушение ограничения схемы
 # роняло бы весь разбор в отказ (§5.4).
 PHOTO_TEXT_LIMIT = 500
@@ -382,9 +391,15 @@ class Analysis:
 
 @dataclass(frozen=True, slots=True)
 class NotUnderstood:
-    """Разбор не состоялся (§5.4). Причина — для журнала, не для человека."""
+    """Разбор не состоялся (§5.4). Причина — для журнала, не для человека.
+
+    `temporary` — модель недоступна, а не ответила непригодным
+    (`techspec/33-retry-later.md` §33.1): такое сообщение ждёт в базе и
+    разбирается позже, а не пишется «как есть» сразу.
+    """
 
     reason: str
+    temporary: bool = False
 
 
 Verdict = Analysis | NotUnderstood
@@ -1521,6 +1536,41 @@ Clock = Callable[[], datetime]
 KnownFacts = Callable[[], Awaitable[Sequence[KnownFact]]]
 
 
+def temporary_status(status: int) -> bool:
+    """Код ответа, после которого стоит попробовать позже (§33.1): 5xx и те
+    4xx, что говорят о нагрузке или сроке, а не о самом запросе."""
+    return status in TEMPORARY_STATUSES or status >= SERVER_ERRORS
+
+
+def is_temporary(error: BaseException) -> bool:
+    """Временный ли отказ вызова модели (`techspec/33-retry-later.md` §33.1).
+
+    Временный — посредник или сеть: обрыв связи и таймаут
+    (`APITimeoutError` — частный случай `APIConnectionError`), 429 и 5xx.
+    Постоянный — ответ есть, но непригоден: 400, 401, не по схеме и всё
+    остальное. `refusal` и `max_tokens` исключением не приходят — их
+    `_ask` разбирает сам, и они постоянные.
+    """
+    if isinstance(error, APIConnectionError):
+        return True
+    if isinstance(error, APIStatusError):
+        return temporary_status(error.status_code)
+    return False
+
+
+def retry_pause(failures: int) -> timedelta:
+    """Пауза после `failures` временных неудач подряд (§33.2): 1, 2, 5, 10,
+    15, 30 минут, дальше — 30. Неудач ещё не было — как после первой."""
+    index = min(max(failures, 1), len(RETRY_PAUSES)) - 1
+    return RETRY_PAUSES[index]
+
+
+def next_retry(now: datetime, failures: int, deadline: datetime) -> datetime:
+    """Когда пробовать снова: через паузу, но не позже предела ожидания —
+    последняя попытка ложится ровно на него (§33.2, §33.3)."""
+    return min(now + retry_pause(failures), deadline)
+
+
 def create_anthropic_client(settings: Settings) -> AsyncAnthropic:
     """Клиент Claude. Создаётся один раз при запуске бота (§5.1).
 
@@ -1859,20 +1909,24 @@ class UnderstandingService:
 
     async def _ask[A: Stopped](self, request: Awaitable[A]) -> A | NotUnderstood:
         """Один вызов модели и все его отказы (§5.4) — общие у текста, снимка и
-        переписки."""
+        переписки. Временный отказ (§33.1) помечается: его разберут позже."""
         try:
             answer = await request
         except (APITimeoutError, APIConnectionError) as error:
-            return self._not_understood(f"модель недоступна: {type(error).__name__}")
+            return self._not_understood(
+                f"модель недоступна: {type(error).__name__}", temporary=True
+            )
         except AuthenticationError as error:
             # Ошибка настройки, а не сообщения: человеку тот же ответ, в журнал —
             # имя переменной, чтобы было что чинить.
             logger.error("Ключ ANTHROPIC_API_KEY не подошёл: %s", error)
             return self._not_understood("ключ не подошёл")
         except RateLimitError:
-            return self._not_understood("лимит запросов")
+            return self._not_understood("лимит запросов", temporary=True)
         except APIStatusError as error:
-            return self._not_understood(f"модель ответила {error.status_code}")
+            return self._not_understood(
+                f"модель ответила {error.status_code}", temporary=is_temporary(error)
+            )
         except ValidationError as error:
             return self._not_understood(f"ответ не по схеме: полей с ошибкой {error.error_count()}")
 
@@ -1895,6 +1949,8 @@ class UnderstandingService:
             logger.error("Известные факты не прочитаны, разбор без них: %s", error)
             return ()
 
-    def _not_understood(self, reason: str) -> NotUnderstood:
-        logger.warning("Модель не разобрала сообщение: %s", reason)
-        return NotUnderstood(reason=reason)
+    def _not_understood(self, reason: str, *, temporary: bool = False) -> NotUnderstood:
+        logger.warning(
+            "Модель не разобрала сообщение: %s%s", reason, ", временно" if temporary else ""
+        )
+        return NotUnderstood(reason=reason, temporary=temporary)
