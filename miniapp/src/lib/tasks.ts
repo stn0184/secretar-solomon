@@ -21,9 +21,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   type DuePrecision,
   PART_WORDS,
+  WEEKDAYS_SHORT,
   dateInputValue,
   formatDay,
-  formatDue,
+  formatShortDate,
   formatTime,
   formatTimeRange,
   hoursWords,
@@ -264,7 +265,7 @@ function parseReminder(row: unknown): Reminder | null {
 
 /* ------------------------------------------------------------ группировка */
 
-export type GroupKey = "overdue" | "today" | "week" | "later" | "none" | "ideas";
+export type GroupKey = "overdue" | "today" | "tomorrow" | "week" | "later" | "none" | "ideas";
 
 export interface TaskGroup {
   key: GroupKey;
@@ -272,10 +273,14 @@ export interface TaskGroup {
   tasks: Task[];
 }
 
-/** Порядок групп на экране — фиксированный (`design.md`, прототип 005). */
+/**
+ * Порядок групп на экране — фиксированный (`design.md` §1, прототипы 005 и
+ * 036): «Завтра» — между «Сегодня» и «На неделе» с этапа 036.
+ */
 export const GROUP_ORDER: readonly GroupKey[] = [
   "overdue",
   "today",
+  "tomorrow",
   "week",
   "later",
   "none",
@@ -285,6 +290,7 @@ export const GROUP_ORDER: readonly GroupKey[] = [
 export const GROUP_TITLES: Record<GroupKey, string> = {
   overdue: "Просрочено",
   today: "Сегодня",
+  tomorrow: "Завтра",
   week: "На неделе",
   later: "Позже",
   none: "Без срока",
@@ -329,10 +335,14 @@ export function groupOf(task: Task, now: Date): GroupKey {
   if (isOverdue(task, now)) {
     return "overdue";
   }
-  if (sameDay(task.dueAt, now)) {
+  const days = daysAhead(task.dueAt, now);
+  if (days === 0) {
     return "today";
   }
-  return daysAhead(task.dueAt, now) <= 7 ? "week" : "later";
+  if (days === 1) {
+    return "tomorrow";
+  }
+  return days <= 7 ? "week" : "later";
 }
 
 /** Разложить по группам в фиксированном порядке; пустые группы не возвращаются. */
@@ -392,20 +402,59 @@ export function groupBySphere(tasks: Task[], spheres: readonly Sphere[], now: Da
   return [...groups, none].filter((group) => group.tasks.length > 0);
 }
 
+/** Цвет срока в строке: просрочено — `--c-late`, сегодня — `--today`, иначе спокойный. */
+export type DueTone = "late" | "today" | null;
+
+/** Срок справа в строке дела: слова и цвет. */
+export interface RowDue {
+  text: string;
+  tone: DueTone;
+}
+
 /**
- * Срок в строке дела: значок как в чате (`techspec/29-icons.md` §29.1) —
- * 📅 у срока с часом, 🔔 у дня и части дня; у идеи и желания значка нет, о
- * них не напоминают. Слова — как у бота, у встречи с концом. Без срока — `null`.
+ * Срок справа в строке дела (`design.md` §1, прототип 036): «сегодня 15:00»,
+ * «завтра», «пт», «26 окт»; часть дня — «сегодня вечером», «пт утром». День —
+ * «сегодня» и «завтра», в пределах шести дней — день недели коротко, дальше
+ * — дата; прошлое — «вчера», день недели, дата. Час — только у срока с
+ * часом, как в `formatDue`: у дня в базе 18:00, которого человек не называл.
+ * У встречи — только начало, конец — в карточке. Без срока — `null`.
+ *
+ * `dayKnown` — экран и так про сегодня («Без часа» на «Сегодня»): у
+ * сегодняшнего дела день не повторяется, остаётся часть дня или ничего.
+ *
+ * Цвет — `late`, если срок прошёл (`isOverdue`), `today` у открытого дела на
+ * сегодня; у идеи и желания цвета нет — о них не напоминают.
  */
-export function dueLine(task: Task, now: Date): { icon: "📅" | "🔔" | null; text: string } | null {
+export function rowDue(task: Task, now: Date, dayKnown = false): RowDue | null {
   if (!task.dueAt) {
     return null;
   }
-  const text = formatDue(task.dueAt, task.duePrecision, now, task.duration);
-  if (task.kind !== "task") {
-    return { icon: null, text };
+  const days = daysAhead(task.dueAt, now);
+  const tail =
+    task.duePrecision === "time"
+      ? formatTime(task.dueAt)
+      : isPart(task.duePrecision)
+        ? PART_WORDS[task.duePrecision]
+        : null;
+  const tone: DueTone = isOverdue(task, now) ? "late" : task.kind === "task" && days === 0 ? "today" : null;
+  if (dayKnown && days === 0) {
+    return tail ? { text: tail, tone } : null;
   }
-  return { icon: task.duePrecision === "time" ? "📅" : "🔔", text };
+  return { text: tail ? `${shortDay(task.dueAt, days)} ${tail}` : shortDay(task.dueAt, days), tone };
+}
+
+/** День срока коротко: «сегодня», «завтра», «вчера», «пт» — в пределах шести дней, дальше «26 окт». */
+function shortDay(dueAt: Date, days: number): string {
+  if (days === 0) {
+    return "сегодня";
+  }
+  if (days === 1) {
+    return "завтра";
+  }
+  if (days === -1) {
+    return "вчера";
+  }
+  return Math.abs(days) <= 6 ? WEEKDAYS_SHORT[dueAt.getDay()]! : formatShortDate(dueAt);
 }
 
 /**

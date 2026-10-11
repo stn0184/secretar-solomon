@@ -36,9 +36,17 @@ export const MONTHS = [
   "декабря",
 ] as const;
 
+/** Дни недели коротко — «пт» в строке дела (этап 036). */
+export const WEEKDAYS_SHORT = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"] as const;
+
 /** «25 сентября» — число без дня недели, когда важна сама дата. */
 export function formatDate(moment: Date): string {
   return `${moment.getDate()} ${MONTHS[moment.getMonth()]}`;
+}
+
+/** «26 окт», «5 мая» — день и месяц коротко: строка дела, строки «Недели». */
+export function formatShortDate(moment: Date): string {
+  return `${moment.getDate()} ${MONTHS[moment.getMonth()]!.slice(0, 3)}`;
 }
 
 /** «пятница, 25 сентября» — как человек называет день вслух. */

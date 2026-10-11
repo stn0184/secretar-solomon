@@ -20,7 +20,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Fact } from "./facts.ts";
-import { MONTHS, PART_WORDS, formatTime, hoursWords, isPart, plural, sameDay, weekStart } from "./format.ts";
+import { PART_WORDS, formatShortDate, formatTime, hoursWords, isPart, plural, sameDay, weekStart } from "./format.ts";
 import { dateOrNull, recordOf } from "./parse.ts";
 import { type Sphere, sphereName, sphereOf, spheresEyebrow } from "./spheres.ts";
 import { type Db, failed, query } from "./supabase.ts";
@@ -393,11 +393,6 @@ export interface WeekRow {
   now: number | null;
 }
 
-/** «5 окт» — день и месяц коротко. */
-function shortDate(day: Date): string {
-  return `${day.getDate()} ${MONTHS[day.getMonth()]!.slice(0, 3)}`;
-}
-
 /**
  * Строки «Недели» (артборд 02): день — полосы его отрезков по оси 7–22
  * (вне оси не видны, через полночь — в каждом своём дне), часы дня из базы,
@@ -438,7 +433,7 @@ export function weekRows(
     return {
       day,
       weekday: WEEKDAYS_SHORT[day.getDay()]!,
-      date: shortDate(day),
+      date: formatShortDate(day),
       today: isToday,
       future: day > today,
       bars,

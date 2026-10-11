@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import { formatDue } from "../lib/format.ts";
 import { repeatShort } from "../lib/repeat.ts";
 import { type Sphere, sphereColor, sphereName } from "../lib/spheres.ts";
-import { type Task, dueLine, isOverdue } from "../lib/tasks.ts";
+import { type Task, rowDue } from "../lib/tasks.ts";
 import { KindChip, PriorityChip, PromiseChip, ReviewChip } from "./Chip.tsx";
 import { SphereMark } from "./SphereMark.tsx";
 
@@ -30,7 +30,7 @@ export function TaskRow({
   justDone: boolean;
   onOpen: (task: Task) => void;
 }) {
-  const due = dueLine(task, now);
+  const due = rowDue(task, now);
   const chips =
     task.kind !== "task" || task.priority === "high" || task.promise !== null || task.needsReview;
 
@@ -47,8 +47,7 @@ export function TaskRow({
         <span className="task__m">
           <span>{sphereName(sphere)}</span>
           {due ? (
-            <span className={isOverdue(task, now) ? "task__due task__late" : "task__due"}>
-              {due.icon ? <i aria-hidden="true">{due.icon}</i> : null}
+            <span className={due.tone === "late" ? "task__due task__late" : "task__due"}>
               {due.text}
             </span>
           ) : null}

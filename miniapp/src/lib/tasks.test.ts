@@ -2,8 +2,12 @@
  * Группировка списка по сроку и разбор строки базы — чистые функции.
  *
  * Границы групп — `specs` 005: просрочено — день срока уже кончился (для
- * `day`) или момент прошёл (для `time`); сегодня — до конца дня; на неделе —
- * ближайшие семь дней; позже — дальше. Идеи и желания — своей группой внизу.
+ * `day`) или момент прошёл (для `time`); сегодня — до конца дня; завтра —
+ * следующий календарный день (этап 036); на неделе — со второго по седьмой
+ * день; позже — дальше. Идеи и желания — своей группой внизу.
+ *
+ * Срок в строке (`rowDue`, этап 036) — коротко и справа: «сегодня 15:00»,
+ * «завтра», «пт», «26 окт»; цвет — просрочено или сегодня.
  */
 
 import assert from "node:assert/strict";
@@ -23,7 +27,6 @@ import {
   completeTask,
   draftOf,
   dueHint,
-  dueLine,
   editTask,
   formatDuration,
   groupBySphere,
@@ -41,6 +44,7 @@ import {
   repeatDueHint,
   repeatOpen,
   repeatSummary,
+  rowDue,
   taskChanges,
   type SourceMessage,
   validateDraft,
@@ -114,8 +118,17 @@ describe("groupOf", () => {
     assert.equal(isOverdue(evening, new Date(2026, 9, 1, 0, 0)), true);
   });
 
-  it("на неделе — ближайшие семь дней, дальше — позже", () => {
-    assert.equal(groupOf(task({ dueAt: new Date(2026, 9, 1, 18, 0), duePrecision: "day" }), now), "week");
+  it("завтра — своя группа: день, час и часть дня (этап 036)", () => {
+    assert.equal(groupOf(task({ dueAt: new Date(2026, 9, 1, 18, 0), duePrecision: "day" }), now), "tomorrow");
+    assert.equal(groupOf(task({ dueAt: new Date(2026, 9, 1, 0, 0), duePrecision: "time" }), now), "tomorrow");
+    assert.equal(groupOf(task({ dueAt: new Date(2026, 9, 1, 23, 59), duePrecision: "time" }), now), "tomorrow");
+    assert.equal(groupOf(task({ dueAt: new Date(2026, 9, 1, 8, 0), duePrecision: "morning" }), now), "tomorrow");
+    // поздно вечером завтра — всё ещё следующий день, а не «на неделе»
+    assert.equal(groupOf(task({ dueAt: new Date(2026, 9, 1, 18, 0), duePrecision: "day" }), new Date(2026, 8, 30, 23, 59)), "tomorrow");
+  });
+
+  it("на неделе — со второго по седьмой день, дальше — позже", () => {
+    assert.equal(groupOf(task({ dueAt: new Date(2026, 9, 2, 18, 0), duePrecision: "day" }), now), "week");
     assert.equal(groupOf(task({ dueAt: new Date(2026, 9, 7, 18, 0), duePrecision: "day" }), now), "week");
     assert.equal(groupOf(task({ dueAt: new Date(2026, 9, 8, 9, 0), duePrecision: "time" }), now), "later");
   });
@@ -137,6 +150,33 @@ describe("groupTasks", () => {
     );
     assert.deepEqual(groups.map((g) => g.title), ["Просрочено", "На неделе", "Позже", "Идеи и желания"]);
     assert.deepEqual(groups[1]?.tasks.map((t) => t.id), ["week2", "week1"]);
+  });
+
+  it("все группы — в порядке «Просрочено · Сегодня · Завтра · На неделе · Позже · Без срока · Идеи»", () => {
+    const groups = groupTasks(
+      [
+        task({ id: "idea", kind: "idea" }),
+        task({ id: "none" }),
+        task({ id: "later", dueAt: new Date(2026, 9, 20), duePrecision: "day" }),
+        task({ id: "week", dueAt: new Date(2026, 9, 3), duePrecision: "day" }),
+        task({ id: "tomorrow", dueAt: new Date(2026, 9, 1, 11, 30), duePrecision: "time" }),
+        task({ id: "today", dueAt: new Date(2026, 8, 30, 18), duePrecision: "day" }),
+        task({ id: "overdue", dueAt: new Date(2026, 8, 29), duePrecision: "day" }),
+      ],
+      now,
+    );
+    assert.deepEqual(
+      groups.map((g) => [g.title, g.tasks.length]),
+      [
+        ["Просрочено", 1],
+        ["Сегодня", 1],
+        ["Завтра", 1],
+        ["На неделе", 1],
+        ["Позже", 1],
+        ["Без срока", 1],
+        ["Идеи и желания", 1],
+      ],
+    );
   });
 
   it("ни одной задачи — ни одной группы", () => {
@@ -326,34 +366,73 @@ describe("cardWhen", () => {
   });
 });
 
-describe("dueLine", () => {
-  it("срок с часом — 📅, у встречи с концом", () => {
-    assert.deepEqual(
-      dueLine(task({ dueAt: new Date(2026, 8, 30, 19, 0), duePrecision: "time", duration: 90 }), now),
-      { icon: "📅", text: "сегодня, 19:00–20:30" },
-    );
+describe("rowDue", () => {
+  // «Сейчас» — среда, 30 сентября 2026, 12:00.
+  function due(at: Date, precision: Task["duePrecision"], extra: Partial<Task> = {}) {
+    return rowDue(task({ dueAt: at, duePrecision: precision, ...extra }), now);
+  }
+
+  it("сегодня: «сегодня 15:00», «сегодня», «сегодня вечером» — акцентом", () => {
+    assert.deepEqual(due(new Date(2026, 8, 30, 15, 0), "time"), { text: "сегодня 15:00", tone: "today" });
+    assert.deepEqual(due(new Date(2026, 8, 30, 18, 0), "day"), { text: "сегодня", tone: "today" });
+    assert.deepEqual(due(new Date(2026, 8, 30, 18, 0), "evening"), { text: "сегодня вечером", tone: "today" });
+    assert.deepEqual(due(new Date(2026, 8, 30, 18, 0), null), { text: "сегодня", tone: "today" });
   });
 
-  it("день и часть дня — 🔔 (§29.1)", () => {
-    assert.deepEqual(
-      dueLine(task({ dueAt: new Date(2026, 9, 2, 18, 0), duePrecision: "day" }), now),
-      { icon: "🔔", text: "пятница, 2 октября" },
-    );
-    assert.deepEqual(
-      dueLine(task({ dueAt: new Date(2026, 8, 30, 8, 0), duePrecision: "morning" }), now),
-      { icon: "🔔", text: "сегодня утром" },
-    );
+  it("у встречи — только начало, конец — в карточке", () => {
+    assert.deepEqual(due(new Date(2026, 8, 30, 19, 0), "time", { duration: 90 }), {
+      text: "сегодня 19:00",
+      tone: "today",
+    });
   });
 
-  it("у идеи и желания значка нет — о них не напоминают", () => {
-    assert.deepEqual(
-      dueLine(task({ kind: "idea", dueAt: new Date(2026, 9, 2, 18, 0), duePrecision: "day" }), now),
-      { icon: null, text: "пятница, 2 октября" },
-    );
+  it("завтра и дни недели в пределах шести дней — коротко, без цвета", () => {
+    assert.deepEqual(due(new Date(2026, 9, 1, 18, 0), "day"), { text: "завтра", tone: null });
+    assert.deepEqual(due(new Date(2026, 9, 1, 11, 30), "time"), { text: "завтра 11:30", tone: null });
+    assert.deepEqual(due(new Date(2026, 9, 1, 8, 0), "morning"), { text: "завтра утром", tone: null });
+    assert.deepEqual(due(new Date(2026, 9, 2, 18, 0), "day"), { text: "пт", tone: null });
+    assert.deepEqual(due(new Date(2026, 9, 6, 13, 0), "afternoon"), { text: "вт днём", tone: null });
+    assert.deepEqual(due(new Date(2026, 9, 6, 9, 5), "time"), { text: "вт 09:05", tone: null });
   });
 
-  it("без срока — строки срока нет", () => {
-    assert.equal(dueLine(task(), now), null);
+  it("с седьмого дня — дата: «7 окт», «26 окт», «5 мая»", () => {
+    assert.deepEqual(due(new Date(2026, 9, 7, 18, 0), "day"), { text: "7 окт", tone: null });
+    assert.deepEqual(due(new Date(2026, 9, 26, 18, 0), "day"), { text: "26 окт", tone: null });
+    assert.deepEqual(due(new Date(2027, 4, 5, 10, 0), "time"), { text: "5 мая 10:00", tone: null });
+  });
+
+  it("прошлое — «вчера», день недели, дальше дата — цветом «просрочено»", () => {
+    assert.deepEqual(due(new Date(2026, 8, 29, 18, 0), "day"), { text: "вчера", tone: "late" });
+    assert.deepEqual(due(new Date(2026, 8, 29, 18, 0), "evening"), { text: "вчера вечером", tone: "late" });
+    assert.deepEqual(due(new Date(2026, 8, 28, 10, 0), "time"), { text: "пн 10:00", tone: "late" });
+    assert.deepEqual(due(new Date(2026, 8, 24, 18, 0), "day"), { text: "чт", tone: "late" });
+    assert.deepEqual(due(new Date(2026, 8, 20, 18, 0), "day"), { text: "20 сен", tone: "late" });
+  });
+
+  it("час сегодня прошёл — просрочено, а не «сегодня»", () => {
+    assert.deepEqual(due(new Date(2026, 8, 30, 9, 0), "time"), { text: "сегодня 09:00", tone: "late" });
+  });
+
+  it("у идеи и желания срок без цвета — они не просрочиваются", () => {
+    assert.deepEqual(due(new Date(2026, 8, 30, 18, 0), "day", { kind: "idea" }), { text: "сегодня", tone: null });
+    assert.deepEqual(due(new Date(2026, 8, 28, 18, 0), "day", { kind: "wish" }), { text: "пн", tone: null });
+  });
+
+  it("без срока — пусто", () => {
+    assert.equal(rowDue(task(), now), null);
+  });
+
+  it("на «Сегодня» день не повторяется: остаётся часть дня или ничего", () => {
+    const today = (precision: Task["duePrecision"], hour: number) =>
+      rowDue(task({ dueAt: new Date(2026, 8, 30, hour, 0), duePrecision: precision }), now, true);
+    assert.deepEqual(today("morning", 8), { text: "утром", tone: "today" });
+    assert.deepEqual(today("evening", 18), { text: "вечером", tone: "today" });
+    assert.equal(today("day", 18), null);
+    // не сегодня — день называется, как в «Делах»
+    assert.deepEqual(rowDue(task({ dueAt: new Date(2026, 9, 1, 18, 0), duePrecision: "day" }), now, true), {
+      text: "завтра",
+      tone: null,
+    });
   });
 });
 
