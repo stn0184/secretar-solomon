@@ -50,6 +50,10 @@
 | `ai_output_tokens` | int, nullable | токенов на выходе |
 | `reply` | text, nullable | что бот ответил на это сообщение |
 | `task_id` | uuid, `references tasks(id) on delete set null`, nullable | задача, о которой сообщение (§12.4): заведённая из него, дополненная ответом, поправленная, закрытая, убранная, выбранная кнопкой или найденная дублем (§15.3) |
+| `retry_at` | timestamptz, nullable | разобрать позже (этап 037, §33.2): когда следующая попытка; не пусто — сообщение ждёт — и до разбора, и пока записанный ответ не ушёл владельцу |
+| `retry_attempts` | smallint, `default 0` | сколько раз по сообщению звали модель, первый заход тоже; остаётся следом и после разбора |
+| `retry_started_at` | timestamptz, nullable | когда взята текущая попытка; взятое больше 10 минут назад — брошено перезапуском |
+| `retry_input` | jsonb, nullable | что нужно разбору позже сверх строки: свайп (`swipe`), вид снимка (`media_type`), переписка (`conversation`: текст, суть «как есть», подпись, граница блока 6) |
 
 `unique (owner_telegram_id, chat_id, telegram_message_id)` — long
 polling может отдать обновление повторно, и второй раз сообщение не
@@ -82,6 +86,36 @@ null`.
 последний час — `received_at`, `kind`, `text`, `forwarded_from` и
 `reply` — без отдельного индекса: сообщений у владельца немного, а
 выборка короткая (§17.5).
+
+**Разобрать позже** (этап 037, `techspec/33-retry-later.md`, миграция
+`20261011130000_retry_later.sql`). Временный отказ модели (§33.1) не пишет
+«как есть»: сообщение помечается ждущим, и тик разбирает его позже прежним
+`record_understanding`. «⏳ Принял…» в `reply` не пишется — заполненный
+`reply` для `record_understanding` значит повтор (§3.4). Ограничения:
+`messages_retry_attempts_check` (не меньше нуля) и `messages_retry_check` —
+взятое и вход бывают только у ждущего. Частичный индекс
+`messages_retry_idx (owner_telegram_id, received_at, id) where retry_at is
+not null` — под очередь. Функции — только `service_role`:
+
+- `defer_message(owner, message_id, retry_at, attempts, retry_input,
+  transcript, transcript_confidence)` → boolean — отложить: время,
+  попытки, вход; расшифровка голоса ложится в `text`, как у
+  `record_understanding`. У сообщения есть ответ — `false`; уже ждёт —
+  `true` без правки (повтор обновления); чужое — исключение. Остальные
+  ждущие сообщения владельца получают `retry_at` не позже нового: новое
+  сообщение будит очередь.
+- `deferred_waiting(owner, message_id)` → boolean — ждёт ли другое
+  сообщение владельца: пока да, новое встаёт в очередь.
+- `take_deferred(owner, due_before, stale_before)` → `messages` — взять
+  голову очереди (самое раннее ждущее по `received_at`) одной правкой:
+  `retry_started_at = now()`, попытка плюс одна, если ответа ещё нет.
+  Пусто, если голова взята не раньше `stale_before` (очередь ждёт её) или
+  без ответа и `retry_at` позже `due_before`. Записанный и не ушедший ответ
+  берётся сразу.
+- `release_deferred(owner, message_id, retry_at)` → boolean — вернуть в
+  очередь со следующим временем; `finish_deferred(owner, message_id)` →
+  boolean — ответ ушёл: ожидание, взятое и вход снимаются, счёт попыток
+  остаётся.
 
 ### 3.3 `tasks` — задачи
 
@@ -967,7 +1001,10 @@ platform)`; `chat_sources_consent_check` — согласие и отказ вм
 | `waiting_about` | text, nullable | о чём — фраза модели: «он спрашивал, во сколько созвон» |
 | `waiting_to` | text, nullable | кому не ответили — имя в дательном падеже от модели |
 | `waiting_reminded_at` | timestamptz, nullable | напоминание ушло; второго нет |
-| `failures` | smallint, `default 0` | неудачных разборов подряд (§25.3) |
+| `failures` | smallint, `default 0` | постоянных неудач разбора подряд (§25.3); временные (§33.3) сюда не идут |
+| `retry_failures` | smallint, `default 0` | временных неудач разбора текущего куска подряд (этап 037, §33.3) |
+| `retry_since` | timestamptz, nullable | первая временная неудача текущего куска — от неё считаются сутки |
+| `retry_at` | timestamptz, nullable | раньше этого чат к разбору не идёт: пауза после временной неудачи |
 | `sphere_id` | uuid, nullable | сфера чата (этап 032, §30.2): ставит разбор, пока её нет, меняет владелец словом; дела чата получают её же. Ключ составной, как у `tasks` (`chat_threads_sphere_fkey`) |
 | `created_at` | timestamptz, `default now()` | |
 
@@ -976,7 +1013,11 @@ chat_key)`; `chat_threads_waiting_check` — время, фраза и «ком�
 вместе, напомнено — только у ждущего; `chat_threads_username_check` — имя
 пользователя только из латиницы, цифр, `_` и `.`, до 64 знаков: его
 вставляют в ссылку. Колонка `username` — миграция 030
-(`20261008200000_chat_link.sql`).
+(`20261008200000_chat_link.sql`). Колонки `retry_*` — миграция 037
+(`20261011130000_retry_later.sql`), `chat_threads_retry_check`: счёт без
+начала и время попытки без начала не бывают. Любая строка
+`chat_analyses` чата — разбор или пропуск — обнуляет их триггером
+`chat_analyses_clear_retry`: следующий кусок считает сутки заново.
 
 ### 3.13 `chat_messages` — сообщения чатов
 
@@ -1068,9 +1109,11 @@ RLS на всех четырёх таблицах — §4.2; приложени�
   `erase_chat_messages(…, external_ids)` → integer — удаление стирает
   текст. Обе сверяют подключение.
 - `chats_to_analyze(owner, quiet_before, stale_before)` → `(thread_id,
-  platform, chat_key, name)` — чаты площадок с согласием, где есть
-  неразобранные и последнее пришло раньше `quiet_before` или первое
-  неразобранное — раньше `stale_before`; старшие первыми.
+  platform, chat_key, name, retry_failures, retry_since)` — чаты площадок
+  с согласием, где есть неразобранные и последнее пришло раньше
+  `quiet_before` или первое неразобранное — раньше `stale_before`; старшие
+  первыми. С этапа 037 — кроме чатов, чей `retry_at` ещё не пришёл, и со
+  счётом временных неудач и их началом (миграция 037 пересоздаёт функцию).
 - `record_chat_analysis(owner, thread_id, message_ids, analysis, ai_model,
   input_tokens, output_tokens, duration_ms, chat_with, waiting, tasks,
   sphere)` → uuid — одной транзакцией: разбор, пометка сообщений, задачи с
@@ -1080,7 +1123,11 @@ RLS на всех четырёх таблицах — §4.2; приложени�
   этап 032) — название сферы чата: ставится, только пока у чата сферы
   нет, и только живая (не заводится); задачи разбора получают сферу
   чата.
-- `chat_failed(owner, thread_id)` → integer — неудача подряд плюс один;
+- `chat_failed(owner, thread_id)` → integer — постоянная неудача подряд
+  плюс один; `chat_unavailable(owner, thread_id, retry_at)` → integer
+  (этап 037, §33.3) — временная: `retry_failures` плюс один,
+  `retry_since` — при первой, следующая попытка — не раньше `retry_at`;
+  чужой чат — `null`;
   `skip_chat_messages(owner, thread_id, message_ids)` → uuid — разбор
   `skipped` без дел, пометка, `failures = 0`.
 - `chat_report(owner, analysis_id)` → `(platform, chat_key, chat_name,
