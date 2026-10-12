@@ -20,3 +20,20 @@ __pycache__/
 
 # Служебная папка Supabase CLI после link
 supabase/.temp/
+
+# ===== Секреты — не коммитить (добавлено 2026-10-12) =====
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+!*.pub.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+secrets.json
+credentials.json
+service-account*.json
