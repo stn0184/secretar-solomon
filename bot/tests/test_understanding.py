@@ -43,6 +43,7 @@ from solomon.handlers import PHOTO_LIMIT
 from solomon.services import hours
 from solomon.services.batches import Line, conversation_text, is_conversation
 from solomon.services.conversation import recent_block, reply_text, reports_action
+from solomon.services.fallback import FallbackSwitch, with_fallback
 from solomon.services.spheres import settle as settle_spheres
 from solomon.services.tasks import CLOSING_ACTIONS
 from solomon.services.understanding import (
@@ -99,6 +100,7 @@ from solomon.services.understanding import (
     format_open_question,
     format_open_tasks,
     format_recent,
+    is_temporary,
     meeting_minutes,
     open_task_lines,
     searches_of,
@@ -775,6 +777,56 @@ async def test_parsed_answer_carries_the_model_and_the_price() -> None:
     system, text = call.calls[0]
     assert "среда, 16 сентября 2026" in system
     assert text == "купить лампочку в коридор"
+
+
+def build_fallback_service(
+    claude_error: Exception, gpt: FakeCall | None
+) -> tuple[UnderstandingService, FakeCall]:
+    """Сервис разбора, где вызов — переключатель Claude → GPT (`techspec/34`, §34.2)."""
+    claude = FakeCall(error=claude_error)
+    call = with_fallback(
+        claude, gpt, switch=FallbackSwitch(), is_temporary=is_temporary, clock=lambda: NOW
+    )
+    return UnderstandingService(settings=make_settings(), call=call, clock=lambda: NOW), claude
+
+
+async def test_claude_down_gpt_answers_and_the_message_is_understood() -> None:
+    """Приёмка 038 п.1: временный отказ Claude, а владелец получает обычный разбор."""
+    gpt = FakeCall(
+        answer=FakeAnswer(
+            parsed_output=make_understanding(title="купить лампочку"), model="gpt-5.5-test"
+        )
+    )
+    service, _ = build_fallback_service(APIConnectionError(request=REQUEST), gpt)
+
+    verdict = await service.analyze("купить лампочку в коридор")
+
+    assert isinstance(verdict, Analysis)
+    assert verdict.understanding.title == "купить лампочку"
+    assert verdict.model == "gpt-5.5-test"
+
+
+async def test_claude_and_gpt_both_down_the_message_goes_to_the_later_queue() -> None:
+    """Приёмка 038 п.4: оба отказали — временный отказ, сообщение ждёт в очереди (§33)."""
+    gpt = FakeCall(error=APIConnectionError(request=REQUEST))
+    service, _ = build_fallback_service(status_error(503), gpt)
+
+    verdict = await service.analyze("купить лампочку")
+
+    assert isinstance(verdict, NotUnderstood)
+    assert verdict.temporary is True
+
+
+async def test_claude_permanent_failure_does_not_go_to_gpt() -> None:
+    """Приёмка 038 п.5: ответ Claude непригоден (400) — прежний путь §5.4, GPT не зовут."""
+    gpt = FakeCall(answer=FakeAnswer(parsed_output=make_understanding()))
+    service, _ = build_fallback_service(status_error(400), gpt)
+
+    verdict = await service.analyze("купить лампочку")
+
+    assert isinstance(verdict, NotUnderstood)
+    assert verdict.temporary is False
+    assert gpt.calls == []
 
 
 class FakeKnown:

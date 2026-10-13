@@ -17,9 +17,16 @@ from solomon import handlers
 from solomon.config import Settings
 from solomon.middlewares import OwnerOnlyMiddleware
 from solomon.services.chats import ChatService, Connection, OwnerSender
+from solomon.services.fallback import FallbackCalls
 from solomon.services.instagram import InstagramService
 from solomon.services.later import LaterService
 from solomon.services.max_bot import MaxService
+from solomon.services.openai_calls import (
+    create_openai_client,
+    gpt_call,
+    gpt_conversation_call,
+    gpt_photo_call,
+)
 from solomon.services.relay import register_relay
 from solomon.services.reminders import ReminderService, mirror_timezone
 from solomon.services.search import SearchService
@@ -32,7 +39,11 @@ logger = logging.getLogger(__name__)
 
 
 def build_tasks(
-    settings: Settings, db: Client, client: AsyncAnthropic, speech: AsyncDeepgramClient
+    settings: Settings,
+    db: Client,
+    client: AsyncAnthropic,
+    speech: AsyncDeepgramClient,
+    gpt: FallbackCalls | None = None,
 ) -> TaskService:
     """Приём поручений целиком: база, модель и распознавание на своих местах.
 
@@ -43,8 +54,20 @@ def build_tasks(
     return TaskService.with_understanding(
         settings,
         db,
-        UnderstandingService.with_client(settings, client, db),
+        UnderstandingService.with_client(settings, client, db, gpt=gpt),
         DeepgramTranscriber.with_client(speech),
+    )
+
+
+def build_fallback(settings: Settings) -> FallbackCalls | None:
+    """Запасная модель GPT-5.5 (`techspec/34-fallback-gpt.md`): нет ключа или адреса — нет и её."""
+    client = create_openai_client(settings)
+    if client is None:
+        return None
+    return FallbackCalls(
+        text=gpt_call(client),
+        photo=gpt_photo_call(client),
+        conversation=gpt_conversation_call(client),
     )
 
 
@@ -256,7 +279,8 @@ async def run(settings: Settings, db: Client | None = None) -> None:
     bot = Bot(token=settings.telegram_bot_token, session=TelegramSession())
     client = create_anthropic_client(settings)
     speech = create_deepgram_client(settings)
-    tasks = build_tasks(settings, db, client, speech) if db is not None else None
+    gpt = build_fallback(settings)
+    tasks = build_tasks(settings, db, client, speech, gpt) if db is not None else None
     searches = build_searches(settings, db, bot, client) if db is not None else None
     chats = build_chats(settings, db, bot, client, speech) if db is not None else None
     instagram = build_instagram(settings, bot, chats) if chats is not None else None

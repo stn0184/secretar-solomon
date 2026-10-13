@@ -58,6 +58,7 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
         settings.telegram_bot_token,
         settings.supabase_service_role_key,
         settings.anthropic_api_key,
+        settings.openai_api_key or "",
         settings.deepgram_api_key,
         settings.instagram_token or "",
         settings.max_bot_token or "",

@@ -47,6 +47,7 @@ def test_every_key_from_settings_is_hidden(settings: Settings) -> None:
     """Ключ, заведённый в `Settings`, без правки `secrets_of` не останется."""
     settings = replace(
         settings,
+        openai_api_key="sk-test-gpt-key",
         instagram_token="IGAA-test-instagram-token",
         max_bot_token="max-test-bot-token",
         chat_relay_key="relay-test-key-0123456789abcdef0123",
@@ -60,7 +61,7 @@ def test_every_key_from_settings_is_hidden(settings: Settings) -> None:
 
     line = formatter.format(make_record(" ".join(["%s"] * len(keys)), *keys))
 
-    assert len(keys) == 7
+    assert len(keys) == 8
     for key in keys:
         assert key not in line
 

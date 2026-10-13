@@ -29,6 +29,8 @@ def test_full_env_gives_settings() -> None:
         anthropic_api_key="sk-ant-test",
         deepgram_api_key="dg-test",
         anthropic_base_url=None,
+        openai_api_key=None,
+        openai_base_url=None,
         instagram_token=None,
     )
 
@@ -131,3 +133,20 @@ def test_owner_max_id_must_be_a_number() -> None:
 
     assert caught.value.name == "OWNER_MAX_ID"
     assert "OWNER_MAX_ID" in str(caught.value)
+
+
+def test_fallback_model_variables_are_optional() -> None:
+    """Нет ключа или адреса GPT — запасного пути нет, бот на одном Claude (§34.3)."""
+    settings = load_settings({**FULL_ENV, "OPENAI_API_KEY": "  ", "OPENAI_BASE_URL": ""})
+
+    assert settings.openai_api_key is None
+    assert settings.openai_base_url is None
+
+
+def test_fallback_model_variables_are_taken_as_given() -> None:
+    settings = load_settings(
+        {**FULL_ENV, "OPENAI_API_KEY": "sk-gpt", "OPENAI_BASE_URL": "https://api.agenthello.ai/v1/"}
+    )
+
+    assert settings.openai_api_key == "sk-gpt"
+    assert settings.openai_base_url == "https://api.agenthello.ai/v1"

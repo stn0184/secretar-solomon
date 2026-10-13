@@ -25,7 +25,7 @@ import base64
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
 
@@ -47,6 +47,7 @@ from solomon.config import Settings
 from solomon.db import facts as db_facts
 from solomon.db.rpc import DatabaseError
 from solomon.services import overdue, parts
+from solomon.services.fallback import FallbackCalls, FallbackSwitch, with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -1681,19 +1682,40 @@ class UnderstandingService:
 
     @classmethod
     def with_client(
-        cls, settings: Settings, client: AsyncAnthropic, db: Client
+        cls,
+        settings: Settings,
+        client: AsyncAnthropic,
+        db: Client,
+        *,
+        gpt: FallbackCalls | None = None,
+        switch: FallbackSwitch | None = None,
     ) -> UnderstandingService:
-        """Обычная сборка: ходит в Claude по-настоящему, известное читает из базы."""
+        """Обычная сборка: ходит в Claude по-настоящему, известное читает из базы.
+
+        Есть запасная модель (`gpt`) — при временном отказе Claude вызов идёт в неё
+        (`techspec/34-fallback-gpt.md` §34.2); `switch` общий у всех вызовов бота.
+        """
+        switch = switch or FallbackSwitch()
+
+        def clock() -> datetime:
+            return datetime.now(UTC)
 
         async def known() -> Sequence[KnownFact]:
             return await db_facts.list_facts(db, owner_telegram_id=settings.owner_telegram_id)
 
+        def guarded(primary: Any, secondary: Any) -> Any:
+            return with_fallback(
+                primary, secondary, switch=switch, is_temporary=is_temporary, clock=clock
+            )
+
         return cls(
             settings=settings,
-            call=anthropic_call(client),
+            call=guarded(anthropic_call(client), gpt.text if gpt else None),
             known=known,
-            photo_call=anthropic_photo_call(client),
-            conversation_call=anthropic_conversation_call(client),
+            photo_call=guarded(anthropic_photo_call(client), gpt.photo if gpt else None),
+            conversation_call=guarded(
+                anthropic_conversation_call(client), gpt.conversation if gpt else None
+            ),
         )
 
     def _now(self) -> datetime:
