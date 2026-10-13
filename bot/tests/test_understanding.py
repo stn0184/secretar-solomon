@@ -784,7 +784,7 @@ def build_fallback_service(
 ) -> tuple[UnderstandingService, FakeCall]:
     """Сервис разбора, где вызов — переключатель Claude → GPT (`techspec/34`, §34.2)."""
     claude = FakeCall(error=claude_error)
-    call = with_fallback(
+    call: Any = with_fallback(
         claude, gpt, switch=FallbackSwitch(), is_temporary=is_temporary, clock=lambda: NOW
     )
     return UnderstandingService(settings=make_settings(), call=call, clock=lambda: NOW), claude

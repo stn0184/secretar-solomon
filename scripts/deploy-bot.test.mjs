@@ -35,6 +35,8 @@ const BOT_KEYS = [
   "SUPABASE_SERVICE_ROLE_KEY",
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_BASE_URL",
+  "OPENAI_BASE_URL",
+  "OPENAI_API_KEY",
   "DEEPGRAM_API_KEY",
   "INSTAGRAM_TOKEN",
   "MAX_BOT_TOKEN",
@@ -46,7 +48,7 @@ const BOT_KEYS = [
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
 
-/** Значения выдуманные; ANTHROPIC_BASE_URL, INSTAGRAM_TOKEN, переменных MAX и
+/** Значения выдуманные; ANTHROPIC_BASE_URL, переменных запасной модели, INSTAGRAM_TOKEN, переменных MAX и
  * передачи от Partner Assistant нет нарочно — все необязательные. */
 const SECRETS = {
   TELEGRAM_BOT_TOKEN: "123456789:AAFakeTokenForTestsOnly_abcdefghijk",
@@ -209,6 +211,8 @@ test(".env для сервера: только переменные из спи�
   assert.deepEqual(env.names, Object.keys(SECRETS));
   assert.deepEqual(env.missing, [
     "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
     "INSTAGRAM_TOKEN",
     "MAX_BOT_TOKEN",
     "OWNER_MAX_ID",

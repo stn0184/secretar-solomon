@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -47,7 +48,9 @@ class Model:
         return f"{self.name}:{text}"
 
 
-def wrap(primary: Model, secondary: Model | None, switch: FallbackSwitch, clock: list[datetime]):
+def wrap(
+    primary: Model, secondary: Model | None, switch: FallbackSwitch, clock: list[datetime]
+) -> Callable[..., Awaitable[str]]:
     return with_fallback(
         primary, secondary, switch=switch, is_temporary=is_temporary, clock=lambda: clock[0]
     )
